@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from noncoop_rpo.constants import MU_EARTH_KM3_S2
-from noncoop_rpo.frames import coe2rv, eci2hcw, hcw2eci
+from noncoop_rpo.frames import coe2rv, eci2hcw_curv, hcw2eci, ric_curv_to_rect
 from noncoop_rpo.hcw_control import build_hcw_lqr
 from noncoop_rpo.sat_params import SatParams
 from noncoop_rpo.satellite import Satellite
@@ -43,18 +43,19 @@ def main() -> None:
     target_params = SatParams(name="target", mu=mu, coe=target_coe)
     x_target0 = target_params.initial_eci_state()
 
-    x0_rel_ric = np.array([0.0, -1.0, 0.1, 0.0, 0.0, 0.0], dtype=float)
-    x_chaser0 = hcw2eci(x_target0, x0_rel_ric)
+    x0_rel_ric_curv = np.array([0.0, -10.0, 0.1, 0.0, 0.0, 0.0], dtype=float)
+    x0_rel_ric_rect = ric_curv_to_rect(x0_rel_ric_curv, r0=np.linalg.norm(x_target0[:3]))
+    x_chaser0 = hcw2eci(x_target0, x0_rel_ric_rect)
 
-    x_rel_check = eci2hcw(x_target0, x_chaser0)
-    print("Initial rel state (RIC) requested: ", x0_rel_ric)
+    x_rel_check = eci2hcw_curv(x_target0, x_chaser0)
+    print("Initial rel state (curv RIC) requested: ", x0_rel_ric_curv)
     print("Initial rel state (RIC) computed : ", x_rel_check)
-    print("Initial RIC round-trip error     : ", x_rel_check - x0_rel_ric)
+    print("Initial RIC round-trip error     : ", x_rel_check - x0_rel_ric_curv)
 
     n = np.sqrt(mu / a_km**3)
     t_orbit = 2 * np.pi / n
     dt = 1.0
-    steps = int(np.ceil(t_orbit*5 / dt))
+    steps = int(np.ceil(t_orbit / dt))
     a_max = 1e-6
     lqr = build_hcw_lqr(n, dt, a_max)
 

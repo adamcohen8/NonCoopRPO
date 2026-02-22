@@ -1,8 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import numpy as np
 
+from .attitude import AttitudeConstraint, AttitudeRateState, apply_attitude_rate_constraint
 from .frames import eci_to_rsw_dcm
 from .sat_params import SatParams
 
@@ -17,6 +18,8 @@ class SatState:
     x_eci: np.ndarray
     dv_remaining_km_s: float
     dv_used_km_s: float = 0.0
+    thrust_axis_ric: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    attitude_slew_rate_rad_s: float = 0.0
 
 
 @dataclass
@@ -33,6 +36,8 @@ class Satellite:
                 t=0.0,
                 x_eci=params.initial_eci_state(),
                 dv_remaining_km_s=params.propellant_dv_km_s,
+                thrust_axis_ric=np.array([1.0, 0.0, 0.0], dtype=float),
+                attitude_slew_rate_rad_s=0.0,
             ),
             policy=policy,
         )
@@ -70,7 +75,23 @@ class Satellite:
             self.state.dv_remaining_km_s = max(0.0, self.state.dv_remaining_km_s - dv_req)
             self.state.dv_used_km_s += dv_req
 
-        return u_ric
+        mag = np.linalg.norm(u_ric)
+        if mag <= 0.0:
+            return np.zeros(3)
+        desired_dir = u_ric / mag
+        constraint = AttitudeConstraint(
+            enabled=self.params.attitude_control_enabled,
+            inertia_body_kg_m2=self.params.inertia_body_kg_m2,
+            max_torque_nm=self.params.max_torque_nm,
+        )
+        rate_state = AttitudeRateState(
+            thrust_axis=np.asarray(self.state.thrust_axis_ric, dtype=float),
+            slew_rate_rad_s=float(self.state.attitude_slew_rate_rad_s),
+        )
+        next_state = apply_attitude_rate_constraint(desired_dir, rate_state, dt_s, constraint)
+        self.state.thrust_axis_ric = next_state.thrust_axis
+        self.state.attitude_slew_rate_rad_s = next_state.slew_rate_rad_s
+        return mag * next_state.thrust_axis
 
     def command_accel_eci(
         self, t: float, x_other_ric_curv: Optional[np.ndarray], host_x_eci: np.ndarray, dt_s: float

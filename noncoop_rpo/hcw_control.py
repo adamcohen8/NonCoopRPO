@@ -66,12 +66,12 @@ def build_hcw_lqr(n, dt, a_max):
     Ad, Bd = discretize(A, B, dt)
 
     # Reasonable default weights
-    Q = np.diag([
-        180.0, 1.0, 1.0,   # position
-        1.8, 1.0, 1.0    # velocity
+    Q = 1e3 * np.diag([
+        8.66, 8.66, 8.66,   # position
+        1.33, 1.33, 1.33    # velocity
     ])
 
-    R = 1e11 * np.eye(3)  # penalize accel
+    R = 1.94e14 * np.eye(3)  # penalize accel
 
     K = dlqr(Ad, Bd, Q, R)
 
@@ -97,7 +97,7 @@ def build_hcw_lqr_position_only(n, dt, a_max):
     Ad, Bd = discretize(A, B, dt)
 
     Q = np.diag([
-        180.0, 1.0, 1.0,   # position
+        1.0, 1.0, 1.0,   # position
         0.0, 0.0, 0.0      # velocity
     ])
     R = 1e11 * np.eye(3)
@@ -107,7 +107,7 @@ def build_hcw_lqr_position_only(n, dt, a_max):
         # Zero velocity weights can be numerically ill-conditioned for DARE.
         # Add a tiny regularization while preserving position-only behavior.
         eps = 1e-12
-        q_reg = np.diag([180.0, 1.0, 1.0, eps, eps, eps])
+        q_reg = np.diag([1.0, 1.0, 1.0, eps, eps, eps])
         K = dlqr(Ad, Bd, q_reg, R)
 
     def controller(x_rel):

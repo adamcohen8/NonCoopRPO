@@ -29,6 +29,8 @@ class CowellResult:
     x_eci: np.ndarray
     a_pert_total_eci: np.ndarray
     a_burn_eci: np.ndarray
+    terminated_early: bool = False
+    termination_reason: str = ""
 
 
 def _ensure_accel(vec: np.ndarray, label: str) -> np.ndarray:
@@ -93,6 +95,7 @@ def propagate_cowell(
     mu: float = MU_EARTH_KM3_S2,
     perturbations: Optional[Sequence[PerturbationFn]] = None,
     burn_fn: Optional[BurnFn] = None,
+    terminate_below_radius_km: Optional[float] = None,
 ) -> CowellResult:
     x0 = np.asarray(x0_eci, dtype=float)
     if x0.shape != (6,):
@@ -101,6 +104,8 @@ def propagate_cowell(
         raise ValueError("dt_s must be positive.")
     if steps < 1:
         raise ValueError("steps must be >= 1.")
+    if terminate_below_radius_km is not None and terminate_below_radius_km <= 0.0:
+        raise ValueError("terminate_below_radius_km must be positive when provided.")
 
     n = steps + 1
     t_log = np.zeros(n, dtype=float)
@@ -110,9 +115,24 @@ def propagate_cowell(
 
     x = x0.copy()
     t = float(t0_s)
+    terminated_early = False
+    termination_reason = ""
     t_log[0] = t
     x_log[0, :] = x
     a_pert_log[0, :], a_burn_log[0, :] = cowell_total_accel_eci(t, x, perturbations=perturbations, burn_fn=burn_fn)
+
+    if terminate_below_radius_km is not None:
+        if np.linalg.norm(x[0:3]) <= terminate_below_radius_km:
+            terminated_early = True
+            termination_reason = "radius_below_termination_threshold"
+            return CowellResult(
+                t_s=t_log[:1].copy(),
+                x_eci=x_log[:1, :].copy(),
+                a_pert_total_eci=a_pert_log[:1, :].copy(),
+                a_burn_eci=a_burn_log[:1, :].copy(),
+                terminated_early=terminated_early,
+                termination_reason=termination_reason,
+            )
 
     def dyn(local_t: float, local_x: np.ndarray) -> np.ndarray:
         return cowell_deriv(local_t, local_x, mu=mu, perturbations=perturbations, burn_fn=burn_fn)
@@ -125,8 +145,27 @@ def propagate_cowell(
         a_pert_log[k + 1, :], a_burn_log[k + 1, :] = cowell_total_accel_eci(
             t, x, perturbations=perturbations, burn_fn=burn_fn
         )
+        if terminate_below_radius_km is not None and np.linalg.norm(x[0:3]) <= terminate_below_radius_km:
+            terminated_early = True
+            termination_reason = "radius_below_termination_threshold"
+            end = k + 2
+            return CowellResult(
+                t_s=t_log[:end].copy(),
+                x_eci=x_log[:end, :].copy(),
+                a_pert_total_eci=a_pert_log[:end, :].copy(),
+                a_burn_eci=a_burn_log[:end, :].copy(),
+                terminated_early=terminated_early,
+                termination_reason=termination_reason,
+            )
 
-    return CowellResult(t_s=t_log, x_eci=x_log, a_pert_total_eci=a_pert_log, a_burn_eci=a_burn_log)
+    return CowellResult(
+        t_s=t_log,
+        x_eci=x_log,
+        a_pert_total_eci=a_pert_log,
+        a_burn_eci=a_burn_log,
+        terminated_early=terminated_early,
+        termination_reason=termination_reason,
+    )
 
 
 def make_drag_perturbation(

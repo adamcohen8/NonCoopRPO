@@ -11,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from noncoop_rpo.constants import MU_EARTH_KM3_S2
 from noncoop_rpo.dynamics import two_body_deriv
-from noncoop_rpo.frames import eci2hcw, eci2hcw_curv, hcw2eci, ric_rect_to_curv
+from noncoop_rpo.frames import eci2hcw, eci2hcw_curv, hcw2eci, ric_curv_to_rect, ric_rect_to_curv
 from noncoop_rpo.integrators import rk4_step
 from noncoop_rpo.orbital_elements import coe2rv
 
@@ -32,8 +32,9 @@ def main() -> None:
     r_t, v_t = coe2rv(p_km, ecc, incl, raan, argp, nu, arglat=nu, truelon=nu, lonper=0.0, mu=mu)
     x_target = np.hstack((r_t, v_t))
 
-    # Start 10 km behind target and +10 m/s along-track in rectangular RIC.
-    x0_rel_rect = np.array([0.0, -100.0, 0.0, 0.0, 0.01, 0.0], dtype=float)
+    # Start 10 km behind target and +10 m/s along-track in curvilinear RIC.
+    x0_rel_curv = np.array([0.0, -100.0, 0.0, 0.0, 0.01, 0.0], dtype=float)
+    x0_rel_rect = ric_curv_to_rect(x0_rel_curv, r0=np.linalg.norm(x_target[:3]))
     x_chaser = hcw2eci(x_target, x0_rel_rect)
 
     n = np.sqrt(mu / a_km**3)

@@ -3,6 +3,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .attitude import AttitudeConstraint
 from .constants import MU_EARTH_KM3_S2
 from .orbital_elements import coe2rv as default_coe2rv
 
@@ -14,6 +15,9 @@ class SatParams:
     max_accel_km_s2: float = 0.0
     min_accel_km_s2: float = 0.0
     propellant_dv_km_s: float = np.inf
+    attitude_control_enabled: bool = False
+    inertia_body_kg_m2: Optional[np.ndarray] = None
+    max_torque_nm: Optional[np.ndarray] = None
     r0_eci_km: Optional[np.ndarray] = None
     v0_eci_km_s: Optional[np.ndarray] = None
     coe: Optional[np.ndarray] = None
@@ -31,6 +35,11 @@ class SatParams:
             raise ValueError("min_accel_km_s2 cannot exceed max_accel_km_s2.")
         if self.propellant_dv_km_s < 0.0:
             raise ValueError("propellant_dv_km_s must be non-negative.")
+        AttitudeConstraint(
+            enabled=self.attitude_control_enabled,
+            inertia_body_kg_m2=self.inertia_body_kg_m2,
+            max_torque_nm=self.max_torque_nm,
+        ).validate("SatParams")
 
     def initial_eci_state(
         self, coe2rv_func: Optional[Callable[..., tuple[np.ndarray, np.ndarray]]] = None
