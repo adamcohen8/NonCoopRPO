@@ -1,15 +1,16 @@
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 
 import numpy as np
 
 from .attitude import AttitudeConstraint, AttitudeRateState, apply_attitude_rate_constraint
 from .frames import eci_to_rsw_dcm
 from .sat_params import SatParams
+from .strategies import PolicyFn, Strategy, StrategyContext, StrategyLike, as_strategy
 
 
-# policy(t_s, x_other_ric_curv, x_self_eci) -> commanded accel in RIC (km/s^2)
-Policy = Callable[[float, np.ndarray, np.ndarray], np.ndarray]
+# Backward-compatibility alias.
+Policy = PolicyFn
 
 
 @dataclass
@@ -26,10 +27,22 @@ class SatState:
 class Satellite:
     params: SatParams
     state: SatState
-    policy: Optional[Policy] = None
+    strategy: Optional[Strategy] = None
 
     @classmethod
-    def from_params(cls, params: SatParams, policy: Optional[Policy] = None) -> "Satellite":
+    def from_params(
+        cls,
+        params: SatParams,
+        policy: Optional[Policy] = None,
+        strategy: Optional[StrategyLike] = None,
+    ) -> "Satellite":
+        if policy is not None and strategy is not None:
+            raise ValueError("Provide at most one of policy or strategy.")
+        strategy_obj: Optional[Strategy] = None
+        if strategy is not None:
+            strategy_obj = as_strategy(strategy)
+        elif policy is not None:
+            strategy_obj = as_strategy(policy)
         return cls(
             params=params,
             state=SatState(
@@ -39,18 +52,47 @@ class Satellite:
                 thrust_axis_ric=np.array([1.0, 0.0, 0.0], dtype=float),
                 attitude_slew_rate_rad_s=0.0,
             ),
-            policy=policy,
+            strategy=strategy_obj,
         )
 
+    @property
+    def policy(self) -> Optional[Policy]:
+        """
+        Backward-compatible access for callable policies.
+        """
+        if self.strategy is None:
+            return None
+        return lambda t_s, x_other_ric_curv, x_self_eci: self.strategy.command_accel_ric(
+            StrategyContext(
+                t_s=t_s,
+                dt_s=0.0,
+                x_self_eci=x_self_eci,
+                x_other_ric_curv=x_other_ric_curv,
+            )
+        )
+
+    @policy.setter
+    def policy(self, value: Optional[Policy]) -> None:
+        self.strategy = None if value is None else as_strategy(value)
+
+    def set_strategy(self, strategy: Optional[StrategyLike]) -> None:
+        self.strategy = None if strategy is None else as_strategy(strategy)
+
     def command_accel_ric(self, t: float, x_other_ric_curv: Optional[np.ndarray], dt_s: float) -> np.ndarray:
-        if self.policy is None:
+        if self.strategy is None:
             return np.zeros(3)
         if x_other_ric_curv is None:
             return np.zeros(3)
 
-        u_ric = np.asarray(self.policy(t, x_other_ric_curv, self.state.x_eci), dtype=float)
+        context = StrategyContext(
+            t_s=t,
+            dt_s=dt_s,
+            x_self_eci=self.state.x_eci,
+            x_other_ric_curv=x_other_ric_curv,
+        )
+        u_ric = np.asarray(self.strategy.command_accel_ric(context), dtype=float)
         if u_ric.shape != (3,):
-            raise ValueError("Policy must return a 3-vector acceleration in RIC.")
+            raise ValueError("Strategy must return a 3-vector acceleration in RIC.")
 
         norm_u = np.linalg.norm(u_ric)
         if norm_u <= 0.0:
