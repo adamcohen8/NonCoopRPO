@@ -82,6 +82,7 @@ from .utils import (
     plot_state_over_time,
     print_master_log_summary,
 )
+from .dashboard import DashboardConfig, launch_dashboard, run_master_sim_from_config
 from .sim import Scenario, SimLogger, Simulator
 
 __all__ = [
@@ -145,6 +146,9 @@ __all__ = [
     "plot_control_input_over_time",
     "plot_state_over_time",
     "PlotOutputMode",
+    "DashboardConfig",
+    "run_master_sim_from_config",
+    "launch_dashboard",
     "Scenario",
     "SimLogger",
     "Simulator",
