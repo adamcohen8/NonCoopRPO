@@ -145,7 +145,28 @@ Outputs under `outputs/full_stack_demo/`.
 
 Outputs under `outputs/full_stack_demo_mc/`.
 
+## Presets Workflow
+
+Use `presets/` when you want to fill simulation parameters from reusable hardware defaults instead of entering values one-by-one.
+
+```python
+from presets import build_sim_object_from_presets
+
+sat = build_sim_object_from_presets(
+    object_id="sat_01",
+    dt_s=2.0,
+    orbit_radius_km=6778.0,
+)
+```
+
+Quick runnable example:
+
+```bash
+.venv/bin/python examples/Preset_Quickstart.py
+```
+
 ## Notes
 
 - Use `.venv/bin/python` in this environment to avoid local system NumPy/Matplotlib ABI mismatches.
+- Plotting default is `interactive` (IDE display). File export is opt-in via `--plot-mode save` or `--plot-mode both`.
 - `noncoop_rpo` now re-exports the new `sim` framework surface for compatibility.

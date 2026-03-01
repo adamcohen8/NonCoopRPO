@@ -1,0 +1,16 @@
+{
+  "min_separation_km": 199.78613083049368,
+  "time_inside_keepout_s": 0.0,
+  "fuel_used_kg_by_object": {
+    "sat_a": 0.03987977103335538,
+    "sat_b": 0.040010981005536905
+  },
+  "compute_overruns_by_object": {
+    "sat_a": 0,
+    "sat_b": 0
+  },
+  "jitter_ms_by_object": {
+    "sat_a": 0.01632200466631117,
+    "sat_b": 0.015460326210240564
+  }
+}

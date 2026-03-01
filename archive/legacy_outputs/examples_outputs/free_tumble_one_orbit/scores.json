@@ -1,0 +1,15 @@
+{
+  "min_separation_km": 0.0,
+  "controller_overruns": {
+    "sat_01": 0
+  },
+  "mean_runtime_ms": {
+    "sat_01": 0.0019167947425282371
+  },
+  "p95_runtime_ms": {
+    "sat_01": 0.0045829999999691395
+  },
+  "jitter_ms": {
+    "sat_01": 0.002635008198669393
+  }
+}

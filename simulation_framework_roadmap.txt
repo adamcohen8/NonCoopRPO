@@ -1,0 +1,129 @@
+SIMULATION FRAMEWORK ROADMAP
+
+Purpose
+
+This document outlines a structured roadmap for building a modular,
+real-time capable orbital engagement simulation framework suitable for
+Software-in-the-Loop (SIL) and Hardware-in-the-Loop (HIL) testing.
+
+North-Star Architecture
+
+Each simulation step should execute in this order:
+
+1)  Truth dynamics propagate (orbit + attitude + mass properties)
+2)  Sensors/knowledge generate measurements (with
+    noise/latency/dropouts)
+3)  Estimator updates beliefs (state + covariance)
+4)  Controllers output commands (subject to compute deadline)
+5)  Actuators apply commands (saturation, lag, impulse bits)
+6)  Scoring logs survivability + compute metrics
+
+Core Data Models
+
+StateTruth: - position/velocity - attitude quaternion - angular rate -
+mass - time
+
+StateBelief: - estimated state(s) - covariance matrices - last update
+time
+
+Command: - thrust vector / impulse - torque command - mode flags
+
+SimConfig: - dt - integrator choice - perturbation selection - real-time
+mode
+
+Module Interfaces
+
+DynamicsModel.step(state, command, env, dt) -> new_state
+SensorModel.measure(truth, env, t) -> measurement
+Estimator.update(belief, measurement, t) -> new_belief
+Controller.act(belief, t, budget_ms) -> command Actuator.apply(command,
+limits, dt) -> applied_command
+
+PHASE 1 – Simulation Kernel
+
+-   Multi-object world model
+-   Deterministic execution order
+-   Real-time scheduler with deadline tracking
+-   Compute time logging and overrun handling
+
+PHASE 2 – Orbital Dynamics
+
+Tier 1: - Two-body Earth gravity - ECI propagation - Fixed-step RK4
+
+Tier 2: - J2 perturbation - Adaptive integrator (RKF78 or
+Dormand-Prince)
+
+Tier 3 (HPOP-like): - Drag model - Solar radiation pressure - Third-body
+perturbations - Frame transformations (ECI/ECEF)
+
+Use plugin-based acceleration models: a_total = a_2body +
+sum(a_perturb_i)
+
+PHASE 3 – Attitude Dynamics
+
+Tier 1: - Quaternion + angular rates - Euler rigid body equations
+
+Tier 2: - Disturbance torques (gravity gradient, magnetic, drag, SRP)
+
+Tier 3: - Reaction wheels - CMGs - Thruster torque coupling - Saturation
+models
+
+PHASE 4 – Actuator Modeling
+
+Orbital: - Continuous thrust - Impulsive thrust - Throttle lag - Minimum
+impulse bit - Mass depletion
+
+Attitude: - Reaction wheel limits - Magnetorquer constraints - Thruster
+pulse modeling
+
+PHASE 5 – Knowledge Module
+
+Sensors: - Own-state sensors (GPS-like, star tracker, IMU) -
+Other-object sensors (angle-only, range, range-rate) - Noise, bias,
+latency, dropouts
+
+Access model: - Ground site visibility - Onboard FOV constraints -
+Update cadence control
+
+Estimator: - EKF or UKF - State + covariance output - Track
+age-of-information
+
+PHASE 6 – Control Modules
+
+Provide a controller SDK with: Controller.act(belief, t, budget_ms) ->
+Command
+
+Baseline orbit strategies: - Stationkeeping - Safety barrier avoidance -
+Risk-threshold maneuvering
+
+Baseline attitude strategies: - Quaternion PD - LQR small-angle
+
+Advanced options: - Robust MPC - Stochastic policies
+
+PHASE 7 – Scoring & Experiment Harness
+
+Metrics: - Minimum separation - Time inside keep-out region - Fuel
+usage - Compute overruns - Jitter statistics
+
+Monte Carlo runner: - Configurable uncertainty parameters - Seed
+control - Automatic plot and JSON output
+
+Suggested Folder Structure
+
+sim/ core/ dynamics/ orbit/ attitude/ actuators/ sensors/ estimation/
+control/ orbit/ attitude/ scenarios/ metrics/ utils/ tests/ examples/
+
+Priority Order
+
+1)  Simulation kernel + real-time scheduler
+2)  Simple 2-body orbital model
+3)  Actuator limits + timeout handling
+4)  Knowledge module with noise and delay
+5)  Baseline strategies + metrics
+6)  Upgrade physics fidelity
+
+End Goal
+
+A modular, real-time capable orbital engagement simulation framework
+that supports closed-loop testing, strategy comparison, Monte Carlo
+analysis, and computational budget enforcement.
