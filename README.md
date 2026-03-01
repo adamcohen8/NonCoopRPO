@@ -1,85 +1,151 @@
 # NonCooperativeRPO
 
-Physics-based simulation toolkit for non-cooperative rendezvous/proximity operations (RPO) and ASAT-style orbital engagement scenarios.
+Modular orbital engagement simulation framework for SIL/HIL-style closed-loop experimentation.
 
-## What It Does
+## Roadmap Implementation Status
 
-- Launch-to-insertion simulation in ECI with gravity and atmospheric drag.
-- Timing modes for launch window selection (`GO_NOW`, `WHEN_FEASIBLE`, `OPTIMAL`).
-- Rocket guidance with:
-  - feedback control,
-  - predictive shooting control,
-  - optional attitude-constrained thrust pointing (inertia + torque limits).
-- Target/chaser propagation and relative motion analysis in curvilinear RIC.
-- Satellite acceleration limits, delta-v accounting, and optional attitude-constrained actuation.
+The framework now implements the full roadmap architecture across phases 1-7.
+
+### Phase 1: Simulation Kernel
+- Deterministic execution order in `sim/core/kernel.py`:
+  1. Truth dynamics propagation
+  2. Sensors/knowledge measurement
+  3. Estimator belief update
+  4. Controller command generation with deadline checks
+  5. Actuator application (saturation/lag/quantization)
+  6. Scoring/logging
+- Multi-object world model with arbitrary object count.
+- Real-time budget enforcement with skip behavior and zero-command fallback.
+- Runtime and overrun logging per object.
+
+### Phase 2: Orbital Dynamics
+- Tier 1:
+  - Two-body Earth gravity
+  - ECI propagation
+  - Fixed-step RK4
+- Tier 2:
+  - J2 perturbation plugin
+  - Adaptive integration via Dormand-Prince 4/5 (`integrator="adaptive"`)
+- Tier 3:
+  - Drag plugin
+  - Solar radiation pressure plugin
+  - Third-body plugins (Moon, Sun)
+  - ECI/ECEF frame transforms
+- Plugin acceleration composition via `OrbitPropagator`.
+
+### Phase 3: Attitude Dynamics
+- Quaternion + angular-rate rigid body equations.
+- Disturbance torques:
+  - gravity-gradient,
+  - magnetic dipole,
+  - drag torque,
+  - SRP torque.
+
+### Phase 4: Actuator Modeling
+- Orbital actuator:
+  - continuous thrust,
+  - lag,
+  - throttle-rate limit,
+  - minimum impulse bit,
+  - propellant mass depletion model.
+- Attitude actuator:
+  - reaction wheel torque and momentum saturation,
+  - magnetorquer command constraints,
+  - thruster pulse quantization.
+
+### Phase 5: Knowledge Module
+- Sensor models:
+  - own-state measurement,
+  - relative angle/range/range-rate.
+- Effects:
+  - noise,
+  - bias,
+  - latency,
+  - dropouts.
+- Access model:
+  - update cadence,
+  - max range,
+  - FOV,
+  - optional line-of-sight visibility check.
+- Estimation:
+  - EKF and UKF implementations,
+  - age-of-information tracking wrapper.
+
+### Phase 6: Control Modules
+- Orbit baseline strategies:
+  - stationkeeping,
+  - safety barrier,
+  - risk-threshold switching.
+- Attitude baseline strategies:
+  - quaternion PD,
+  - small-angle LQR.
+- Advanced strategy scaffolds:
+  - robust MPC wrapper,
+  - stochastic policy wrapper.
+
+### Phase 7: Scoring & Experiment Harness
+- Engagement metrics:
+  - minimum separation,
+  - time inside keep-out region,
+  - fuel usage,
+  - compute overruns,
+  - runtime jitter.
+- Monte Carlo harness:
+  - seed control,
+  - uncertainty injection,
+  - JSON summary output,
+  - automatic histogram plot.
 
 ## Repository Layout
 
-- `noncoop_rpo/`: core simulation library
-- `examples/`: runnable scripts and visualizations
+- `sim/core/`
+- `sim/dynamics/orbit/`
+- `sim/dynamics/attitude/`
+- `sim/actuators/`
+- `sim/sensors/`
+- `sim/estimation/`
+- `sim/control/orbit/`
+- `sim/control/attitude/`
+- `sim/scenarios/`
+- `sim/metrics/`
+- `sim/utils/`
+- `sim/tests/`
+- `sim/examples/` (module placeholder; runnable scripts live in `examples/`)
 
-## Requirements
+## Run Examples
 
-This project is pure Python and uses scientific Python packages. Install at minimum:
+From repo root:
 
-- `numpy`
-- `matplotlib`
-
-## Quick Start
-
-From the repo root:
+### One Orbit Free Tumble
+Interactive plotting default:
 
 ```bash
-python examples/Launch_To_Insertion_RPO_Example.py
+.venv/bin/python examples/Free_Tumble_One_Orbit.py
 ```
 
-Predictive-shooting launch guidance variant:
+Save plots instead:
 
 ```bash
-python examples/Launch_To_Insertion_RPO_PredictiveShooting_Example.py
+.venv/bin/python examples/Free_Tumble_One_Orbit.py --plot-mode save
 ```
 
-## Current Launch Termination Conditions
+### Full Framework Demo
 
-The launch simulation ends on exactly one of:
-
-- `out_of_fuel`
-- `insertion_orbit_achieved`
-- `max_time_reached`
-
-## Enabling Attitude Constraints
-
-Attitude limits are **off by default** for both rockets and satellites.
-
-### Rocket
-
-```python
-from noncoop_rpo import Rocket
-import numpy as np
-
-rocket = Rocket(
-    # existing fields...
-    attitude_control_enabled=True,
-    inertia_body_kg_m2=np.diag([9000.0, 7000.0, 6500.0]),
-    max_torque_nm=np.array([1500.0, 1200.0, 1200.0]),
-)
+```bash
+.venv/bin/python examples/Full_Framework_Demo.py
 ```
 
-### Satellite
+Outputs under `outputs/full_stack_demo/`.
 
-```python
-from noncoop_rpo import SatParams
-import numpy as np
+### Monte Carlo Harness
 
-sat = SatParams(
-    # existing fields...
-    attitude_control_enabled=True,
-    inertia_body_kg_m2=np.diag([120.0, 100.0, 80.0]),
-    max_torque_nm=np.array([0.5, 0.5, 0.5]),
-)
+```bash
+.venv/bin/python examples/MonteCarlo_Framework_Run.py
 ```
+
+Outputs under `outputs/full_stack_demo_mc/`.
 
 ## Notes
 
-- Launch guidance currently supports both classic feedback and predictive shooting (`Rocket.guidance_mode`).
-- Example scripts include trajectory, relative-motion, altitude, and thrust-vs-time plots.
+- Use `.venv/bin/python` in this environment to avoid local system NumPy/Matplotlib ABI mismatches.
+- `noncoop_rpo` now re-exports the new `sim` framework surface for compatibility.
