@@ -2,99 +2,125 @@
 
 Modular orbital engagement simulation framework for SIL/HIL-style closed-loop experimentation.
 
-## Roadmap Implementation Status
+## Current Status
 
-The framework now implements the full roadmap architecture across phases 1-7.
+The roadmap architecture is implemented across simulation kernel, dynamics, sensing/estimation, controls, metrics, and example harnesses.
 
-### Phase 1: Simulation Kernel
-- Deterministic execution order in `sim/core/kernel.py`:
-  1. Truth dynamics propagation
-  2. Sensors/knowledge measurement
-  3. Estimator belief update
-  4. Controller command generation with deadline checks
-  5. Actuator application (saturation/lag/quantization)
-  6. Scoring/logging
-- Multi-object world model with arbitrary object count.
-- Real-time budget enforcement with skip behavior and zero-command fallback.
-- Runtime and overrun logging per object.
+## Implemented Capabilities
 
-### Phase 2: Orbital Dynamics
-- Tier 1:
-  - Two-body Earth gravity
-  - ECI propagation
-  - Fixed-step RK4
-- Tier 2:
-  - J2 perturbation plugin
-  - Adaptive integration via Dormand-Prince 4/5 (`integrator="adaptive"`)
-- Tier 3:
-  - Drag plugin
-  - Solar radiation pressure plugin
-  - Third-body plugins (Moon, Sun)
-  - ECI/ECEF frame transforms
-- Plugin acceleration composition via `OrbitPropagator`.
+### Simulation Kernel
+- Deterministic step order in `sim/core/kernel.py`:
+  1. truth propagation
+  2. sensor measurement
+  3. estimator update
+  4. controller execution with runtime budget check
+  5. actuator application
+  6. logging
+- Arbitrary number of simulated objects.
+- Runtime budget enforcement with skip-to-zero-command behavior.
+- Per-object runtime and skip logging.
 
-### Phase 3: Attitude Dynamics
-- Quaternion + angular-rate rigid body equations.
-- Disturbance torques:
-  - gravity-gradient,
-  - magnetic dipole,
-  - drag torque,
-  - SRP torque.
+### Orbital Dynamics
+- Two-body ECI propagation.
+- Optional perturbation plugins:
+  - J2
+  - drag
+  - solar radiation pressure
+  - third-body Moon/Sun
+- Fixed-step and adaptive propagation options through `OrbitPropagator`.
 
-### Phase 4: Actuator Modeling
+### Attitude Dynamics
+- Quaternion + body-rate rigid body dynamics.
+- Optional disturbance torques:
+  - gravity-gradient
+  - magnetic dipole
+  - drag torque
+  - SRP torque
+
+### Actuators
 - Orbital actuator:
-  - continuous thrust,
-  - lag,
-  - throttle-rate limit,
-  - minimum impulse bit,
-  - propellant mass depletion model.
+  - acceleration saturation
+  - throttle slew-rate limiting
+  - minimum impulse-bit behavior
+  - optional lag
+  - propellant mass depletion
 - Attitude actuator:
-  - reaction wheel torque and momentum saturation,
-  - magnetorquer command constraints,
-  - thruster pulse quantization.
+  - reaction wheel torque/momentum limits
+  - magnetorquer clamping proxy
+  - thruster pulse quantization
 
-### Phase 5: Knowledge Module
-- Sensor models:
-  - own-state measurement,
-  - relative angle/range/range-rate.
-- Effects:
-  - noise,
-  - bias,
-  - latency,
-  - dropouts.
-- Access model:
-  - update cadence,
-  - max range,
-  - FOV,
-  - optional line-of-sight visibility check.
-- Estimation:
-  - EKF and UKF implementations,
-  - age-of-information tracking wrapper.
+### Sensing and Estimation
+- Sensors:
+  - own-state
+  - noisy own-state
+  - joint state
+  - relative measurement
+  - access gating
+- Estimators:
+  - Orbit EKF
+  - Orbit UKF
+  - Attitude EKF
+  - Joint state estimators
+  - AoI tracking wrapper
 
-### Phase 6: Control Modules
-- Orbit baseline strategies:
-  - stationkeeping,
-  - safety barrier,
-  - risk-threshold switching.
-- Attitude baseline strategies:
-  - quaternion PD,
-  - small-angle LQR.
-- Advanced strategy scaffolds:
-  - robust MPC wrapper,
-  - stochastic policy wrapper.
+### Control
+- Orbital baseline controllers:
+  - stationkeeping
+  - safety barrier
+  - risk-threshold switching
+- Orbital maneuvering:
+  - impulsive desired-velocity command
+  - impulsive delta-V vector command
+  - thrust-limited delta-V command
+  - minimum-thrust enforcement (below minimum => no fire)
+  - optional attitude-alignment gating with tolerance
+  - required attitude target (`quat_bn`) solver from thrust vector
+- Integrated orbital + attitude maneuver coordinator:
+  - evaluates burn feasibility in current pose
+  - if aligned and feasible => fire
+  - if misaligned => slew target attitude, no fire
+  - if below min thrust => slew target attitude, no fire
+  - exposes controller-ready target attitude for downstream attitude control
+- Orbital LQR:
+  - `HCWLQRController` expects **curvilinear RIC relative state**
+  - internally converts curvilinear RIC -> rectangular RIC for HCW/LQR
+  - computes control in RIC and outputs thrust command in **ECI**
+- Attitude controllers:
+  - zero torque
+  - snap
+  - snap-and-hold (RIC mode flag path)
+  - quaternion PD
+  - generalized small-angle LQR with configurable inertia and wheel mounting geometry
 
-### Phase 7: Scoring & Experiment Harness
-- Engagement metrics:
-  - minimum separation,
-  - time inside keep-out region,
-  - fuel usage,
-  - compute overruns,
-  - runtime jitter.
-- Monte Carlo harness:
-  - seed control,
-  - uncertainty injection,
-  - JSON summary output,
-  - automatic histogram plot.
+### Scoring and Harness
+- Engagement metrics and score summary utilities.
+- Monte Carlo harness with seed control and JSON summaries.
+
+## Frames and Conventions
+
+- Primary truth orbit state: ECI.
+- Attitude quaternion convention: `quat_bn` (body relative to inertial/ECI).
+- Free-tumble RIC plotting utilities are available in examples.
+- Orbital HCW LQR input/output handling:
+  - input state to controller: curvilinear RIC
+  - control law state: rectangular RIC (internal)
+  - final command to actuator: ECI acceleration vector
+
+## Presets
+
+`presets/` provides reusable parameter sets for rapid simulation setup:
+- rockets (SSTO, stage presets)
+- satellites
+- thrusters (including mounted chemical thruster)
+- attitude control hardware (reaction wheel presets)
+
+Quickstart:
+
+```python
+from presets import build_sim_object_from_presets
+
+sat = build_sim_object_from_presets(object_id="sat_01", dt_s=2.0, orbit_radius_km=6778.0)
+```
 
 ## Repository Layout
 
@@ -110,63 +136,30 @@ The framework now implements the full roadmap architecture across phases 1-7.
 - `sim/metrics/`
 - `sim/utils/`
 - `sim/tests/`
-- `sim/examples/` (module placeholder; runnable scripts live in `examples/`)
+- `examples/`
+- `presets/`
+- `archive/`
 
-## Run Examples
+## Example Scripts
 
 From repo root:
 
-### One Orbit Free Tumble
-Interactive plotting default:
-
 ```bash
 .venv/bin/python examples/Free_Tumble_One_Orbit.py
-```
-
-Save plots instead:
-
-```bash
-.venv/bin/python examples/Free_Tumble_One_Orbit.py --plot-mode save
-```
-
-### Full Framework Demo
-
-```bash
+.venv/bin/python examples/Free_Tumble_One_Orbit_RIC.py
+.venv/bin/python examples/Satellite_One_Orbit_StateKnowledge.py
+.venv/bin/python examples/Satellite_One_Orbit_AttitudeKnowledge.py
+.venv/bin/python examples/Impulsive_Maneuver_Demo.py
+.venv/bin/python examples/Impulsive_DeltaV_Vector_Demo.py
+.venv/bin/python examples/Impulsive_DeltaV_ThrustLimited_Demo.py
+.venv/bin/python examples/Orbit_HCW_LQR_Demo.py
 .venv/bin/python examples/Full_Framework_Demo.py
-```
-
-Outputs under `outputs/full_stack_demo/`.
-
-### Monte Carlo Harness
-
-```bash
 .venv/bin/python examples/MonteCarlo_Framework_Run.py
-```
-
-Outputs under `outputs/full_stack_demo_mc/`.
-
-## Presets Workflow
-
-Use `presets/` when you want to fill simulation parameters from reusable hardware defaults instead of entering values one-by-one.
-
-```python
-from presets import build_sim_object_from_presets
-
-sat = build_sim_object_from_presets(
-    object_id="sat_01",
-    dt_s=2.0,
-    orbit_radius_km=6778.0,
-)
-```
-
-Quick runnable example:
-
-```bash
 .venv/bin/python examples/Preset_Quickstart.py
 ```
 
 ## Notes
 
-- Use `.venv/bin/python` in this environment to avoid local system NumPy/Matplotlib ABI mismatches.
-- Plotting default is `interactive` (IDE display). File export is opt-in via `--plot-mode save` or `--plot-mode both`.
-- `noncoop_rpo` now re-exports the new `sim` framework surface for compatibility.
+- Use `.venv/bin/python` in this environment to avoid local NumPy/Matplotlib ABI mismatch issues.
+- Plotting default is interactive IDE display; file export is opt-in where supported by script flags.
+- `noncoop_rpo` re-exports the `sim` framework surface for compatibility.

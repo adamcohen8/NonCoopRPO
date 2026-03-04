@@ -21,7 +21,7 @@ from sim.sensors.joint_state import JointStateSensor
 
 def run_one_orbit_attitude_knowledge(plot_mode: str = "interactive") -> dict[str, str]:
     dt_s = 2.0
-    update_cadence_s = 500.0
+    update_cadence_s = 2.0
     sat = build_sim_object_from_presets(
         object_id="sat_att_knowledge",
         dt_s=dt_s,

@@ -20,7 +20,7 @@ from sim.sensors.models import OwnStateSensor, SensorNoiseConfig
 
 def run_one_orbit_state_knowledge(plot_mode: str = "interactive") -> dict[str, str]:
     dt_s = 2.0
-    update_cadence_s = 500.0
+    update_cadence_s = 2.0
     sat = build_sim_object_from_presets(
         object_id="sat_knowledge",
         dt_s=dt_s,
@@ -29,7 +29,7 @@ def run_one_orbit_state_knowledge(plot_mode: str = "interactive") -> dict[str, s
         enable_disturbances=False,
     )
     sat.sensor = OwnStateSensor(
-        noise=SensorNoiseConfig(sigma=np.array([1e-3, 1e-3, 1e-3, 1e-5, 1e-5, 1e-5])),
+        noise=SensorNoiseConfig(sigma=np.array([1e-2, 1e-2, 1e-2, 1e-4, 1e-4, 1e-4])),
         rng=np.random.default_rng(123),
         access_model=AccessModel(AccessConfig(update_cadence_s=update_cadence_s)),
     )
