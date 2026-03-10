@@ -74,6 +74,39 @@ def encode_sensor_packet(state: SimSensorState, seq: int, sim_time_ns: int) -> b
     return _pack_header(MSG_SIM_SENSOR_STATE, seq, sim_time_ns) + payload
 
 
+def decode_sensor_packet(raw: bytes) -> tuple[int, int, SimSensorState]:
+    msg_id, seq, sim_time_ns = _unpack_header(raw)
+    if msg_id != MSG_SIM_SENSOR_STATE:
+        raise ValueError(f"Unexpected msg_id 0x{msg_id:04X}.")
+    payload = raw[HEADER_SIZE:]
+    if len(payload) != SENSOR_SIZE:
+        raise ValueError(f"Invalid sensor payload size {len(payload)} != {SENSOR_SIZE}.")
+    values = struct.unpack(SENSOR_FMT, payload)
+    st = SimSensorState(
+        valid_flags=int(values[0]),
+        pos_eci_km=np.array(values[1:4], dtype=float),
+        vel_eci_km_s=np.array(values[4:7], dtype=float),
+        quat_bn=np.array(values[7:11], dtype=float),
+        omega_body_rad_s=np.array(values[11:14], dtype=float),
+        mass_kg=float(values[14]),
+        sun_dir_eci=np.array(values[15:18], dtype=float),
+        density_kg_m3=float(values[18]),
+    )
+    return seq, sim_time_ns, st
+
+
+def encode_command_packet(cmd: CfsActuatorCommand, seq: int, sim_time_ns: int) -> bytes:
+    payload = struct.pack(
+        CMD_FMT,
+        int(cmd.mode),
+        *np.array(cmd.thrust_eci_km_s2, dtype=float).reshape(3),
+        *np.array(cmd.torque_body_nm, dtype=float).reshape(3),
+        *np.array(cmd.wheel_torque_nm, dtype=float).reshape(3),
+        int(cmd.valid_timeout_ms),
+    )
+    return _pack_header(MSG_CFS_ACTUATOR_CMD, seq, sim_time_ns) + payload
+
+
 def decode_command_packet(raw: bytes) -> tuple[int, int, CfsActuatorCommand]:
     msg_id, seq, sim_time_ns = _unpack_header(raw)
     if msg_id != MSG_CFS_ACTUATOR_CMD:
