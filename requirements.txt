@@ -1,0 +1,14 @@
+# Core numerical + plotting stack
+# Pin numpy<2 to avoid binary ABI mismatches with some prebuilt matplotlib wheels.
+numpy<2.0
+matplotlib>=3.7
+
+# Progress bars used in Monte Carlo / ML loops
+tqdm>=4.65
+
+# Machine learning stack
+torch>=2.1
+lightning>=2.2
+
+# Optional: enable NRLMSISE-00 atmospheric model backend
+# nrlmsise00>=0.1.2
