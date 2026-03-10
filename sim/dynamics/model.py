@@ -7,9 +7,12 @@ import numpy as np
 from sim.core.interfaces import DynamicsModel
 from sim.core.models import Command, StateTruth
 from sim.dynamics.attitude.disturbances import DisturbanceTorqueModel
-from sim.dynamics.attitude.rigid_body import propagate_attitude_euler
+from sim.dynamics.attitude.rigid_body import propagate_attitude_exponential_map
+from sim.dynamics.orbit.environment import EARTH_ROT_RATE_RAD_S
 from sim.dynamics.orbit.accelerations import OrbitContext
 from sim.dynamics.orbit.propagator import OrbitPropagator
+from sim.dynamics.spacecraft_geometry import RectangularPrismGeometry
+from sim.utils.quaternion import quaternion_to_dcm_bn
 
 
 @dataclass(frozen=True)
@@ -20,9 +23,41 @@ class OrbitalAttitudeDynamics(DynamicsModel):
     area_m2: float = 1.0
     cd: float = 2.2
     cr: float = 1.2
+    use_rectangular_prism_for_aero_srp: bool = False
+    rectangular_prism_dims_m: tuple[float, float, float] | None = None
+    orbit_substep_s: float | None = None
+    attitude_substep_s: float | None = None
     orbit_propagator: OrbitPropagator = field(default_factory=lambda: OrbitPropagator(integrator="rk4"))
 
+    def __post_init__(self) -> None:
+        if self.use_rectangular_prism_for_aero_srp:
+            if self.rectangular_prism_dims_m is None:
+                raise ValueError(
+                    "rectangular_prism_dims_m must be provided when use_rectangular_prism_for_aero_srp=True."
+                )
+            if self.disturbance_model is None:
+                raise ValueError(
+                    "Rectangular prism aero/SRP mode requires coupled orbit+attitude disturbance simulation "
+                    "(disturbance_model must be set)."
+                )
+
     def step(self, state: StateTruth, command: Command, env: dict, dt_s: float) -> StateTruth:
+        env_local = dict(env)
+        geom = self._rectangular_prism_geometry()
+        if self.use_rectangular_prism_for_aero_srp and geom is not None and self.disturbance_model is not None:
+            c_bn = quaternion_to_dcm_bn(state.attitude_quat_bn)
+            omega_earth = np.array([0.0, 0.0, EARTH_ROT_RATE_RAD_S], dtype=float)
+            v_atm_eci_km_s = np.cross(omega_earth, state.position_eci_km)
+            v_rel_eci_km_s = state.velocity_eci_km_s - v_atm_eci_km_s
+            v_rel_body = c_bn @ v_rel_eci_km_s
+            env_local["drag_area_m2"] = geom.projected_area_m2(v_rel_body)
+
+            sun_dir_eci = np.array(env_local.get("sun_dir_eci", np.array([1.0, 0.0, 0.0])), dtype=float)
+            s_norm = float(np.linalg.norm(sun_dir_eci))
+            if s_norm > 0.0:
+                sun_dir_body = c_bn @ (sun_dir_eci / s_norm)
+                env_local["srp_area_m2"] = geom.projected_area_m2(sun_dir_body)
+
         x_orbit = np.hstack((state.position_eci_km, state.velocity_eci_km_s))
         orbit_ctx = OrbitContext(
             mu_km3_s2=self.mu_km3_s2,
@@ -31,27 +66,36 @@ class OrbitalAttitudeDynamics(DynamicsModel):
             cd=self.cd,
             cr=self.cr,
         )
-        x_orbit_next = self.orbit_propagator.propagate(
-            x_eci=x_orbit,
-            dt_s=dt_s,
-            t_s=state.t_s,
-            command_accel_eci_km_s2=command.thrust_eci_km_s2,
-            env=env,
-            ctx=orbit_ctx,
-        )
+        orbit_dt = self._effective_substep(self.orbit_substep_s, dt_s)
+        x_orbit_next = x_orbit.copy()
+        t_local = state.t_s
+        for h in self._substep_sequence(dt_s, orbit_dt):
+            x_orbit_next = self.orbit_propagator.propagate(
+                x_eci=x_orbit_next,
+                dt_s=h,
+                t_s=t_local,
+                command_accel_eci_km_s2=command.thrust_eci_km_s2,
+                env=env_local,
+                ctx=orbit_ctx,
+            )
+            t_local += h
 
         disturbance_torque = (
-            np.zeros(3) if self.disturbance_model is None else self.disturbance_model.total_torque_body_nm(state, env)
+            np.zeros(3) if self.disturbance_model is None else self.disturbance_model.total_torque_body_nm(state, env_local)
         )
         total_torque = command.torque_body_nm + disturbance_torque
 
-        q_next, w_next = propagate_attitude_euler(
-            quat_bn=state.attitude_quat_bn,
-            omega_body_rad_s=state.angular_rate_body_rad_s,
-            inertia_kg_m2=self.inertia_kg_m2,
-            torque_body_nm=total_torque,
-            dt_s=dt_s,
-        )
+        att_dt = self._effective_substep(self.attitude_substep_s, dt_s)
+        q_next = state.attitude_quat_bn.copy()
+        w_next = state.angular_rate_body_rad_s.copy()
+        for h in self._substep_sequence(dt_s, att_dt):
+            q_next, w_next = propagate_attitude_exponential_map(
+                quat_bn=q_next,
+                omega_body_rad_s=w_next,
+                inertia_kg_m2=self.inertia_kg_m2,
+                torque_body_nm=total_torque,
+                dt_s=h,
+            )
         delta_mass_kg = float(command.mode_flags.get("delta_mass_kg", 0.0))
         mass_next = max(0.0, state.mass_kg - delta_mass_kg)
 
@@ -63,3 +107,26 @@ class OrbitalAttitudeDynamics(DynamicsModel):
             mass_kg=mass_next,
             t_s=state.t_s + dt_s,
         )
+
+    def _rectangular_prism_geometry(self) -> RectangularPrismGeometry | None:
+        dims = self.rectangular_prism_dims_m
+        if dims is None:
+            return None
+        return RectangularPrismGeometry(lx_m=float(dims[0]), ly_m=float(dims[1]), lz_m=float(dims[2]))
+
+    @staticmethod
+    def _effective_substep(substep_s: float | None, dt_s: float) -> float:
+        if substep_s is None:
+            return dt_s
+        return max(min(float(substep_s), dt_s), 1e-9)
+
+    @staticmethod
+    def _substep_sequence(total_dt_s: float, h_s: float) -> list[float]:
+        if h_s >= total_dt_s:
+            return [float(total_dt_s)]
+        n = int(np.floor(total_dt_s / h_s))
+        steps = [float(h_s)] * n
+        rem = float(total_dt_s - n * h_s)
+        if rem > 1e-12:
+            steps.append(rem)
+        return steps

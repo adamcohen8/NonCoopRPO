@@ -56,6 +56,10 @@ def build_sim_object_from_presets(
     controller_budget_ms: float = 1.0,
     enable_disturbances: bool = False,
     enable_attitude_knowledge: bool = False,
+    use_rectangular_prism_aero_srp: bool = False,
+    rectangular_prism_dims_m: tuple[float, float, float] | None = None,
+    orbit_substep_s: float | None = None,
+    attitude_substep_s: float | None = None,
 ) -> SimObject:
     rng = np.random.default_rng(0) if rng is None else rng
     attitude_quat_bn = np.array([1.0, 0.0, 0.0, 0.0]) if attitude_quat_bn is None else np.array(attitude_quat_bn)
@@ -89,13 +93,22 @@ def build_sim_object_from_presets(
             last_update_t_s=0.0,
         )
 
+    if use_rectangular_prism_aero_srp and not enable_disturbances:
+        raise ValueError(
+            "Rectangular prism aero/SRP mode requires coupled orbit+attitude disturbance simulation (enable_disturbances=True)."
+        )
+    prism_dims = satellite.bus_size_m if rectangular_prism_dims_m is None else rectangular_prism_dims_m
+
     if enable_disturbances:
         from sim.dynamics.attitude.disturbances import DisturbanceTorqueConfig, DisturbanceTorqueModel
 
         disturbance = DisturbanceTorqueModel(
             mu_km3_s2=EARTH_MU_KM3_S2,
             inertia_kg_m2=satellite.inertia_kg_m2,
-            config=DisturbanceTorqueConfig(),
+            config=DisturbanceTorqueConfig(
+                use_rectangular_prism_faces=bool(use_rectangular_prism_aero_srp),
+                rectangular_prism_dims_m=tuple(float(v) for v in prism_dims) if use_rectangular_prism_aero_srp else None,
+            ),
         )
     else:
         disturbance = None
@@ -104,6 +117,10 @@ def build_sim_object_from_presets(
         mu_km3_s2=EARTH_MU_KM3_S2,
         inertia_kg_m2=satellite.inertia_kg_m2,
         disturbance_model=disturbance,
+        use_rectangular_prism_for_aero_srp=bool(use_rectangular_prism_aero_srp),
+        rectangular_prism_dims_m=tuple(float(v) for v in prism_dims) if use_rectangular_prism_aero_srp else None,
+        orbit_substep_s=orbit_substep_s,
+        attitude_substep_s=attitude_substep_s,
     )
 
     orbit_estimator = OrbitEKFEstimator(

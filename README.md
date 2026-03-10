@@ -4,7 +4,7 @@ Modular orbital engagement simulation framework for SIL/HIL-style closed-loop ex
 
 ## Current Status
 
-The roadmap architecture is implemented across simulation kernel, dynamics, sensing/estimation, controls, metrics, and example harnesses.
+Core architecture is implemented across simulation kernel, orbit/attitude dynamics, sensing/estimation, controls, optimization, ML training harnesses, and integration stubs.
 
 ## Implemented Capabilities
 
@@ -24,9 +24,18 @@ The roadmap architecture is implemented across simulation kernel, dynamics, sens
 - Two-body ECI propagation.
 - Optional perturbation plugins:
   - J2
+  - J3
+  - J4
   - drag
   - solar radiation pressure
   - third-body Moon/Sun
+- Configurable atmospheric density backends for drag:
+  - exponential
+  - USSA1976
+  - NRLMSISE-00 (via optional backend/callable hook)
+- Earth rotation is included in atmosphere-relative drag velocity.
+- Optional generic spherical harmonics plugin for sectoral/tesseral terms:
+  - user specifies arbitrary `(n, m, c_nm, s_nm)` terms.
 - Fixed-step and adaptive propagation options through `OrbitPropagator`.
 
 ### Attitude Dynamics
@@ -36,6 +45,11 @@ The roadmap architecture is implemented across simulation kernel, dynamics, sens
   - magnetic dipole
   - drag torque
   - SRP torque
+- Optional rectangular-prism coupling mode (non-default):
+  - user sets `Lx, Ly, Lz`
+  - attitude-dependent projected area for drag and SRP in orbit propagation
+  - face-based drag/SRP disturbance torque from individual face forces
+  - requires coupled orbit+attitude disturbance simulation to be enabled
 
 ### Actuators
 - Orbital actuator:
@@ -75,6 +89,7 @@ The roadmap architecture is implemented across simulation kernel, dynamics, sens
   - minimum-thrust enforcement (below minimum => no fire)
   - optional attitude-alignment gating with tolerance
   - required attitude target (`quat_bn`) solver from thrust vector
+  - predictive burn scheduler (future-state planning + burn gate)
 - Integrated orbital + attitude maneuver coordinator:
   - evaluates burn feasibility in current pose
   - if aligned and feasible => fire
@@ -85,16 +100,22 @@ The roadmap architecture is implemented across simulation kernel, dynamics, sens
   - `HCWLQRController` expects **curvilinear RIC relative state**
   - internally converts curvilinear RIC -> rectangular RIC for HCW/LQR
   - computes control in RIC and outputs thrust command in **ECI**
+  - curvilinear-input/rectangular-LQR variant available
 - Attitude controllers:
   - zero torque
   - snap
   - snap-and-hold (RIC mode flag path)
   - quaternion PD
+  - reaction-wheel PD/PID (ECI and RIC-frame wrappers)
   - generalized small-angle LQR with configurable inertia and wheel mounting geometry
 
 ### Scoring and Harness
 - Engagement metrics and score summary utilities.
 - Monte Carlo harness with seed control and JSON summaries.
+- Controller gain optimization framework with pluggable interface:
+  - PSO backend implemented
+  - preset and custom test-case support
+  - equal-weight aggregate cost across cases
 
 ## Frames and Conventions
 
@@ -105,6 +126,18 @@ The roadmap architecture is implemented across simulation kernel, dynamics, sens
   - input state to controller: curvilinear RIC
   - control law state: rectangular RIC (internal)
   - final command to actuator: ECI acceleration vector
+
+## Rocket Ascent Engine (Dedicated)
+
+`sim/rocket/` provides a dedicated launch-to-insertion simulation path:
+- multi-stage mass/thrust propagation with stage separation
+- launch initialization from site/azimuth
+- coupled orbit + attitude propagation
+- guidance-law interface for ascent logic
+- insertion criteria (target altitude/eccentricity + hold time)
+
+Demo:
+- `examples/Rocket_Launch_To_Orbit_Demo.py`
 
 ## Presets
 
@@ -134,10 +167,13 @@ sat = build_sim_object_from_presets(object_id="sat_01", dt_s=2.0, orbit_radius_k
 - `sim/control/attitude/`
 - `sim/scenarios/`
 - `sim/metrics/`
+- `sim/optimization/`
+- `sim/rocket/`
 - `sim/utils/`
 - `sim/tests/`
 - `examples/`
 - `presets/`
+- `integrations/`
 - `archive/`
 
 ## Example Scripts
@@ -153,10 +189,35 @@ From repo root:
 .venv/bin/python examples/Impulsive_DeltaV_Vector_Demo.py
 .venv/bin/python examples/Impulsive_DeltaV_ThrustLimited_Demo.py
 .venv/bin/python examples/Orbit_HCW_LQR_Demo.py
+.venv/bin/python examples/Orbit_HCW_LQR_CurvVariant_Demo.py
+.venv/bin/python examples/Orbit_OneOrbit_PerturbationError_Demo.py
 .venv/bin/python examples/Full_Framework_Demo.py
 .venv/bin/python examples/MonteCarlo_Framework_Run.py
+.venv/bin/python examples/MonteCarlo_Rendezvous_PredictiveEKF.py
+.venv/bin/python examples/Rendezvous_HCW_AttitudeLQR_Demo.py
+.venv/bin/python examples/Rendezvous_HCW_AttitudeLQR_PredictiveEKF_Demo.py
+.venv/bin/python examples/Rendezvous_HCW_AttitudePD_PredictiveEKF_Demo.py
+.venv/bin/python examples/Attitude_PD_ReactionWheel_Demo.py
+.venv/bin/python examples/Attitude_PD_RIC_ReactionWheel_Demo.py
+.venv/bin/python examples/Attitude_PID_RIC_ReactionWheel_Demo.py
+.venv/bin/python examples/Optimize_Attitude_Controller_Gains.py
+.venv/bin/python examples/Object_Knowledge_EKF_Demo.py
+.venv/bin/python examples/Train_NN_Rendezvous_PPO.py
+.venv/bin/python examples/Train_NN_AttitudeRIC_PPO.py
+.venv/bin/python examples/Demo_NN_Rendezvous_BestEpoch.py
+.venv/bin/python examples/Demo_NN_AttitudeRIC_BestEpoch.py
+.venv/bin/python examples/Rocket_Launch_To_Orbit_Demo.py
+.venv/bin/python examples/CFS_SIL_SingleSat_Loop_Demo.py
 .venv/bin/python examples/Preset_Quickstart.py
 ```
+
+## cFS SIL Starter
+
+`integrations/cfs_sil/` includes:
+- UDP ICD (`icd.yaml`)
+- Python bridge endpoint (`python_bridge.py`)
+- cFS app stub (`cfs_app_stub/`)
+- simulator loop adapter + demo integration
 
 ## Notes
 

@@ -22,6 +22,31 @@ def omega_matrix(w_body_rad_s: np.ndarray) -> np.ndarray:
     )
 
 
+def quaternion_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    a0, a1, a2, a3 = normalize_quaternion(np.array(q1, dtype=float))
+    b0, b1, b2, b3 = normalize_quaternion(np.array(q2, dtype=float))
+    return np.array(
+        [
+            a0 * b0 - a1 * b1 - a2 * b2 - a3 * b3,
+            a0 * b1 + a1 * b0 + a2 * b3 - a3 * b2,
+            a0 * b2 - a1 * b3 + a2 * b0 + a3 * b1,
+            a0 * b3 + a1 * b2 - a2 * b1 + a3 * b0,
+        ],
+        dtype=float,
+    )
+
+
+def quaternion_delta_from_body_rate(omega_body_rad_s: np.ndarray, dt_s: float) -> np.ndarray:
+    w = np.array(omega_body_rad_s, dtype=float).reshape(3)
+    w_norm = float(np.linalg.norm(w))
+    if w_norm <= 1e-15 or dt_s == 0.0:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    half_theta = 0.5 * w_norm * dt_s
+    axis = w / w_norm
+    s = float(np.sin(half_theta))
+    return np.array([float(np.cos(half_theta)), axis[0] * s, axis[1] * s, axis[2] * s], dtype=float)
+
+
 def quaternion_to_dcm_bn(q_bn: np.ndarray) -> np.ndarray:
     q0, q1, q2, q3 = normalize_quaternion(q_bn)
     return np.array(

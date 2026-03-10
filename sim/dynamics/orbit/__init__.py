@@ -1,26 +1,65 @@
-from sim.dynamics.orbit.accelerations import OrbitContext, accel_drag, accel_j2, accel_srp, accel_third_body, accel_two_body
-from sim.dynamics.orbit.environment import EARTH_J2, EARTH_MU_KM3_S2, EARTH_RADIUS_KM
+from sim.dynamics.orbit.accelerations import (
+    OrbitContext,
+    accel_drag,
+    accel_j2,
+    accel_j3,
+    accel_j4,
+    accel_srp,
+    accel_third_body,
+    accel_two_body,
+)
+from sim.dynamics.orbit.atmosphere import (
+    AtmosphereModelName,
+    density_exponential,
+    density_from_model,
+    density_nrlmsise00,
+    density_ussa1976,
+)
+from sim.dynamics.orbit.environment import EARTH_J2, EARTH_J3, EARTH_J4, EARTH_MU_KM3_S2, EARTH_RADIUS_KM
 from sim.dynamics.orbit.propagator import (
     OrbitPropagator,
     drag_plugin,
     j2_plugin,
+    j3_plugin,
+    j4_plugin,
+    spherical_harmonics_plugin,
     srp_plugin,
     third_body_moon_plugin,
     third_body_sun_plugin,
+)
+from sim.dynamics.orbit.spherical_harmonics import (
+    SphericalHarmonicTerm,
+    accel_spherical_harmonics_terms,
+    parse_spherical_harmonic_terms,
 )
 
 __all__ = [
     "EARTH_MU_KM3_S2",
     "EARTH_RADIUS_KM",
     "EARTH_J2",
+    "EARTH_J3",
+    "EARTH_J4",
+    "AtmosphereModelName",
+    "SphericalHarmonicTerm",
     "OrbitContext",
     "accel_two_body",
     "accel_j2",
+    "accel_j3",
+    "accel_j4",
     "accel_drag",
     "accel_srp",
     "accel_third_body",
+    "accel_spherical_harmonics_terms",
+    "density_exponential",
+    "density_ussa1976",
+    "density_nrlmsise00",
+    "density_from_model",
+    "parse_spherical_harmonic_terms",
     "OrbitPropagator",
     "j2_plugin",
+    "j3_plugin",
+    "j4_plugin",
+    "spherical_harmonics_plugin",
     "drag_plugin",
     "srp_plugin",
     "third_body_moon_plugin",

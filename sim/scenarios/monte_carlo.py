@@ -10,6 +10,12 @@ import numpy as np
 from sim.metrics.engagement import compute_engagement_metrics
 from sim.utils.io import write_json
 
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover
+    def tqdm(iterable, **kwargs):
+        return iterable
+
 
 @dataclass(frozen=True)
 class MonteCarloConfig:
@@ -32,7 +38,7 @@ def run_monte_carlo(
     overruns = []
     summaries = []
 
-    for i in range(config.runs):
+    for i in tqdm(range(config.runs), desc="Monte Carlo Runs", unit="run", dynamic_ncols=True):
         seed = config.base_seed + i
         result = scenario_fn(seed=seed, pos_sigma_km=config.pos_sigma_km, vel_sigma_km_s=config.vel_sigma_km_s)
         metrics = compute_engagement_metrics(result["log"], keepout_radius_km=result.get("keepout_radius_km"))

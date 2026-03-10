@@ -60,12 +60,10 @@ def main() -> None:
 
     wheel_axes = np.vstack([w.axis_body for w in BASIC_REACTION_WHEEL_TRIAD.wheels])
     wheel_limits = np.array([w.max_torque_nm for w in BASIC_REACTION_WHEEL_TRIAD.wheels], dtype=float)
-    ctrl = SmallAngleLQRController(
+    ctrl = SmallAngleLQRController.robust_profile(
         inertia_kg_m2=BASIC_SATELLITE.inertia_kg_m2,
         wheel_axes_body=wheel_axes,
         wheel_torque_limits_nm=wheel_limits,
-        q_weights=np.array([25.0, 25.0, 25.0, 2.0, 2.0, 2.0]),
-        r_weights=np.array([1.0, 1.0, 1.0]),
         design_dt_s=dt_s,
     )
 

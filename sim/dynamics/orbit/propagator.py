@@ -9,13 +9,16 @@ from sim.dynamics.orbit.accelerations import (
     OrbitContext,
     accel_drag,
     accel_j2,
+    accel_j3,
+    accel_j4,
     accel_srp,
     accel_third_body,
     accel_two_body,
-    default_density_model,
 )
+from sim.dynamics.orbit.atmosphere import density_from_model
 from sim.dynamics.orbit.environment import MOON_MU_KM3_S2, SUN_MU_KM3_S2
 from sim.dynamics.orbit.integrators import integrate_adaptive, rk4_step_state
+from sim.dynamics.orbit.spherical_harmonics import accel_spherical_harmonics_terms, parse_spherical_harmonic_terms
 
 
 AccelerationPlugin = Callable[[float, np.ndarray, dict, OrbitContext], np.ndarray]
@@ -25,10 +28,50 @@ def j2_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np
     return accel_j2(x_eci[:3], ctx.mu_km3_s2)
 
 
+def j3_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
+    return accel_j3(x_eci[:3], ctx.mu_km3_s2)
+
+
+def j4_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
+    return accel_j4(x_eci[:3], ctx.mu_km3_s2)
+
+
+def spherical_harmonics_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
+    """
+    Generic spherical-harmonics perturbation plugin.
+
+    Expects `env["spherical_harmonics_terms"]` as list[dict], each with:
+    - n: degree
+    - m: order
+    - c_nm (or c): cosine coefficient
+    - s_nm (or s): sine coefficient (optional)
+
+    Optional env fields:
+    - spherical_harmonics_fd_step_km
+    """
+    terms = parse_spherical_harmonic_terms(env.get("spherical_harmonics_terms"))
+    if not terms:
+        return np.zeros(3)
+    fd_step_km = float(env.get("spherical_harmonics_fd_step_km", 1e-3))
+    return accel_spherical_harmonics_terms(
+        r_eci_km=x_eci[:3],
+        t_s=t_s,
+        terms=terms,
+        mu_km3_s2=ctx.mu_km3_s2,
+        fd_step_km=fd_step_km,
+    )
+
+
 def drag_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
     env_local = dict(env)
     if "density_kg_m3" not in env_local:
-        env_local["density_kg_m3"] = default_density_model(x_eci[:3], t_s)
+        atmo_model = str(env_local.get("atmosphere_model", "exponential")).lower()
+        env_local["density_kg_m3"] = density_from_model(
+            atmo_model,
+            x_eci[:3],
+            t_s,
+            env=env_local,
+        )
     return accel_drag(x_eci[:3], x_eci[3:], t_s, ctx.mass_kg, ctx.area_m2, ctx.cd, env_local)
 
 

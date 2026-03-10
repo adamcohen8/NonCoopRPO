@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
+from typing import Any
 
 import numpy as np
 
@@ -21,6 +22,7 @@ class SimObject:
     controller: Controller
     actuator: Actuator
     limits: dict
+    knowledge_base: Any | None = None
 
 
 class SimulationKernel:
@@ -38,6 +40,7 @@ class SimulationKernel:
 
         truth_by_object = {oid: np.zeros((n, 14)) for oid in self.object_ids}
         belief_by_object = {oid: np.zeros((n, self.objects[oid].belief.state.size)) for oid in self.object_ids}
+        knowledge_by_observer: dict[str, dict[str, np.ndarray]] = {}
         thrust_by_object = {oid: np.zeros((n, 3)) for oid in self.object_ids}
         torque_by_object = {oid: np.zeros((n, 3)) for oid in self.object_ids}
         runtime_by_object = {oid: np.zeros(n) for oid in self.object_ids}
@@ -49,6 +52,14 @@ class SimulationKernel:
             obj = self.objects[oid]
             truth_by_object[oid][0, :] = _truth_to_array(obj.truth)
             belief_by_object[oid][0, :] = obj.belief.state
+            if obj.knowledge_base is not None:
+                knowledge_by_observer[oid] = {}
+                for target_id in obj.knowledge_base.target_ids():
+                    knowledge_by_observer[oid][target_id] = np.full((n, 6), np.nan)
+                snapshot = obj.knowledge_base.snapshot()
+                for target_id, kb in snapshot.items():
+                    if target_id in knowledge_by_observer[oid]:
+                        knowledge_by_observer[oid][target_id][0, :] = kb.state[:6]
 
         for k in range(self.config.steps):
             now_s = t_s[k]
@@ -81,6 +92,16 @@ class SimulationKernel:
                     t_s=now_s + self.config.dt_s,
                 )
 
+            for oid in self.object_ids:
+                obj = self.objects[oid]
+                if obj.knowledge_base is None:
+                    continue
+                obj.knowledge_base.update(
+                    observer_truth=obj.truth,
+                    world_truth=propagated_truth,
+                    t_s=now_s + self.config.dt_s,
+                )
+
             next_applied_command = {}
             for oid in self.object_ids:
                 obj = self.objects[oid]
@@ -109,11 +130,20 @@ class SimulationKernel:
                 obj = self.objects[oid]
                 truth_by_object[oid][k + 1, :] = _truth_to_array(obj.truth)
                 belief_by_object[oid][k + 1, :] = obj.belief.state
+                if obj.knowledge_base is not None and oid in knowledge_by_observer:
+                    snapshot = obj.knowledge_base.snapshot()
+                    for target_id, arr in knowledge_by_observer[oid].items():
+                        kb = snapshot.get(target_id)
+                        if kb is not None:
+                            arr[k + 1, :] = kb.state[:6]
+                        else:
+                            arr[k + 1, :] = arr[k, :]
 
         return SimLog(
             t_s=t_s,
             truth_by_object=truth_by_object,
             belief_by_object=belief_by_object,
+            knowledge_by_observer=knowledge_by_observer,
             applied_thrust_by_object=thrust_by_object,
             applied_torque_by_object=torque_by_object,
             controller_runtime_ms_by_object=runtime_by_object,

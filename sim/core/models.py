@@ -92,12 +92,17 @@ class SimLog:
     applied_torque_by_object: dict[str, np.ndarray]
     controller_runtime_ms_by_object: dict[str, np.ndarray]
     controller_skipped_by_object: dict[str, np.ndarray]
+    knowledge_by_observer: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
             "t_s": self.t_s.tolist(),
             "truth_by_object": {k: v.tolist() for k, v in self.truth_by_object.items()},
             "belief_by_object": {k: v.tolist() for k, v in self.belief_by_object.items()},
+            "knowledge_by_observer": {
+                obs: {tgt: hist.tolist() for tgt, hist in by_tgt.items()}
+                for obs, by_tgt in self.knowledge_by_observer.items()
+            },
             "applied_thrust_by_object": {k: v.tolist() for k, v in self.applied_thrust_by_object.items()},
             "applied_torque_by_object": {k: v.tolist() for k, v in self.applied_torque_by_object.items()},
             "controller_runtime_ms_by_object": {

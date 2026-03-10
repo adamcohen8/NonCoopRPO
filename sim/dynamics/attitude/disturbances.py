@@ -5,9 +5,11 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from sim.core.models import StateTruth
+from sim.dynamics.orbit.atmosphere import density_from_model
+from sim.dynamics.orbit.environment import EARTH_ROT_RATE_RAD_S
+from sim.dynamics.spacecraft_geometry import RectangularPrismGeometry
 from sim.utils.quaternion import quaternion_to_dcm_bn
 
-EARTH_RADIUS_M = 6378.137e3
 EARTH_MAGNETIC_DIPOLE_T_M3 = 7.94e15
 MU_0_4PI = 1e-7
 SOLAR_PRESSURE_N_M2 = 4.56e-6
@@ -27,6 +29,8 @@ class DisturbanceTorqueConfig:
     srp_cr: float = 1.3
     srp_cp_offset_body_m: np.ndarray = field(default_factory=lambda: np.array([-0.02, 0.03, 0.01]))
     sun_dir_eci: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0]))
+    use_rectangular_prism_faces: bool = False
+    rectangular_prism_dims_m: tuple[float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -74,16 +78,30 @@ class DisturbanceTorqueModel:
         return np.cross(self.config.magnetic_dipole_body_a_m2, b_body)
 
     def _drag_torque(self, state: StateTruth, env: dict) -> np.ndarray:
-        rho = float(env.get("density_kg_m3", _simple_atmosphere_density(state.position_eci_km)))
-        v_eci_m_s = state.velocity_eci_km_s * 1e3
-        v_norm = np.linalg.norm(v_eci_m_s)
+        if "density_kg_m3" in env:
+            rho = float(env["density_kg_m3"])
+        else:
+            rho = density_from_model(
+                str(env.get("atmosphere_model", "exponential")).lower(),
+                state.position_eci_km,
+                state.t_s,
+                env=env,
+            )
+        omega_earth = np.array([0.0, 0.0, EARTH_ROT_RATE_RAD_S], dtype=float)
+        v_atm_eci_km_s = np.cross(omega_earth, state.position_eci_km)
+        v_rel_eci_m_s = (state.velocity_eci_km_s - v_atm_eci_km_s) * 1e3
+        v_norm = np.linalg.norm(v_rel_eci_m_s)
         if v_norm == 0.0 or rho <= 0.0:
             return np.zeros(3)
 
-        f_drag_mag = 0.5 * rho * (v_norm**2) * self.config.drag_cd * self.config.drag_area_m2
-        f_drag_eci = -f_drag_mag * (v_eci_m_s / v_norm)
         c_bn = quaternion_to_dcm_bn(state.attitude_quat_bn)
-        f_drag_body = c_bn @ f_drag_eci
+        v_rel_body = c_bn @ v_rel_eci_m_s
+        if self._rect_prism_geometry is not None and self.config.use_rectangular_prism_faces:
+            q_dyn = 0.5 * rho * (v_norm**2) * self.config.drag_cd
+            return self._rect_prism_geometry.face_torque_sum_body_nm(v_rel_body, q_dyn)
+
+        f_drag_mag = 0.5 * rho * (v_norm**2) * self.config.drag_cd * self.config.drag_area_m2
+        f_drag_body = -f_drag_mag * (v_rel_body / v_norm)
         return np.cross(self.config.drag_cp_offset_body_m, f_drag_body)
 
     def _srp_torque(self, state: StateTruth, env: dict) -> np.ndarray:
@@ -93,18 +111,19 @@ class DisturbanceTorqueModel:
             return np.zeros(3)
         sun_dir_eci = sun_dir_eci / n
 
-        force_mag = SOLAR_PRESSURE_N_M2 * self.config.srp_cr * self.config.srp_area_m2
-        f_srp_eci = -force_mag * sun_dir_eci
         c_bn = quaternion_to_dcm_bn(state.attitude_quat_bn)
-        f_srp_body = c_bn @ f_srp_eci
+        sun_dir_body = c_bn @ sun_dir_eci
+        if self._rect_prism_geometry is not None and self.config.use_rectangular_prism_faces:
+            p_srp = SOLAR_PRESSURE_N_M2 * self.config.srp_cr
+            return self._rect_prism_geometry.face_torque_sum_body_nm(sun_dir_body, p_srp)
+
+        force_mag = SOLAR_PRESSURE_N_M2 * self.config.srp_cr * self.config.srp_area_m2
+        f_srp_body = -force_mag * sun_dir_body
         return np.cross(self.config.srp_cp_offset_body_m, f_srp_body)
 
-
-def _simple_atmosphere_density(position_eci_km: np.ndarray) -> float:
-    r_m = np.linalg.norm(position_eci_km) * 1e3
-    alt_m = max(0.0, r_m - EARTH_RADIUS_M)
-    rho0 = 1.225
-    h_scale_m = 8500.0
-    if alt_m > 150e3:
-        return 0.0
-    return rho0 * np.exp(-alt_m / h_scale_m)
+    @property
+    def _rect_prism_geometry(self) -> RectangularPrismGeometry | None:
+        dims = self.config.rectangular_prism_dims_m
+        if dims is None:
+            return None
+        return RectangularPrismGeometry(lx_m=float(dims[0]), ly_m=float(dims[1]), lz_m=float(dims[2]))
