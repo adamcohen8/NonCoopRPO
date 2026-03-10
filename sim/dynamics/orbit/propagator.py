@@ -18,7 +18,11 @@ from sim.dynamics.orbit.accelerations import (
 from sim.dynamics.orbit.atmosphere import density_from_model
 from sim.dynamics.orbit.environment import MOON_MU_KM3_S2, SUN_MU_KM3_S2
 from sim.dynamics.orbit.integrators import integrate_adaptive, rk4_step_state
-from sim.dynamics.orbit.spherical_harmonics import accel_spherical_harmonics_terms, parse_spherical_harmonic_terms
+from sim.dynamics.orbit.spherical_harmonics import (
+    accel_spherical_harmonics_terms,
+    load_real_earth_gravity_terms,
+    parse_spherical_harmonic_terms,
+)
 
 
 AccelerationPlugin = Callable[[float, np.ndarray, dict, OrbitContext], np.ndarray]
@@ -40,16 +44,39 @@ def spherical_harmonics_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: Or
     """
     Generic spherical-harmonics perturbation plugin.
 
-    Expects `env["spherical_harmonics_terms"]` as list[dict], each with:
+    Expects one of:
+    1) `env["spherical_harmonics_terms"]` as list[dict], each with:
     - n: degree
     - m: order
     - c_nm (or c): cosine coefficient
     - s_nm (or s): sine coefficient (optional)
+    - normalized: whether coefficients are fully normalized (optional; default False)
+
+    2) Real-coefficient mode:
+    - spherical_harmonics_use_real_coefficients: bool (True)
+    - spherical_harmonics_model: e.g., "EGM96" (optional; default EGM96)
+    - spherical_harmonics_coeff_path: local .gfc path (optional)
+    - spherical_harmonics_max_degree: int (optional; default 8)
+    - spherical_harmonics_max_order: int (optional; default max_degree)
+    - spherical_harmonics_allow_download: bool (optional; default True)
 
     Optional env fields:
     - spherical_harmonics_fd_step_km
     """
     terms = parse_spherical_harmonic_terms(env.get("spherical_harmonics_terms"))
+    if not terms and bool(env.get("spherical_harmonics_use_real_coefficients", False)):
+        n_max = int(env.get("spherical_harmonics_max_degree", 8))
+        m_max = int(env.get("spherical_harmonics_max_order", n_max))
+        model = str(env.get("spherical_harmonics_model", "EGM96"))
+        coeff_path = env.get("spherical_harmonics_coeff_path")
+        allow_download = bool(env.get("spherical_harmonics_allow_download", True))
+        terms = load_real_earth_gravity_terms(
+            max_degree=n_max,
+            max_order=m_max,
+            model=model,
+            coeff_path=None if coeff_path is None else str(coeff_path),
+            allow_download=allow_download,
+        )
     if not terms:
         return np.zeros(3)
     fd_step_km = float(env.get("spherical_harmonics_fd_step_km", 1e-3))

@@ -30,6 +30,8 @@ from sim.dynamics.orbit.propagator import (
 from sim.dynamics.orbit.spherical_harmonics import (
     SphericalHarmonicTerm,
     accel_spherical_harmonics_terms,
+    load_icgem_gfc_terms,
+    load_real_earth_gravity_terms,
     parse_spherical_harmonic_terms,
 )
 
@@ -50,6 +52,8 @@ __all__ = [
     "accel_srp",
     "accel_third_body",
     "accel_spherical_harmonics_terms",
+    "load_icgem_gfc_terms",
+    "load_real_earth_gravity_terms",
     "density_exponential",
     "density_ussa1976",
     "density_nrlmsise00",

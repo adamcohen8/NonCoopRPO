@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import numpy as np
 
@@ -7,6 +9,7 @@ from sim.dynamics.orbit.propagator import spherical_harmonics_plugin
 from sim.dynamics.orbit.spherical_harmonics import (
     SphericalHarmonicTerm,
     accel_spherical_harmonics_terms,
+    load_icgem_gfc_terms,
     parse_spherical_harmonic_terms,
 )
 
@@ -46,6 +49,23 @@ class TestOrbitSphericalHarmonics(unittest.TestCase):
 
         a = spherical_harmonics_plugin(0.0, x, env=env, ctx=_Ctx())
         self.assertGreater(float(np.linalg.norm(a)), 0.0)
+
+    def test_load_icgem_gfc_terms_normalized_flag(self):
+        gfc_txt = "\n".join(
+            [
+                "modelname TEST",
+                "norm fully_normalized",
+                "gfc 2 0 -4.84165371736e-04 0.0 0.0 0.0",
+                "gfc 2 2 2.43914352398e-06 -1.40016683654e-06 0.0 0.0",
+                "",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "test.gfc"
+            p.write_text(gfc_txt, encoding="utf-8")
+            terms = load_icgem_gfc_terms(p, max_degree=8, max_order=8)
+        self.assertEqual(len(terms), 2)
+        self.assertTrue(all(t.normalized for t in terms))
 
 
 if __name__ == "__main__":
