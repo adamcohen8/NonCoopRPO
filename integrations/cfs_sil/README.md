@@ -18,13 +18,31 @@ This folder contains a first-pass wiring pattern for running NASA cFS against th
 
 ## Quick Bring-up
 
-### 1) Run bridge demo endpoint
+### 1) Run mock cFS endpoint (no external cFS required)
+
+```bash
+python /Users/adamcohen/Downloads/NonCooperativeRPO/integrations/cfs_sil/mock_cfs_endpoint.py --mode hold
+```
+
+or with a simple prograde thrust command:
+
+```bash
+python /Users/adamcohen/Downloads/NonCooperativeRPO/integrations/cfs_sil/mock_cfs_endpoint.py --mode prograde --accel-mag-km-s2 2e-6
+```
+
+### 1b) Single-terminal launcher (starts both mock endpoint and sim loop)
+
+```bash
+python /Users/adamcohen/Downloads/NonCooperativeRPO/integrations/cfs_sil/run_mock_sil_stack.py --mock-mode hold
+```
+
+### 2) (Optional) Run bridge demo endpoint
 
 ```bash
 python /Users/adamcohen/Downloads/NonCooperativeRPO/integrations/cfs_sil/python_bridge.py --demo
 ```
 
-### 2) Run simulator loop with truth->bridge->command feedback
+### 3) Run simulator loop with truth->bridge->command feedback
 
 ```bash
 python /Users/adamcohen/Downloads/NonCooperativeRPO/examples/CFS_SIL_SingleSat_Loop_Demo.py --plot-mode interactive
@@ -35,11 +53,11 @@ This loop:
 - polls cFS actuator command packets each step,
 - applies commands to the simulator dynamics.
 
-### 3) Integrate cFS stub
+### 4) Integrate cFS stub
 
 Copy `cfs_app_stub/fsw/src/*` into your cFS app tree and wire it through your cFS build system.
 
-### 4) Match packet IDs and ports
+### 5) Match packet IDs and ports
 
 Use message IDs and field layout from `icd.yaml`. Keep simulator as time master.
 
