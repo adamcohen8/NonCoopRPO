@@ -180,6 +180,7 @@ Ephemeris modes:
 - `analytic_enhanced` (default): improved low-cost Sun/Moon analytic model
 - `analytic_simple`: previous lightweight model
 - `external`: use `env["ephemeris_callable"](jd_utc, env)` returning `sun_pos_eci_km` and `moon_pos_eci_km`
+- `spice`: use `spiceypy` + kernels (`env["spice_kernels"]`), or a custom hook `env["spice_ephemeris_callable"]`
 
 ### 3) Run a validation comparison against HPOP output
 

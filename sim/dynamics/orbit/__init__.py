@@ -29,6 +29,7 @@ from sim.dynamics.orbit.epoch import (
     sun_position_eci_km_simple,
 )
 from sim.dynamics.orbit.eclipse import srp_shadow_factor
+from sim.dynamics.orbit.spice import spice_sun_moon_positions_eci_km
 from sim.dynamics.orbit.propagator import (
     OrbitPropagator,
     drag_plugin,
@@ -66,6 +67,7 @@ __all__ = [
     "resolve_sun_moon_positions",
     "resolve_time_dependent_env",
     "srp_shadow_factor",
+    "spice_sun_moon_positions_eci_km",
     "AtmosphereModelName",
     "SphericalHarmonicTerm",
     "OrbitContext",

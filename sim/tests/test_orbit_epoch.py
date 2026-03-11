@@ -56,6 +56,22 @@ class OrbitEpochTests(unittest.TestCase):
         self.assertTrue(np.allclose(sun, np.array([1.0, 2.0, 3.0])))
         self.assertTrue(np.allclose(moon, np.array([4.0, 5.0, 6.0])))
 
+    def test_spice_mode_with_callable(self):
+        def spice_cb(jd_utc: float, env: dict):
+            return {
+                "sun_pos_eci_km": np.array([10.0, 20.0, 30.0]),
+                "moon_pos_eci_km": np.array([40.0, 50.0, 60.0]),
+            }
+
+        env = {
+            "jd_utc_start": 2451545.0,
+            "ephemeris_mode": "spice",
+            "spice_ephemeris_callable": spice_cb,
+        }
+        sun, moon = resolve_sun_moon_positions(env, t_s=1.0)
+        self.assertTrue(np.allclose(sun, np.array([10.0, 20.0, 30.0])))
+        self.assertTrue(np.allclose(moon, np.array([40.0, 50.0, 60.0])))
+
 
 if __name__ == "__main__":
     unittest.main()

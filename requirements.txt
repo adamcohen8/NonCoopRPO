@@ -12,3 +12,6 @@ lightning>=2.2
 
 # Optional: enable NRLMSISE-00 atmospheric model backend
 # nrlmsise00>=0.1.2
+
+# Optional: enable SPICE ephemeris backend for Sun/Moon states
+# spiceypy>=6.0.0

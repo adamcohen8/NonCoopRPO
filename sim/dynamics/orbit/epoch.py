@@ -234,6 +234,10 @@ def resolve_sun_moon_positions(env: dict, t_s: float) -> tuple[np.ndarray, np.nd
                 return np.array(out["sun_pos_eci_km"], dtype=float), np.array(out["moon_pos_eci_km"], dtype=float)
 
     mode = str(env.get("ephemeris_mode", "analytic_enhanced")).lower()
+    if mode in ("spice", "spiceypy"):
+        from sim.dynamics.orbit.spice import spice_sun_moon_positions_eci_km
+
+        return spice_sun_moon_positions_eci_km(jd, env)
     if mode in ("analytic_simple", "simple"):
         return sun_position_eci_km_simple(jd), moon_position_eci_km_simple(jd)
     return sun_position_eci_km_enhanced(jd), moon_position_eci_km_enhanced(jd)
@@ -256,7 +260,7 @@ def resolve_time_dependent_env(env: dict, t_s: float) -> dict:
     out["jd_utc"] = float(jd)
 
     mode = str(out.get("ephemeris_mode", "analytic_enhanced")).lower()
-    if mode in ("analytic", "analytic_simple", "analytic_enhanced", "enhanced", "simple"):
+    if mode in ("analytic", "analytic_simple", "analytic_enhanced", "enhanced", "simple", "spice", "spiceypy"):
         sun, moon = resolve_sun_moon_positions(out, t_s)
         if "sun_pos_eci_km" not in out:
             out["sun_pos_eci_km"] = sun
