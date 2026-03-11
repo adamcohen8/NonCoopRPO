@@ -16,3 +16,6 @@ examples/outputs/
 
 # OS/editor noise
 .DS_Store
+
+# Third-party validation package (do not commit)
+validation/High Precision Orbit Propagator_4-2/
