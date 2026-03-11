@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from sim.dynamics.orbit.accelerations import OrbitContext
+from sim.config import get_simulation_profile, profile_choices, resolve_dt_s
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
 from sim.dynamics.orbit.propagator import OrbitPropagator, spherical_harmonics_plugin
 from sim.dynamics.orbit.spherical_harmonics import load_real_earth_gravity_terms
@@ -31,13 +32,21 @@ def _propagate(
     ctx: OrbitContext,
     env: dict,
     plugins: list,
+    integrator: str,
+    adaptive_atol: float,
+    adaptive_rtol: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     steps = int(np.ceil(duration_s / dt_s))
     t = np.arange(steps + 1, dtype=float) * dt_s
     x = np.zeros((steps + 1, 6), dtype=float)
     x[0, :] = x0
 
-    propagator = OrbitPropagator(integrator="rk4", plugins=list(plugins))
+    propagator = OrbitPropagator(
+        integrator=integrator,
+        plugins=list(plugins),
+        adaptive_atol=adaptive_atol,
+        adaptive_rtol=adaptive_rtol,
+    )
     zero_cmd = np.zeros(3, dtype=float)
     for k in range(steps):
         x[k + 1, :] = propagator.propagate(
@@ -53,7 +62,7 @@ def _propagate(
 
 def run_demo(
     plot_mode: str = "interactive",
-    dt_s: float = 10.0,
+    dt_s: float | None = None,
     altitude_km: float = 500.0,
     inclination_deg: float = 45.0,
     orbits: float = 1.0,
@@ -61,7 +70,10 @@ def run_demo(
     coeff_path: str = "",
     allow_download: bool = True,
     fd_step_km: float = 1.0e-3,
+    profile: str = "ops",
 ) -> dict[str, str]:
+    p = get_simulation_profile(profile)
+    dt_used_s = resolve_dt_s(profile, dt_s)
     radius_km = EARTH_RADIUS_KM + float(altitude_km)
     x0 = _circular_orbit_state_eci(radius_km, inclination_deg=float(inclination_deg))
     period_s = 2.0 * np.pi * np.sqrt((radius_km**3) / EARTH_MU_KM3_S2)
@@ -78,10 +90,13 @@ def run_demo(
     t, x_two_body = _propagate(
         x0=x0,
         duration_s=duration_s,
-        dt_s=float(dt_s),
+        dt_s=float(dt_used_s),
         ctx=ctx,
         env={},
         plugins=[],
+        integrator=p.orbit_integrator,
+        adaptive_atol=p.orbit_adaptive_atol,
+        adaptive_rtol=p.orbit_adaptive_rtol,
     )
 
     terms = load_real_earth_gravity_terms(
@@ -98,10 +113,13 @@ def run_demo(
     _, x_sh = _propagate(
         x0=x0,
         duration_s=duration_s,
-        dt_s=float(dt_s),
+        dt_s=float(dt_used_s),
         ctx=ctx,
         env=env_sh,
         plugins=[spherical_harmonics_plugin],
+        integrator=p.orbit_integrator,
+        adaptive_atol=p.orbit_adaptive_atol,
+        adaptive_rtol=p.orbit_adaptive_rtol,
     )
 
     err = x_sh - x_two_body
@@ -216,7 +234,7 @@ def run_demo(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Demo propagation using 8x8 spherical harmonics (n<=8, m<=8).")
     parser.add_argument("--plot-mode", choices=["interactive", "save", "both"], default="interactive")
-    parser.add_argument("--dt", type=float, default=10.0, help="Integrator step size (s).")
+    parser.add_argument("--dt", type=float, default=None, help="Integrator step size (s), overrides profile.")
     parser.add_argument("--altitude-km", type=float, default=500.0, help="Initial circular altitude (km).")
     parser.add_argument("--inclination-deg", type=float, default=45.0, help="Initial circular orbit inclination (deg).")
     parser.add_argument("--orbits", type=float, default=1.0, help="Propagation duration in orbit periods.")
@@ -228,11 +246,17 @@ if __name__ == "__main__":
         help="Do not auto-download model file when coeff-path is not provided.",
     )
     parser.add_argument("--fd-step-km", type=float, default=1.0e-3, help="Finite-difference step for SH acceleration.")
+    parser.add_argument(
+        "--profile",
+        choices=list(profile_choices()),
+        default="ops",
+        help="Fidelity profile: fast, ops, or high_fidelity.",
+    )
     args = parser.parse_args()
 
     out = run_demo(
         plot_mode=args.plot_mode,
-        dt_s=float(args.dt),
+        dt_s=None if args.dt is None else float(args.dt),
         altitude_km=float(args.altitude_km),
         inclination_deg=float(args.inclination_deg),
         orbits=float(args.orbits),
@@ -240,6 +264,7 @@ if __name__ == "__main__":
         coeff_path=str(args.coeff_path),
         allow_download=not bool(args.no_download),
         fd_step_km=float(args.fd_step_km),
+        profile=args.profile,
     )
     print("8x8 spherical harmonics demo outputs:")
     for k, v in out.items():

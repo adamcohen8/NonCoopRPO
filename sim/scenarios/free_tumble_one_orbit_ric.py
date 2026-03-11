@@ -12,6 +12,7 @@ from sim.core.kernel import SimObject, SimulationKernel
 from sim.core.models import ObjectConfig, SimConfig, StateBelief, StateTruth
 from sim.dynamics.attitude.disturbances import DisturbanceTorqueConfig, DisturbanceTorqueModel
 from sim.dynamics.model import OrbitalAttitudeDynamics
+from sim.config import get_simulation_profile, resolve_dt_s
 from sim.estimation.orbit_ekf import OrbitEKFEstimator
 from sim.metrics.scoring import compute_scores
 from sim.sensors.noisy_own_state import NoisyOwnStateSensor
@@ -23,6 +24,7 @@ MU_EARTH_KM3_S2 = 398600.4418
 def run_free_tumble_one_orbit_ric(
     output_dir: str = "outputs/free_tumble_one_orbit_ric",
     plot_mode: Literal["interactive", "save", "both"] = "interactive",
+    profile: str = "ops",
 ) -> dict[str, str]:
     from sim.utils.plotting import plot_angular_rates, plot_attitude_ric, plot_orbit_eci
 
@@ -32,7 +34,8 @@ def run_free_tumble_one_orbit_ric(
     speed_km_s = np.sqrt(MU_EARTH_KM3_S2 / radius_km)
     orbital_period_s = 2.0 * np.pi * np.sqrt((radius_km**3) / MU_EARTH_KM3_S2)
 
-    dt_s = 2.0
+    p = get_simulation_profile(profile)
+    dt_s = resolve_dt_s(profile)
     steps = int(np.ceil(orbital_period_s / dt_s))
 
     init_truth = StateTruth(
@@ -57,6 +60,8 @@ def run_free_tumble_one_orbit_ric(
         dynamics=OrbitalAttitudeDynamics(
             mu_km3_s2=MU_EARTH_KM3_S2,
             inertia_kg_m2=np.diag([120.0, 100.0, 80.0]),
+            orbit_substep_s=p.orbit_substep_s,
+            attitude_substep_s=p.attitude_substep_s,
             disturbance_model=DisturbanceTorqueModel(
                 mu_km3_s2=MU_EARTH_KM3_S2,
                 inertia_kg_m2=np.diag([120.0, 100.0, 80.0]),
@@ -84,9 +89,9 @@ def run_free_tumble_one_orbit_ric(
         config=SimConfig(
             dt_s=dt_s,
             steps=steps,
-            integrator="rk4",
-            realtime_mode=True,
-            controller_budget_ms=1.0,
+            integrator=p.kernel_integrator,
+            realtime_mode=p.realtime_mode,
+            controller_budget_ms=p.controller_budget_ms,
             rng_seed=24,
         ),
         objects=[obj],

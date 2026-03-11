@@ -10,6 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
+from sim.config import get_simulation_profile, profile_choices, resolve_dt_s
 from sim.dynamics.orbit.propagator import (
     OrbitPropagator,
     drag_plugin,
@@ -35,13 +36,21 @@ def _propagate(
     ctx: OrbitContext,
     env: dict,
     plugins: list,
+    integrator: str,
+    adaptive_atol: float,
+    adaptive_rtol: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     steps = int(np.ceil(duration_s / dt_s))
     t = np.arange(steps + 1, dtype=float) * dt_s
     x = np.zeros((steps + 1, 6), dtype=float)
     x[0, :] = x0
 
-    propagator = OrbitPropagator(integrator="rk4", plugins=list(plugins))
+    propagator = OrbitPropagator(
+        integrator=integrator,
+        plugins=list(plugins),
+        adaptive_atol=adaptive_atol,
+        adaptive_rtol=adaptive_rtol,
+    )
     zero_cmd = np.zeros(3, dtype=float)
     for k in range(steps):
         x[k + 1, :] = propagator.propagate(
@@ -55,7 +64,14 @@ def _propagate(
     return t, x
 
 
-def run_demo(plot_mode: str = "interactive", dt_s: float = 10.0, altitude_km: float = 500.0) -> dict[str, str]:
+def run_demo(
+    plot_mode: str = "interactive",
+    dt_s: float | None = None,
+    altitude_km: float = 500.0,
+    profile: str = "ops",
+) -> dict[str, str]:
+    p = get_simulation_profile(profile)
+    dt_used_s = resolve_dt_s(profile, dt_s)
     radius_km = EARTH_RADIUS_KM + altitude_km
     x0 = _circular_orbit_state_eci(radius_km)
     period_s = 2.0 * np.pi * np.sqrt((radius_km**3) / EARTH_MU_KM3_S2)
@@ -74,7 +90,17 @@ def run_demo(plot_mode: str = "interactive", dt_s: float = 10.0, altitude_km: fl
         "sun_pos_eci_km": np.array([149597870.7, 0.0, 0.0], dtype=float),
     }
 
-    t, x_base = _propagate(x0, period_s, dt_s, ctx, env, plugins=[])
+    t, x_base = _propagate(
+        x0,
+        period_s,
+        dt_used_s,
+        ctx,
+        env,
+        plugins=[],
+        integrator=p.orbit_integrator,
+        adaptive_atol=p.orbit_adaptive_atol,
+        adaptive_rtol=p.orbit_adaptive_rtol,
+    )
     perturbation_cases = {
         "J2": [j2_plugin],
         "J3": [j3_plugin],
@@ -87,7 +113,17 @@ def run_demo(plot_mode: str = "interactive", dt_s: float = 10.0, altitude_km: fl
 
     case_results: dict[str, np.ndarray] = {}
     for name, plugins in perturbation_cases.items():
-        _, x_case = _propagate(x0, period_s, dt_s, ctx, env, plugins=plugins)
+        _, x_case = _propagate(
+            x0,
+            period_s,
+            dt_used_s,
+            ctx,
+            env,
+            plugins=plugins,
+            integrator=p.orbit_integrator,
+            adaptive_atol=p.orbit_adaptive_atol,
+            adaptive_rtol=p.orbit_adaptive_rtol,
+        )
         case_results[name] = x_case
 
     err_pos_norm: dict[str, np.ndarray] = {}
@@ -179,11 +215,22 @@ if __name__ == "__main__":
         default="interactive",
         help="Plot behavior; interactive is default.",
     )
-    parser.add_argument("--dt", type=float, default=10.0, help="Integrator step size in seconds.")
+    parser.add_argument("--dt", type=float, default=None, help="Integrator step size in seconds (overrides profile).")
     parser.add_argument("--altitude-km", type=float, default=500.0, help="Initial circular orbit altitude in km.")
+    parser.add_argument(
+        "--profile",
+        choices=list(profile_choices()),
+        default="ops",
+        help="Fidelity profile: fast, ops, or high_fidelity.",
+    )
     args = parser.parse_args()
 
-    result = run_demo(plot_mode=args.plot_mode, dt_s=float(args.dt), altitude_km=float(args.altitude_km))
+    result = run_demo(
+        plot_mode=args.plot_mode,
+        dt_s=None if args.dt is None else float(args.dt),
+        altitude_km=float(args.altitude_km),
+        profile=args.profile,
+    )
     print("Generated outputs:")
     for k, v in result.items():
         if v:

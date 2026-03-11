@@ -29,6 +29,7 @@ Each simulation step follows a deterministic order in [sim/core/kernel.py](/User
 ## Repository Layout
 
 - `sim/core/` kernel, models, scheduling
+- `sim/config/` shared simulation fidelity profiles (`fast`, `ops`, `high_fidelity`)
 - `sim/dynamics/orbit/` orbital forces, integrators, atmosphere, spherical harmonics
 - `sim/dynamics/attitude/` rigid body dynamics and disturbance torques
 - `sim/actuators/` orbital and attitude actuator models
@@ -148,6 +149,22 @@ python -m pip install -r requirements.txt
 ```bash
 python examples/Full_Framework_Demo.py
 ```
+
+### 2b) Use fidelity profiles
+
+Most modern demos now support a shared profile selector:
+
+```bash
+python examples/Full_Framework_Demo.py --profile ops
+python examples/Free_Tumble_One_Orbit.py --profile fast
+python examples/Orbit_SphericalHarmonics_8x8_Demo.py --profile high_fidelity
+```
+
+Profiles:
+
+- `fast`: quickest turnaround (larger steps, minimal default modeling)
+- `ops`: mission-engineering default balance
+- `high_fidelity`: tighter integration settings for validation-style runs
 
 ### 3) Run a validation comparison against HPOP output
 

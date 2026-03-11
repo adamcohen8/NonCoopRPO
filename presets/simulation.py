@@ -14,6 +14,12 @@ from sim.core.kernel import SimObject
 from sim.core.models import ObjectConfig, StateBelief, StateTruth
 from sim.dynamics.model import OrbitalAttitudeDynamics
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2
+from sim.dynamics.orbit.propagator import OrbitPropagator
+from sim.config import (
+    build_default_ops_orbit_propagator,
+    default_disturbance_config_for_profile,
+    get_simulation_profile,
+)
 from sim.estimation.joint_state import JointStateEstimator
 from sim.estimation.orbit_ekf import OrbitEKFEstimator
 from sim.sensors.joint_state import JointStateSensor
@@ -60,12 +66,21 @@ def build_sim_object_from_presets(
     rectangular_prism_dims_m: tuple[float, float, float] | None = None,
     orbit_substep_s: float | None = None,
     attitude_substep_s: float | None = None,
+    profile: str | None = None,
 ) -> SimObject:
     rng = np.random.default_rng(0) if rng is None else rng
     attitude_quat_bn = np.array([1.0, 0.0, 0.0, 0.0]) if attitude_quat_bn is None else np.array(attitude_quat_bn)
     angular_rate_body_rad_s = (
         np.zeros(3) if angular_rate_body_rad_s is None else np.array(angular_rate_body_rad_s, dtype=float)
     )
+    orbit_propagator = None
+    if profile is not None:
+        p = get_simulation_profile(profile)
+        if orbit_substep_s is None:
+            orbit_substep_s = p.orbit_substep_s
+        if attitude_substep_s is None:
+            attitude_substep_s = p.attitude_substep_s
+        orbit_propagator = build_default_ops_orbit_propagator(profile)
 
     speed_km_s = np.sqrt(EARTH_MU_KM3_S2 / orbit_radius_km)
     pos = np.array([orbit_radius_km * np.cos(phase_rad), orbit_radius_km * np.sin(phase_rad), 0.0])
@@ -102,10 +117,25 @@ def build_sim_object_from_presets(
     if enable_disturbances:
         from sim.dynamics.attitude.disturbances import DisturbanceTorqueConfig, DisturbanceTorqueModel
 
+        disturbance_cfg = (
+            default_disturbance_config_for_profile(profile) if profile is not None else DisturbanceTorqueConfig()
+        )
         disturbance = DisturbanceTorqueModel(
             mu_km3_s2=EARTH_MU_KM3_S2,
             inertia_kg_m2=satellite.inertia_kg_m2,
             config=DisturbanceTorqueConfig(
+                use_gravity_gradient=disturbance_cfg.use_gravity_gradient,
+                use_magnetic=disturbance_cfg.use_magnetic,
+                use_drag=disturbance_cfg.use_drag,
+                use_srp=disturbance_cfg.use_srp,
+                magnetic_dipole_body_a_m2=disturbance_cfg.magnetic_dipole_body_a_m2,
+                drag_area_m2=disturbance_cfg.drag_area_m2,
+                drag_cd=disturbance_cfg.drag_cd,
+                drag_cp_offset_body_m=disturbance_cfg.drag_cp_offset_body_m,
+                srp_area_m2=disturbance_cfg.srp_area_m2,
+                srp_cr=disturbance_cfg.srp_cr,
+                srp_cp_offset_body_m=disturbance_cfg.srp_cp_offset_body_m,
+                sun_dir_eci=disturbance_cfg.sun_dir_eci,
                 use_rectangular_prism_faces=bool(use_rectangular_prism_aero_srp),
                 rectangular_prism_dims_m=tuple(float(v) for v in prism_dims) if use_rectangular_prism_aero_srp else None,
             ),
@@ -121,6 +151,7 @@ def build_sim_object_from_presets(
         rectangular_prism_dims_m=tuple(float(v) for v in prism_dims) if use_rectangular_prism_aero_srp else None,
         orbit_substep_s=orbit_substep_s,
         attitude_substep_s=attitude_substep_s,
+        orbit_propagator=orbit_propagator if orbit_propagator is not None else OrbitPropagator(integrator="rk4"),
     )
 
     orbit_estimator = OrbitEKFEstimator(

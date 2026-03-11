@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 from presets import build_sim_object_from_presets
 from sim.core.kernel import SimulationKernel
 from sim.core.models import SimConfig
+from sim.config import get_simulation_profile, profile_choices, resolve_dt_s
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2
 from sim.estimation.attitude_ekf import AttitudeEKFEstimator
 from sim.estimation.joint_ekf import JointStateEKFEstimator
@@ -19,8 +20,9 @@ from sim.estimation.orbit_ekf import OrbitEKFEstimator
 from sim.sensors.joint_state import JointStateSensor
 
 
-def run_one_orbit_attitude_knowledge(plot_mode: str = "interactive") -> dict[str, str]:
-    dt_s = 2.0
+def run_one_orbit_attitude_knowledge(plot_mode: str = "interactive", profile: str = "ops") -> dict[str, str]:
+    p = get_simulation_profile(profile)
+    dt_s = resolve_dt_s(profile)
     update_cadence_s = 2.0
     sat = build_sim_object_from_presets(
         object_id="sat_att_knowledge",
@@ -31,6 +33,9 @@ def run_one_orbit_attitude_knowledge(plot_mode: str = "interactive") -> dict[str
         angular_rate_body_rad_s=np.array([0.0, 0.0, 0.0]),
         enable_disturbances=True,
         enable_attitude_knowledge=True,
+        orbit_substep_s=p.orbit_substep_s,
+        attitude_substep_s=p.attitude_substep_s,
+        profile=profile,
     )
     sat.sensor = JointStateSensor(
         pos_sigma_km=1e-3,
@@ -60,7 +65,13 @@ def run_one_orbit_attitude_knowledge(plot_mode: str = "interactive") -> dict[str
     steps = int(np.ceil(orbital_period_s / dt_s))
 
     kernel = SimulationKernel(
-        config=SimConfig(dt_s=dt_s, steps=steps, controller_budget_ms=1.0),
+        config=SimConfig(
+            dt_s=dt_s,
+            steps=steps,
+            integrator=p.kernel_integrator,
+            realtime_mode=p.realtime_mode,
+            controller_budget_ms=p.controller_budget_ms,
+        ),
         objects=[sat],
         env={},
     )
@@ -135,9 +146,15 @@ if __name__ == "__main__":
         default="interactive",
         help="Plot behavior; interactive is default.",
     )
+    parser.add_argument(
+        "--profile",
+        choices=list(profile_choices()),
+        default="ops",
+        help="Fidelity profile: fast, ops, or high_fidelity.",
+    )
     args = parser.parse_args()
 
-    outputs = run_one_orbit_attitude_knowledge(plot_mode=args.plot_mode)
+    outputs = run_one_orbit_attitude_knowledge(plot_mode=args.plot_mode, profile=args.profile)
     print("Generated outputs:")
     for k, v in outputs.items():
         if v:

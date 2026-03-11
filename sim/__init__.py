@@ -40,6 +40,21 @@ from sim.control import (
     ZeroController,
     ZeroTorqueController,
 )
+from sim.config import (
+    PROFILE_FAST,
+    PROFILE_HIGH_FIDELITY,
+    PROFILE_OPS,
+    SimulationProfile,
+    SimulationProfileName,
+    build_default_ops_orbit_propagator,
+    build_orbit_propagator_for_profile,
+    default_disturbance_config_for_profile,
+    default_env_for_profile,
+    get_simulation_profile,
+    profile_choices,
+    resolve_dt_s,
+    resolve_steps_for_duration,
+)
 from sim.core.kernel import SimObject, SimulationKernel
 from sim.core.models import Command, ObjectConfig, SimConfig, SimLog, StateBelief, StateTruth
 from sim.dynamics.attitude import DisturbanceTorqueConfig, DisturbanceTorqueModel
@@ -161,6 +176,19 @@ __all__ = [
     "RobustMPCController",
     "StochasticPolicyController",
     "ZeroTorqueController",
+    "SimulationProfileName",
+    "SimulationProfile",
+    "PROFILE_FAST",
+    "PROFILE_OPS",
+    "PROFILE_HIGH_FIDELITY",
+    "profile_choices",
+    "get_simulation_profile",
+    "resolve_dt_s",
+    "resolve_steps_for_duration",
+    "default_env_for_profile",
+    "default_disturbance_config_for_profile",
+    "build_orbit_propagator_for_profile",
+    "build_default_ops_orbit_propagator",
     "PoseCommandGenerator",
     "QuaternionPDController",
     "ReactionWheelPDController",

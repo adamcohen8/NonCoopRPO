@@ -11,10 +11,16 @@ from sim.actuators.orbital import OrbitalActuator, OrbitalActuatorLimits
 from sim.control.orbit.baseline import RiskThresholdController, SafetyBarrierController, StationkeepingController
 from sim.core.kernel import SimObject, SimulationKernel
 from sim.core.models import Command, ObjectConfig, SimConfig, StateBelief, StateTruth
+from sim.config import (
+    build_default_ops_orbit_propagator,
+    default_disturbance_config_for_profile,
+    default_env_for_profile,
+    get_simulation_profile,
+    resolve_dt_s,
+)
 from sim.dynamics.attitude.disturbances import DisturbanceTorqueConfig, DisturbanceTorqueModel
 from sim.dynamics.model import OrbitalAttitudeDynamics
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2
-from sim.dynamics.orbit.propagator import OrbitPropagator, drag_plugin, j2_plugin, srp_plugin, third_body_moon_plugin
 from sim.estimation.aoi import AoITrackingEstimator
 from sim.estimation.orbit_ekf import OrbitEKFEstimator
 from sim.metrics.engagement import compute_engagement_metrics
@@ -52,7 +58,15 @@ class CompositeController:
         )
 
 
-def _make_object(object_id: str, r_km: float, phase_rad: float, target_id: str, rng: np.random.Generator) -> SimObject:
+def _make_object(
+    object_id: str,
+    r_km: float,
+    phase_rad: float,
+    target_id: str,
+    rng: np.random.Generator,
+    profile: str,
+    dt_s: float,
+) -> SimObject:
     speed = np.sqrt(EARTH_MU_KM3_S2 / r_km)
     pos = np.array([r_km * np.cos(phase_rad), r_km * np.sin(phase_rad), 0.0])
     vel = np.array([-speed * np.sin(phase_rad), speed * np.cos(phase_rad), 0.0])
@@ -72,12 +86,25 @@ def _make_object(object_id: str, r_km: float, phase_rad: float, target_id: str, 
         last_update_t_s=0.0,
     )
 
-    propagator = OrbitPropagator(integrator="adaptive", plugins=[j2_plugin, drag_plugin, srp_plugin, third_body_moon_plugin])
+    propagator = build_default_ops_orbit_propagator(profile)
+    p = get_simulation_profile(profile)
+    dcfg = default_disturbance_config_for_profile(profile)
     dynamics = OrbitalAttitudeDynamics(
         mu_km3_s2=EARTH_MU_KM3_S2,
         inertia_kg_m2=np.diag([110.0, 95.0, 85.0]),
-        disturbance_model=DisturbanceTorqueModel(EARTH_MU_KM3_S2, np.diag([110.0, 95.0, 85.0]), DisturbanceTorqueConfig()),
+        disturbance_model=DisturbanceTorqueModel(
+            EARTH_MU_KM3_S2,
+            np.diag([110.0, 95.0, 85.0]),
+            DisturbanceTorqueConfig(
+                use_gravity_gradient=dcfg.use_gravity_gradient,
+                use_magnetic=dcfg.use_magnetic,
+                use_drag=dcfg.use_drag,
+                use_srp=dcfg.use_srp,
+            ),
+        ),
         area_m2=1.3,
+        orbit_substep_s=p.orbit_substep_s,
+        attitude_substep_s=p.attitude_substep_s,
         orbit_propagator=propagator,
     )
 
@@ -86,21 +113,21 @@ def _make_object(object_id: str, r_km: float, phase_rad: float, target_id: str, 
             OwnStateSensor(
                 noise=SensorNoiseConfig(sigma=np.array([0.005, 0.005, 0.005, 5e-5, 5e-5, 5e-5]), dropout_prob=0.05, latency_s=0.2),
                 rng=rng,
-                access_model=AccessModel(AccessConfig(update_cadence_s=1.0)),
+                access_model=AccessModel(AccessConfig(update_cadence_s=max(dt_s, 1.0))),
             ),
             RelativeSensor(
                 target_id=target_id,
                 mode="range_rate",
                 noise=SensorNoiseConfig(sigma=np.array([0.01, 5e-4]), dropout_prob=0.1),
                 rng=rng,
-                access_model=AccessModel(AccessConfig(update_cadence_s=2.0, max_range_km=200.0)),
+                access_model=AccessModel(AccessConfig(update_cadence_s=max(2.0 * dt_s, 2.0), max_range_km=200.0)),
             ),
         ]
     )
 
     base_est = OrbitEKFEstimator(
         mu_km3_s2=EARTH_MU_KM3_S2,
-        dt_s=1.0,
+        dt_s=dt_s,
         process_noise_diag=np.array([1e-8, 1e-8, 1e-8, 1e-10, 1e-10, 1e-10]),
         meas_noise_diag=np.array([2.5e-5, 2.5e-5, 2.5e-5, 2.5e-9, 2.5e-9, 2.5e-9]),
     )
@@ -144,19 +171,26 @@ def run_full_stack_demo(
     pos_sigma_km: float = 0.01,
     vel_sigma_km_s: float = 1e-4,
     plot_mode: Literal["interactive", "save", "both"] = "interactive",
+    profile: str = "ops",
 ):
     rng = np.random.default_rng(seed)
+    p = get_simulation_profile(profile)
+    dt_s = resolve_dt_s(profile)
 
-    obj_a = _make_object("sat_a", 6778.0 + rng.normal(0.0, pos_sigma_km), 0.0, "sat_b", rng)
-    obj_b = _make_object("sat_b", 6778.0 + rng.normal(0.0, pos_sigma_km), 0.03, "sat_a", rng)
+    obj_a = _make_object("sat_a", 6778.0 + rng.normal(0.0, pos_sigma_km), 0.0, "sat_b", rng, profile=profile, dt_s=dt_s)
+    obj_b = _make_object("sat_b", 6778.0 + rng.normal(0.0, pos_sigma_km), 0.03, "sat_a", rng, profile=profile, dt_s=dt_s)
 
     kernel = SimulationKernel(
-        config=SimConfig(dt_s=1.0, steps=1800, integrator="adaptive", realtime_mode=True, controller_budget_ms=2.0, rng_seed=seed),
+        config=SimConfig(
+            dt_s=dt_s,
+            steps=int(np.ceil(1800.0 / dt_s)),
+            integrator=p.kernel_integrator,
+            realtime_mode=p.realtime_mode,
+            controller_budget_ms=p.controller_budget_ms,
+            rng_seed=seed,
+        ),
         objects=[obj_a, obj_b],
-        env={
-            "sun_dir_eci": np.array([1.0, 0.2, 0.1]),
-            "density_kg_m3": max(0.0, rng.normal(1e-12, 1e-13)),
-        },
+        env={**default_env_for_profile(profile), "sun_dir_eci": np.array([1.0, 0.2, 0.1]), "density_kg_m3": max(0.0, rng.normal(1e-12, 1e-13))},
     )
 
     log = kernel.run()

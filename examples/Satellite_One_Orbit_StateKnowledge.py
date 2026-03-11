@@ -12,14 +12,16 @@ if str(REPO_ROOT) not in sys.path:
 from presets import build_sim_object_from_presets
 from sim.core.kernel import SimulationKernel
 from sim.core.models import SimConfig
+from sim.config import get_simulation_profile, profile_choices, resolve_dt_s
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2
 from sim.estimation.orbit_ekf import OrbitEKFEstimator
 from sim.sensors.access import AccessConfig, AccessModel
 from sim.sensors.models import OwnStateSensor, SensorNoiseConfig
 
 
-def run_one_orbit_state_knowledge(plot_mode: str = "interactive") -> dict[str, str]:
-    dt_s = 2.0
+def run_one_orbit_state_knowledge(plot_mode: str = "interactive", profile: str = "ops") -> dict[str, str]:
+    p = get_simulation_profile(profile)
+    dt_s = resolve_dt_s(profile)
     update_cadence_s = 2.0
     sat = build_sim_object_from_presets(
         object_id="sat_knowledge",
@@ -27,6 +29,9 @@ def run_one_orbit_state_knowledge(plot_mode: str = "interactive") -> dict[str, s
         orbit_radius_km=6778.0,
         phase_rad=0.0,
         enable_disturbances=False,
+        orbit_substep_s=p.orbit_substep_s,
+        attitude_substep_s=p.attitude_substep_s,
+        profile=profile,
     )
     sat.sensor = OwnStateSensor(
         noise=SensorNoiseConfig(sigma=np.array([1e-2, 1e-2, 1e-2, 1e-4, 1e-4, 1e-4])),
@@ -45,7 +50,13 @@ def run_one_orbit_state_knowledge(plot_mode: str = "interactive") -> dict[str, s
     steps = int(np.ceil(orbital_period_s / dt_s))
 
     kernel = SimulationKernel(
-        config=SimConfig(dt_s=dt_s, steps=steps, controller_budget_ms=1.0),
+        config=SimConfig(
+            dt_s=dt_s,
+            steps=steps,
+            integrator=p.kernel_integrator,
+            realtime_mode=p.realtime_mode,
+            controller_budget_ms=p.controller_budget_ms,
+        ),
         objects=[sat],
         env={},
     )
@@ -119,9 +130,15 @@ if __name__ == "__main__":
         default="interactive",
         help="Plot behavior; interactive is default.",
     )
+    parser.add_argument(
+        "--profile",
+        choices=list(profile_choices()),
+        default="ops",
+        help="Fidelity profile: fast, ops, or high_fidelity.",
+    )
     args = parser.parse_args()
 
-    outputs = run_one_orbit_state_knowledge(plot_mode=args.plot_mode)
+    outputs = run_one_orbit_state_knowledge(plot_mode=args.plot_mode, profile=args.profile)
     print("Generated outputs:")
     for k, v in outputs.items():
         if v:
