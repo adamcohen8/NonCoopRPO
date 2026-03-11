@@ -68,6 +68,7 @@ Each simulation step follows a deterministic order in [sim/core/kernel.py](/User
   - exponential
   - USSA 1976
   - NRLMSISE-00 (optional backend dependency)
+  - JB2008 (backend callable hook)
 
 ### Attitude Dynamics
 
@@ -182,6 +183,15 @@ Ephemeris modes:
 - `external`: use `env["ephemeris_callable"](jd_utc, env)` returning `sun_pos_eci_km` and `moon_pos_eci_km`
 - `spice`: use `spiceypy` + kernels (`env["spice_kernels"]`), or a custom hook `env["spice_ephemeris_callable"]`
 
+Planetary third-body perturbations:
+
+- Use `third_body_planets_plugin` in your propagator.
+- Select bodies via `env["third_body_planets"]` (e.g., `["venus","mars","jupiter"]` or `"all"`).
+- For non-Sun/Moon planets, resolution is supported through:
+  - `ephemeris_mode="spice"` (with kernels), or
+  - explicit `env["<planet>_pos_eci_km"]`, or
+  - custom `env["ephemeris_body_callable"]` / `env["spice_body_ephemeris_callable"]`.
+
 ### 3) Run a validation comparison against HPOP output
 
 ```bash
@@ -199,6 +209,7 @@ Common entry points in `examples/`:
 - `Orbit_OneOrbit_PerturbationError_Demo.py`
 - `Orbit_SphericalHarmonics_8x8_Demo.py`
 - `Orbit_SRP_Eclipse_Demo.py`
+- `Orbit_GroundTrack_Demo.py`
 - `Rendezvous_HCW_AttitudeLQR_Demo.py`
 - `Rendezvous_HCW_AttitudeLQR_PredictiveEKF_Demo.py`
 - `Rendezvous_HCW_AttitudePD_PredictiveEKF_Demo.py`

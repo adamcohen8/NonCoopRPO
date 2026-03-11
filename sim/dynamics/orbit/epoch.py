@@ -243,6 +243,39 @@ def resolve_sun_moon_positions(env: dict, t_s: float) -> tuple[np.ndarray, np.nd
     return sun_position_eci_km_enhanced(jd), moon_position_eci_km_enhanced(jd)
 
 
+def resolve_body_position_eci_km(body_name: str, env: dict, t_s: float) -> np.ndarray:
+    name = str(body_name).strip().lower()
+    key = f"{name}_pos_eci_km"
+    if key in env:
+        return np.array(env[key], dtype=float)
+
+    if name in ("sun", "moon"):
+        sun, moon = resolve_sun_moon_positions(env, t_s)
+        return sun if name == "sun" else moon
+
+    jd = resolved_jd_utc(env=env, t_s=t_s)
+    if jd is None:
+        raise RuntimeError(
+            f"Body '{body_name}' requested but no position provided in env['{key}'] and no epoch is available."
+        )
+
+    mode = str(env.get("ephemeris_mode", "analytic_enhanced")).lower()
+    if mode in ("spice", "spiceypy"):
+        from sim.dynamics.orbit.spice import spice_body_position_eci_km
+
+        return spice_body_position_eci_km(name, jd, env)
+
+    cb = env.get("ephemeris_body_callable", None)
+    if callable(cb):
+        out = cb(name, float(jd), env)
+        return np.array(out, dtype=float).reshape(3)
+
+    raise RuntimeError(
+        f"Body '{body_name}' requested but ephemeris_mode='{mode}' cannot resolve it. "
+        "Use SPICE mode or provide env position / callable."
+    )
+
+
 def resolved_jd_utc(env: dict, t_s: float) -> float | None:
     if "jd_utc" in env:
         return float(env["jd_utc"])

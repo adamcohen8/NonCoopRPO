@@ -108,7 +108,7 @@ if __name__ == "__main__":
     parser.add_argument("--bind-port", type=int, default=50100)
     parser.add_argument("--cfs-host", type=str, default="127.0.0.1")
     parser.add_argument("--cfs-port", type=int, default=50101)
-    parser.add_argument("--atmosphere-model", choices=["exponential", "ussa1976", "nrlmsise00"], default="ussa1976")
+    parser.add_argument("--atmosphere-model", choices=["exponential", "ussa1976", "nrlmsise00", "jb2008"], default="ussa1976")
     args = parser.parse_args()
 
     result = run_demo(

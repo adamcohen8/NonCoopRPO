@@ -390,7 +390,7 @@ if __name__ == "__main__":
     parser.add_argument("--duration-min", type=float, default=150.0, help="Validation duration (minutes).")
     parser.add_argument(
         "--atmosphere-model",
-        choices=["exponential", "ussa1976", "nrlmsise00"],
+        choices=["exponential", "ussa1976", "nrlmsise00", "jb2008"],
         default="exponential",
         help="Atmosphere model used for drag comparison.",
     )

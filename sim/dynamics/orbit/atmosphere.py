@@ -9,7 +9,7 @@ from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
 from sim.dynamics.orbit.frames import eci_to_ecef
 from sim.dynamics.orbit.epoch import julian_date_to_datetime
 
-AtmosphereModelName = Literal["exponential", "ussa1976", "nrlmsise00"]
+AtmosphereModelName = Literal["exponential", "ussa1976", "nrlmsise00", "jb2008"]
 
 
 def _altitude_km_from_eci(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) -> float:
@@ -149,6 +149,39 @@ def density_nrlmsise00(r_eci_km: np.ndarray, t_s: float, env: dict | None = None
     return float(max(rho_kg_m3, 0.0))
 
 
+def density_jb2008(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) -> float:
+    """
+    JB2008 density model via externally supplied backend callable.
+
+    Required:
+    - env["jb2008_density_callable"](alt_km, lat_deg, lon_deg, dt_utc, env) -> kg/m^3
+    """
+    env = {} if env is None else dict(env)
+    alt_km = _altitude_km_from_eci(r_eci_km, t_s, env=env)
+    lat_deg, lon_deg = _spherical_lat_lon_deg_from_eci(r_eci_km, t_s, env=env)
+
+    jd_utc = env.get("jd_utc")
+    if jd_utc is not None:
+        dt_utc = julian_date_to_datetime(float(jd_utc))
+    else:
+        base_epoch = env.get("atmo_epoch_utc", datetime(2020, 1, 1, tzinfo=timezone.utc))
+        if isinstance(base_epoch, datetime):
+            if base_epoch.tzinfo is None:
+                base_epoch = base_epoch.replace(tzinfo=timezone.utc)
+            dt_utc = base_epoch + timedelta(seconds=float(t_s))
+        else:
+            dt_utc = datetime(2020, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=float(t_s))
+
+    custom_fn = env.get("jb2008_density_callable", None)
+    if callable(custom_fn):
+        return float(max(0.0, custom_fn(alt_km, lat_deg, lon_deg, dt_utc, env)))
+
+    raise RuntimeError(
+        "JB2008 model requested but backend is unavailable. "
+        "Provide env['jb2008_density_callable']."
+    )
+
+
 def _extract_nrlmsise00_total_density_g_cm3(out: object) -> float:
     # Common case: flat array-like where index 5 is total mass density [g/cm^3].
     try:
@@ -196,4 +229,6 @@ def density_from_model(
         return density_ussa1976(r_eci_km, t_s)
     if m == "nrlmsise00":
         return density_nrlmsise00(r_eci_km, t_s, env=env)
+    if m == "jb2008":
+        return density_jb2008(r_eci_km, t_s, env=env)
     raise ValueError(f"Unknown atmosphere model '{model}'.")

@@ -16,8 +16,19 @@ from sim.dynamics.orbit.accelerations import (
     accel_two_body,
 )
 from sim.dynamics.orbit.atmosphere import density_from_model
-from sim.dynamics.orbit.epoch import resolve_sun_moon_positions
-from sim.dynamics.orbit.environment import MOON_MU_KM3_S2, SUN_MU_KM3_S2
+from sim.dynamics.orbit.epoch import resolve_body_position_eci_km, resolve_sun_moon_positions
+from sim.dynamics.orbit.environment import (
+    JUPITER_MU_KM3_S2,
+    MARS_MU_KM3_S2,
+    MERCURY_MU_KM3_S2,
+    MOON_MU_KM3_S2,
+    NEPTUNE_MU_KM3_S2,
+    PLUTO_MU_KM3_S2,
+    SATURN_MU_KM3_S2,
+    SUN_MU_KM3_S2,
+    URANUS_MU_KM3_S2,
+    VENUS_MU_KM3_S2,
+)
 from sim.dynamics.orbit.integrators import integrate_adaptive, rk4_step_state
 from sim.dynamics.orbit.spherical_harmonics import (
     accel_spherical_harmonics_terms,
@@ -27,6 +38,16 @@ from sim.dynamics.orbit.spherical_harmonics import (
 
 
 AccelerationPlugin = Callable[[float, np.ndarray, dict, OrbitContext], np.ndarray]
+PLANETARY_MU_KM3_S2 = {
+    "mercury": MERCURY_MU_KM3_S2,
+    "venus": VENUS_MU_KM3_S2,
+    "mars": MARS_MU_KM3_S2,
+    "jupiter": JUPITER_MU_KM3_S2,
+    "saturn": SATURN_MU_KM3_S2,
+    "uranus": URANUS_MU_KM3_S2,
+    "neptune": NEPTUNE_MU_KM3_S2,
+    "pluto": PLUTO_MU_KM3_S2,
+}
 
 
 def j2_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
@@ -121,6 +142,25 @@ def third_body_moon_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitC
 def third_body_sun_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
     sun, _ = resolve_sun_moon_positions(env, t_s)
     return accel_third_body(x_eci[:3], sun, SUN_MU_KM3_S2)
+
+
+def third_body_planets_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
+    selected = env.get("third_body_planets", [])
+    if isinstance(selected, str):
+        selected_names = [selected.strip().lower()]
+    else:
+        selected_names = [str(v).strip().lower() for v in selected]
+    if any(v in ("all", "*") for v in selected_names):
+        selected_names = list(PLANETARY_MU_KM3_S2.keys())
+
+    acc = np.zeros(3)
+    for name in selected_names:
+        if name not in PLANETARY_MU_KM3_S2:
+            continue
+        pos = resolve_body_position_eci_km(name, env=env, t_s=t_s)
+        mu = float(env.get(f"{name}_mu_km3_s2", PLANETARY_MU_KM3_S2[name]))
+        acc += accel_third_body(x_eci[:3], pos, mu)
+    return acc
 
 
 @dataclass

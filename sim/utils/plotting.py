@@ -5,9 +5,19 @@ from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Polygon, Rectangle
 
 from sim.utils.frames import dcm_to_euler_321, ric_dcm_ir_from_rv
+from sim.utils.ground_track import split_ground_track_dateline
 from sim.utils.quaternion import quaternion_to_dcm_bn
+
+try:
+    import cartopy.crs as ccrs  # type: ignore
+    import cartopy.feature as cfeature  # type: ignore
+
+    _HAS_CARTOPY = True
+except Exception:
+    _HAS_CARTOPY = False
 
 
 PlotMode = Literal["interactive", "save", "both"]
@@ -135,3 +145,107 @@ def plot_angular_rates(
     if mode in ("interactive", "both"):
         plt.show()
     plt.close(fig)
+
+
+def plot_ground_track(
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    mode: PlotMode = "interactive",
+    out_path: str | None = None,
+    title: str = "Ground Track (Lat/Lon)",
+    draw_earth_map: bool = True,
+) -> None:
+    lon_p, lat_p = split_ground_track_dateline(lon_deg=lon_deg, lat_deg=lat_deg, jump_threshold_deg=180.0)
+    cartopy_attempted = False
+    cartopy_ok = False
+    if draw_earth_map and _HAS_CARTOPY:
+        cartopy_attempted = True
+        fig = plt.figure(figsize=(11, 5))
+        ax = fig.add_subplot(111, projection=ccrs.PlateCarree())
+        ax.set_global()
+        ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="#cfe8ff", zorder=0)
+        ax.add_feature(cfeature.LAND.with_scale("110m"), facecolor="#dbe7c9", edgecolor="#8aa27a", linewidth=0.4, zorder=1)
+        ax.coastlines(resolution="110m", linewidth=0.5, color="#5e6f57", zorder=2)
+        gl = ax.gridlines(
+            crs=ccrs.PlateCarree(),
+            draw_labels=True,
+            linewidth=0.4,
+            color="gray",
+            alpha=0.4,
+            linestyle="-",
+        )
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.xlabel_style = {"size": 8}
+        gl.ylabel_style = {"size": 8}
+        ax.plot(lon_p, lat_p, linewidth=1.4, transform=ccrs.PlateCarree(), zorder=3)
+        ax.set_title(title)
+        fig.tight_layout()
+        try:
+            if mode in ("save", "both"):
+                if out_path is None:
+                    raise ValueError("out_path is required when mode is 'save' or 'both'")
+                Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+                fig.savefig(out_path, dpi=150)
+            if mode in ("interactive", "both"):
+                plt.show()
+            cartopy_ok = True
+        except Exception:
+            cartopy_ok = False
+        finally:
+            plt.close(fig)
+
+    if cartopy_attempted and cartopy_ok:
+        return
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    if draw_earth_map:
+        _draw_stylized_earth_map(ax)
+    ax.plot(lon_p, lat_p, linewidth=1.4)
+    ax.set_xlim(-180.0, 180.0)
+    ax.set_ylim(-90.0, 90.0)
+    ax.set_xlabel("Longitude (deg)")
+    ax.set_ylabel("Latitude (deg)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.set_xticks(np.arange(-180, 181, 30))
+    ax.set_yticks(np.arange(-90, 91, 15))
+    for xv in np.arange(-180, 181, 30):
+        ax.axvline(xv, color="gray", linewidth=0.35, alpha=0.35, zorder=0)
+    for yv in np.arange(-90, 91, 15):
+        ax.axhline(yv, color="gray", linewidth=0.35, alpha=0.35, zorder=0)
+    fig.tight_layout()
+    if mode in ("save", "both"):
+        if out_path is None:
+            raise ValueError("out_path is required when mode is 'save' or 'both'")
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=150)
+    if mode in ("interactive", "both"):
+        plt.show()
+    plt.close(fig)
+
+
+def _draw_stylized_earth_map(ax: plt.Axes) -> None:
+    ocean = Rectangle((-180.0, -90.0), 360.0, 180.0, facecolor="#cfe8ff", edgecolor="none", zorder=0)
+    ax.add_patch(ocean)
+
+    continents = [
+        # North America (very coarse)
+        [(-168, 72), (-145, 68), (-130, 55), (-123, 50), (-118, 34), (-105, 24), (-97, 17), (-83, 20), (-80, 27), (-66, 45), (-82, 55), (-110, 72)],
+        # South America
+        [(-81, 12), (-72, 8), (-66, -5), (-62, -18), (-58, -33), (-54, -54), (-69, -56), (-76, -40), (-78, -20), (-81, 0)],
+        # Africa
+        [(-18, 35), (2, 37), (20, 33), (33, 23), (40, 8), (47, -12), (40, -28), (28, -35), (13, -35), (3, -24), (-4, -6), (-9, 14), (-16, 28)],
+        # Eurasia
+        [(-10, 36), (8, 46), (30, 56), (55, 64), (90, 72), (120, 66), (145, 58), (170, 50), (155, 40), (120, 24), (102, 12), (80, 8), (55, 16), (30, 26), (18, 32), (5, 38)],
+        # India/SE Asia extension
+        [(72, 23), (85, 22), (95, 15), (103, 8), (106, 2), (102, -4), (90, 2), (82, 8), (75, 16)],
+        # Australia
+        [(113, -12), (132, -11), (150, -20), (154, -32), (145, -42), (129, -42), (116, -33), (111, -22)],
+        # Greenland
+        [(-56, 82), (-42, 82), (-28, 74), (-34, 62), (-49, 60), (-60, 68)],
+        # Antarctica band
+        [(-180, -62), (-120, -64), (-60, -66), (0, -68), (60, -66), (120, -64), (180, -62), (180, -90), (-180, -90)],
+    ]
+    for poly in continents:
+        ax.add_patch(Polygon(poly, closed=True, facecolor="#dbe7c9", edgecolor="#8aa27a", linewidth=0.6, zorder=1))

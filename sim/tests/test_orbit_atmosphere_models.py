@@ -38,6 +38,27 @@ class TestOrbitAtmosphereModels(unittest.TestCase):
         self.assertAlmostEqual(rho, 1.23e-11)
         self.assertEqual(len(calls), 1)
 
+    def test_density_jb2008_callable_hook(self):
+        calls = []
+
+        def _fn(alt_km, lat_deg, lon_deg, dt_utc, env):
+            calls.append((alt_km, lat_deg, lon_deg, dt_utc))
+            return 4.56e-12
+
+        env = {
+            "jb2008_density_callable": _fn,
+            "atmo_epoch_utc": datetime(2024, 1, 1, tzinfo=timezone.utc),
+        }
+        r = np.array([7000.0, 0.0, 0.0], dtype=float)
+        rho = density_from_model("jb2008", r, t_s=60.0, env=env)
+        self.assertAlmostEqual(rho, 4.56e-12)
+        self.assertEqual(len(calls), 1)
+
+    def test_density_jb2008_without_backend_raises(self):
+        r = np.array([7000.0, 0.0, 0.0], dtype=float)
+        with self.assertRaises(RuntimeError):
+            _ = density_from_model("jb2008", r, t_s=60.0, env={})
+
     def test_drag_uses_rotating_atmosphere_relative_velocity(self):
         r = np.array([7000.0, 0.0, 0.0], dtype=float)
         omega = np.array([0.0, 0.0, EARTH_ROT_RATE_RAD_S], dtype=float)

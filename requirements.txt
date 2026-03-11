@@ -12,6 +12,7 @@ lightning>=2.2
 
 # Optional: enable NRLMSISE-00 atmospheric model backend
 # nrlmsise00>=0.1.2
+# Optional: JB2008 backend can be provided via env['jb2008_density_callable'].
 
 # Optional: enable SPICE ephemeris backend for Sun/Moon states
 # spiceypy>=6.0.0
