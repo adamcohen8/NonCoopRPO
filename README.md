@@ -1,226 +1,225 @@
 # NonCooperativeRPO
 
-Modular orbital engagement simulation framework for SIL/HIL-style closed-loop experimentation.
+Modular orbital engagement simulation framework for closed-loop SIL/HIL-oriented development.
 
-## Current Status
+## What This Project Is
 
-Core architecture is implemented across simulation kernel, orbit/attitude dynamics, sensing/estimation, controls, optimization, ML training harnesses, and integration stubs.
+This repository provides a simulation stack for:
 
-## Implemented Capabilities
+- orbital dynamics (from two-body through higher-fidelity perturbations),
+- attitude dynamics and control,
+- sensing and estimation,
+- actuator constraints and command application,
+- multi-object interaction and rendezvous-style scenarios,
+- validation and controller experimentation (including RL and gain tuning).
+
+The core intent is to support realistic control algorithm development and mission concept prototyping.
+
+## Current Architecture
+
+Each simulation step follows a deterministic order in [sim/core/kernel.py](/Users/adamcohen/Downloads/NonCooperativeRPO/sim/core/kernel.py):
+
+1. Truth propagation (dynamics)
+2. Sensor measurement generation
+3. Estimator update
+4. Controller execution (with runtime budget/deadline logic)
+5. Actuator application (limits/saturation/lag)
+6. Logging/metrics capture
+
+## Repository Layout
+
+- `sim/core/` kernel, models, scheduling
+- `sim/dynamics/orbit/` orbital forces, integrators, atmosphere, spherical harmonics
+- `sim/dynamics/attitude/` rigid body dynamics and disturbance torques
+- `sim/actuators/` orbital and attitude actuator models
+- `sim/sensors/` own-state and relative sensing models
+- `sim/estimation/` EKF/UKF/joint estimators
+- `sim/control/orbit/` orbital control, maneuver logic, HCW/LQR variants
+- `sim/control/attitude/` PD/PID/LQR, RIC wrappers, pose command generation
+- `sim/knowledge/` object knowledge tracking and update logic
+- `sim/metrics/` scoring and engagement metrics
+- `sim/optimization/` gain tuning and PSO framework
+- `sim/rocket/` dedicated ascent engine
+- `sim/tests/` unit/regression tests
+- `examples/` runnable scripts and demos
+- `presets/` reusable parameter presets
+- `integrations/` external integration stubs (including cFS SIL bridge)
+- `validation/` validation tooling and external reference-model workflows
+- `archive/` legacy code retained out of active path
+
+## Implemented Capability Snapshot
 
 ### Simulation Kernel
-- Deterministic step order in `sim/core/kernel.py`:
-  1. truth propagation
-  2. sensor measurement
-  3. estimator update
-  4. controller execution with runtime budget check
-  5. actuator application
-  6. logging
-- Arbitrary number of simulated objects.
-- Runtime budget enforcement with skip-to-zero-command behavior.
-- Per-object runtime and skip logging.
+
+- Multi-object deterministic simulation loop
+- Controller compute budget tracking with overrun skip behavior
+- Runtime and skip logging per object
 
 ### Orbital Dynamics
-- Two-body ECI propagation.
-- Optional perturbation plugins:
-  - J2
-  - J3
-  - J4
-  - drag
-  - solar radiation pressure
-  - third-body Moon/Sun
-- Configurable atmospheric density backends for drag:
+
+- Two-body ECI propagation
+- J2, J3, J4 perturbations
+- Generic spherical harmonics perturbation pipeline
+- Drag, SRP, third-body (Sun/Moon) plugins
+- Earth rotation in drag relative velocity calculation
+- Fixed-step RK4 and adaptive integration support
+- Atmosphere models:
   - exponential
-  - USSA1976
-  - NRLMSISE-00 (via optional backend/callable hook)
-- Earth rotation is included in atmosphere-relative drag velocity.
-- Optional generic spherical harmonics plugin for sectoral/tesseral terms:
-  - user specifies arbitrary `(n, m, c_nm, s_nm)` terms.
-- Fixed-step and adaptive propagation options through `OrbitPropagator`.
+  - USSA 1976
+  - NRLMSISE-00 (optional backend dependency)
 
 ### Attitude Dynamics
-- Quaternion + body-rate rigid body dynamics.
-- Optional disturbance torques:
+
+- Quaternion + body rate rigid-body propagation
+- Disturbance torques:
   - gravity-gradient
-  - magnetic dipole
+  - magnetic dipole proxy
   - drag torque
   - SRP torque
-- Optional rectangular-prism coupling mode (non-default):
-  - user sets `Lx, Ly, Lz`
-  - attitude-dependent projected area for drag and SRP in orbit propagation
-  - face-based drag/SRP disturbance torque from individual face forces
-  - requires coupled orbit+attitude disturbance simulation to be enabled
+- Reaction wheel-compatible torque application path
+- Optional rectangular-prism coupling for drag/SRP projected area and face-based torques
 
-### Actuators
-- Orbital actuator:
-  - acceleration saturation
-  - throttle slew-rate limiting
-  - minimum impulse-bit behavior
-  - optional lag
-  - propellant mass depletion
-- Attitude actuator:
-  - reaction wheel torque/momentum limits
-  - magnetorquer clamping proxy
-  - thruster pulse quantization
+### Actuators and Maneuvering
 
-### Sensing and Estimation
-- Sensors:
-  - own-state
-  - noisy own-state
-  - joint state
-  - relative measurement
-  - access gating
-- Estimators:
-  - Orbit EKF
-  - Orbit UKF
-  - Attitude EKF
-  - Joint state estimators
-  - AoI tracking wrapper
+- Orbital actuator limits, lag, throttle dynamics, impulse-bit, mass depletion
+- Reaction wheel limits and momentum saturation
+- Impulsive and thrust-limited delta-V logic
+- Attitude-gated thrusting with angular tolerance
+- Integrated orbital-attitude maneuver coordination flow
+
+### Estimation and Knowledge
+
+- Orbit EKF/UKF
+- Attitude EKF and joint state estimators
+- Object knowledge tracking with update cadence, access conditions, and noise models
 
 ### Control
-- Orbital baseline controllers:
-  - stationkeeping
-  - safety barrier
-  - risk-threshold switching
-- Orbital maneuvering:
-  - impulsive desired-velocity command
-  - impulsive delta-V vector command
-  - thrust-limited delta-V command
-  - minimum-thrust enforcement (below minimum => no fire)
-  - optional attitude-alignment gating with tolerance
-  - required attitude target (`quat_bn`) solver from thrust vector
-  - predictive burn scheduler (future-state planning + burn gate)
-- Integrated orbital + attitude maneuver coordinator:
-  - evaluates burn feasibility in current pose
-  - if aligned and feasible => fire
-  - if misaligned => slew target attitude, no fire
-  - if below min thrust => slew target attitude, no fire
-  - exposes controller-ready target attitude for downstream attitude control
-- Orbital LQR:
-  - `HCWLQRController` expects **curvilinear RIC relative state**
-  - internally converts curvilinear RIC -> rectangular RIC for HCW/LQR
-  - computes control in RIC and outputs thrust command in **ECI**
-  - curvilinear-input/rectangular-LQR variant available
-- Attitude controllers:
-  - zero torque
-  - snap
-  - snap-and-hold (RIC mode flag path)
+
+- Attitude:
   - quaternion PD
-  - reaction-wheel PD/PID (ECI and RIC-frame wrappers)
-  - generalized small-angle LQR with configurable inertia and wheel mounting geometry
+  - reaction wheel PD/PID
+  - small-angle LQR
+  - RIC-frame wrappers
+  - snap/snap-and-hold modes
+- Orbit:
+  - HCW LQR variants
+  - stationkeeping and safety-oriented controllers
+  - predictive burn scheduling
 
-### Scoring and Harness
-- Engagement metrics and score summary utilities.
-- Monte Carlo harness with seed control and JSON summaries.
-- Controller gain optimization framework with pluggable interface:
-  - PSO backend implemented
-  - preset and custom test-case support
-  - equal-weight aggregate cost across cases
+### Mission Pose Command Generation
 
-## Frames and Conventions
+Quaternion-only mission pointing commands are available in [pose_commands.py](/Users/adamcohen/Downloads/NonCooperativeRPO/sim/control/attitude/pose_commands.py):
 
-- Primary truth orbit state: ECI.
-- Attitude quaternion convention: `quat_bn` (body relative to inertial/ECI).
-- Free-tumble RIC plotting utilities are available in examples.
-- Orbital HCW LQR input/output handling:
-  - input state to controller: curvilinear RIC
-  - control law state: rectangular RIC (internal)
-  - final command to actuator: ECI acceleration vector
+- `PoseCommandGenerator.sun_track(...)`
+- `PoseCommandGenerator.spotlight_latlon(...)`
+- `PoseCommandGenerator.spotlight_ric_direction(...)`
 
-## Rocket Ascent Engine (Dedicated)
+These commands return desired `q_bn` targets and do not directly actuate the vehicle.
 
-`sim/rocket/` provides a dedicated launch-to-insertion simulation path:
-- multi-stage mass/thrust propagation with stage separation
-- launch initialization from site/azimuth
-- coupled orbit + attitude propagation
-- guidance-law interface for ascent logic
-- insertion criteria (target altitude/eccentricity + hold time)
+## Validation Status
 
-Demo:
-- `examples/Rocket_Launch_To_Orbit_Demo.py`
+You have an active HPOP cross-validation workflow:
+
+- Comparison script: [hpop_compare.py](/Users/adamcohen/Downloads/NonCooperativeRPO/validation/hpop_compare.py)
+- Supports model-by-model comparisons (`two_body`, `drag`, `srp`, `j2`, `j3`, `j4`, `j2j3`, `sh8x8`)
+- Uses fixed validation grid defaults:
+  - `dt = 1 s`
+  - `duration = 150 min`
+- Produces:
+  - component-wise state-difference plots (`simulator - HPOP`)
+  - 3D ECI orbit overlays
+  - RMS/max summary metrics
+
+For spherical harmonics parity, the validator can use HPOP’s `GGM03C.txt` coefficients directly.
+
+## Quick Start
+
+### 1) Create and activate venv
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+```
+
+### 2) Run a representative demo
+
+```bash
+python examples/Full_Framework_Demo.py
+```
+
+### 3) Run a validation comparison against HPOP output
+
+```bash
+python validation/hpop_compare.py --model two_body --dt 1 --duration-min 150 --plot-mode interactive
+```
+
+## Example Scripts
+
+Common entry points in `examples/`:
+
+- `Free_Tumble_One_Orbit.py`
+- `Free_Tumble_One_Orbit_RIC.py`
+- `Satellite_One_Orbit_StateKnowledge.py`
+- `Satellite_One_Orbit_AttitudeKnowledge.py`
+- `Orbit_OneOrbit_PerturbationError_Demo.py`
+- `Orbit_SphericalHarmonics_8x8_Demo.py`
+- `Rendezvous_HCW_AttitudeLQR_Demo.py`
+- `Rendezvous_HCW_AttitudeLQR_PredictiveEKF_Demo.py`
+- `Rendezvous_HCW_AttitudePD_PredictiveEKF_Demo.py`
+- `Attitude_PD_ReactionWheel_Demo.py`
+- `Attitude_PD_RIC_ReactionWheel_Demo.py`
+- `Attitude_PID_RIC_ReactionWheel_Demo.py`
+- `Attitude_Rectangle_Animation_ECI_Demo.py`
+- `Attitude_Rectangle_Animation_ECI_PD_Demo.py`
+- `Attitude_Rectangle_Animation_ECI_PD_Stabilize_Demo.py`
+- `Two_Satellite_TargetFrame_DriftTumble_Demo.py`
+- `Pose_Command_Quaternion_Demo.py`
+- `Rocket_Launch_To_Orbit_Demo.py`
+- `CFS_SIL_SingleSat_Loop_Demo.py`
+- `Train_NN_Rendezvous_PPO.py`
+- `Train_NN_AttitudeRIC_PPO.py`
 
 ## Presets
 
-`presets/` provides reusable parameter sets for rapid simulation setup:
-- rockets (SSTO, stage presets)
-- satellites
-- thrusters (including mounted chemical thruster)
-- attitude control hardware (reaction wheel presets)
+The `presets/` package provides reusable templates for:
 
-Quickstart:
+- rockets
+- satellites
+- thrusters
+- reaction wheel assemblies
+
+Example:
 
 ```python
 from presets import build_sim_object_from_presets
 
-sat = build_sim_object_from_presets(object_id="sat_01", dt_s=2.0, orbit_radius_km=6778.0)
+sat = build_sim_object_from_presets(
+    object_id="sat_01",
+    dt_s=2.0,
+    orbit_radius_km=6778.0,
+)
 ```
 
-## Repository Layout
+## cFS SIL Integration
 
-- `sim/core/`
-- `sim/dynamics/orbit/`
-- `sim/dynamics/attitude/`
-- `sim/actuators/`
-- `sim/sensors/`
-- `sim/estimation/`
-- `sim/control/orbit/`
-- `sim/control/attitude/`
-- `sim/scenarios/`
-- `sim/metrics/`
-- `sim/optimization/`
-- `sim/rocket/`
-- `sim/utils/`
-- `sim/tests/`
-- `examples/`
-- `presets/`
-- `integrations/`
-- `archive/`
+`integrations/cfs_sil/` contains a lightweight bridge and demo flow:
 
-## Example Scripts
+- ICD definition
+- Python bridge endpoint
+- cFS app stub
+- simulator loop adapter
 
-From repo root:
+Use this as the base for extending to real cFS message interfaces.
 
-```bash
-.venv/bin/python examples/Free_Tumble_One_Orbit.py
-.venv/bin/python examples/Free_Tumble_One_Orbit_RIC.py
-.venv/bin/python examples/Satellite_One_Orbit_StateKnowledge.py
-.venv/bin/python examples/Satellite_One_Orbit_AttitudeKnowledge.py
-.venv/bin/python examples/Impulsive_Maneuver_Demo.py
-.venv/bin/python examples/Impulsive_DeltaV_Vector_Demo.py
-.venv/bin/python examples/Impulsive_DeltaV_ThrustLimited_Demo.py
-.venv/bin/python examples/Orbit_HCW_LQR_Demo.py
-.venv/bin/python examples/Orbit_HCW_LQR_CurvVariant_Demo.py
-.venv/bin/python examples/Orbit_OneOrbit_PerturbationError_Demo.py
-.venv/bin/python examples/Full_Framework_Demo.py
-.venv/bin/python examples/MonteCarlo_Framework_Run.py
-.venv/bin/python examples/MonteCarlo_Rendezvous_PredictiveEKF.py
-.venv/bin/python examples/Rendezvous_HCW_AttitudeLQR_Demo.py
-.venv/bin/python examples/Rendezvous_HCW_AttitudeLQR_PredictiveEKF_Demo.py
-.venv/bin/python examples/Rendezvous_HCW_AttitudePD_PredictiveEKF_Demo.py
-.venv/bin/python examples/Attitude_PD_ReactionWheel_Demo.py
-.venv/bin/python examples/Attitude_PD_RIC_ReactionWheel_Demo.py
-.venv/bin/python examples/Attitude_PID_RIC_ReactionWheel_Demo.py
-.venv/bin/python examples/Optimize_Attitude_Controller_Gains.py
-.venv/bin/python examples/Object_Knowledge_EKF_Demo.py
-.venv/bin/python examples/Train_NN_Rendezvous_PPO.py
-.venv/bin/python examples/Train_NN_AttitudeRIC_PPO.py
-.venv/bin/python examples/Demo_NN_Rendezvous_BestEpoch.py
-.venv/bin/python examples/Demo_NN_AttitudeRIC_BestEpoch.py
-.venv/bin/python examples/Rocket_Launch_To_Orbit_Demo.py
-.venv/bin/python examples/CFS_SIL_SingleSat_Loop_Demo.py
-.venv/bin/python examples/Preset_Quickstart.py
-```
+## Notes and Current Limitations
 
-## cFS SIL Starter
+- Plotting defaults are interactive for current scripts, with save modes where available.
+- SRP currently does not include eclipse/shadow gating in simulator force/torque paths.
+- Some validation differences are expected from integrator and model-convention differences.
+- In this environment, use the project venv to avoid NumPy/Matplotlib ABI conflicts.
 
-`integrations/cfs_sil/` includes:
-- UDP ICD (`icd.yaml`)
-- Python bridge endpoint (`python_bridge.py`)
-- cFS app stub (`cfs_app_stub/`)
-- simulator loop adapter + demo integration
+## Roadmap Context
 
-## Notes
-
-- Use `.venv/bin/python` in this environment to avoid local NumPy/Matplotlib ABI mismatch issues.
-- Plotting default is interactive IDE display; file export is opt-in where supported by script flags.
-- `noncoop_rpo` re-exports the `sim` framework surface for compatibility.
+The project is already beyond the initial kernel-only stage in [simulation_framework_roadmap.txt](/Users/adamcohen/Downloads/NonCooperativeRPO/simulation_framework_roadmap.txt), with most phases implemented and active validation now in progress.
