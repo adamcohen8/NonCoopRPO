@@ -1,0 +1,75 @@
+version: 1
+name: rpo_cfs_sil_icd
+description: |
+  Initial UDP ICD for coupling this simulator (truth + sensor generation)
+  to NASA cFS flight software in SIL mode.
+
+transport:
+  type: udp
+  byte_order: little_endian
+  framing:
+    header:
+      magic_ascii: "RPO1"
+      version_u16: 1
+      fields:
+        - {name: magic, type: char[4]}
+        - {name: version, type: uint16}
+        - {name: msg_id, type: uint16}
+        - {name: seq, type: uint32}
+        - {name: sim_time_ns, type: uint64}
+
+message_ids:
+  sim_sensor_state: 0x1900
+  cfs_actuator_cmd: 0x1901
+  bridge_heartbeat: 0x19FE
+  bridge_error: 0x19FF
+
+messages:
+  - id: 0x1900
+    name: sim_sensor_state
+    direction: sim_to_cfs
+    rate_hz: 10
+    fields:
+      - {name: valid_flags, type: uint8, description: "bit0=orbit, bit1=attitude, bit2=sun, bit3=density"}
+      - {name: pos_eci_km, type: float64[3]}
+      - {name: vel_eci_km_s, type: float64[3]}
+      - {name: quat_bn, type: float64[4]}
+      - {name: omega_body_rad_s, type: float64[3]}
+      - {name: mass_kg, type: float64}
+      - {name: sun_dir_eci, type: float64[3]}
+      - {name: density_kg_m3, type: float64}
+
+  - id: 0x1901
+    name: cfs_actuator_cmd
+    direction: cfs_to_sim
+    rate_hz: 10
+    fields:
+      - {name: mode, type: uint8, description: "0=hold, 1=closed_loop, 2=safe"}
+      - {name: thrust_eci_km_s2, type: float64[3]}
+      - {name: torque_body_nm, type: float64[3]}
+      - {name: wheel_torque_nm, type: float64[3]}
+      - {name: valid_timeout_ms, type: uint32}
+
+timing:
+  clock_master: simulator
+  rules:
+    - cfs uses sample-and-hold when command packets are stale
+    - simulator inserts configured transport latency and jitter before command application
+
+sequence_and_replay:
+  use_sequence_counter: true
+  drop_detection: "receiver checks seq monotonicity"
+  deterministic_replay:
+    required: true
+    fields_to_log:
+      - seq
+      - sim_time_ns
+      - raw_packet_bytes
+
+fault_injection:
+  future_extension: true
+  planned_controls:
+    - packet_drop_probability
+    - latency_ms
+    - measurement_bias_scale
+    - actuator_scale

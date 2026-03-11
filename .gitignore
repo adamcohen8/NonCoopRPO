@@ -13,6 +13,7 @@ __pycache__/
 # Local outputs and generated plots
 outputs/
 examples/outputs/
+**/lightning_logs/
 
 # OS/editor noise
 .DS_Store
