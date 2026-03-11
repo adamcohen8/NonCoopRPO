@@ -4,8 +4,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from datetime import datetime, timezone
 
 from sim.dynamics.attitude.disturbances import DisturbanceTorqueConfig
+from sim.dynamics.orbit.epoch import datetime_to_julian_date
 from sim.dynamics.orbit.propagator import (
     OrbitPropagator,
     drag_plugin,
@@ -109,8 +111,11 @@ def resolve_steps_for_duration(duration_s: float, profile_name: str, dt_override
 
 def default_env_for_profile(profile_name: str) -> dict:
     profile = get_simulation_profile(profile_name)
+    jd_now = datetime_to_julian_date(datetime.now(tz=timezone.utc))
     return {
         "atmosphere_model": profile.atmosphere_model,
+        "jd_utc_start": jd_now,
+        "ephemeris_mode": "analytic_enhanced",
         "sun_dir_eci": np.array([1.0, 0.0, 0.0], dtype=float),
         "sun_pos_eci_km": np.array([149597870.7, 0.0, 0.0], dtype=float),
         "moon_pos_eci_km": np.array([384400.0, 0.0, 0.0], dtype=float),

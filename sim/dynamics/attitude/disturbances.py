@@ -6,6 +6,7 @@ import numpy as np
 
 from sim.core.models import StateTruth
 from sim.dynamics.orbit.atmosphere import density_from_model
+from sim.dynamics.orbit.eclipse import srp_shadow_factor
 from sim.dynamics.orbit.environment import EARTH_ROT_RATE_RAD_S
 from sim.dynamics.spacecraft_geometry import RectangularPrismGeometry
 from sim.utils.quaternion import quaternion_to_dcm_bn
@@ -105,21 +106,22 @@ class DisturbanceTorqueModel:
         return np.cross(self.config.drag_cp_offset_body_m, f_drag_body)
 
     def _srp_torque(self, state: StateTruth, env: dict) -> np.ndarray:
-        # NOTE: Eclipse/shadowing is not currently modeled here. SRP torque is
-        # applied continuously using sun_dir_eci when enabled.
         sun_dir_eci = np.array(env.get("sun_dir_eci", self.config.sun_dir_eci), dtype=float)
         n = np.linalg.norm(sun_dir_eci)
         if n == 0.0:
             return np.zeros(3)
         sun_dir_eci = sun_dir_eci / n
+        shadow = srp_shadow_factor(r_sc_eci_km=state.position_eci_km, t_s=state.t_s, env=env)
+        if shadow <= 0.0:
+            return np.zeros(3)
 
         c_bn = quaternion_to_dcm_bn(state.attitude_quat_bn)
         sun_dir_body = c_bn @ sun_dir_eci
         if self._rect_prism_geometry is not None and self.config.use_rectangular_prism_faces:
-            p_srp = SOLAR_PRESSURE_N_M2 * self.config.srp_cr
+            p_srp = SOLAR_PRESSURE_N_M2 * self.config.srp_cr * shadow
             return self._rect_prism_geometry.face_torque_sum_body_nm(sun_dir_body, p_srp)
 
-        force_mag = SOLAR_PRESSURE_N_M2 * self.config.srp_cr * self.config.srp_area_m2
+        force_mag = SOLAR_PRESSURE_N_M2 * self.config.srp_cr * self.config.srp_area_m2 * shadow
         f_srp_body = -force_mag * sun_dir_body
         return np.cross(self.config.srp_cp_offset_body_m, f_srp_body)
 

@@ -166,6 +166,21 @@ Profiles:
 - `ops`: mission-engineering default balance
 - `high_fidelity`: tighter integration settings for validation-style runs
 
+### 2c) Initialize with Julian Date (epoch-aware dynamics)
+
+You can now initialize simulation time with a Julian date using `SimConfig.initial_jd_utc` or by setting `env["jd_utc_start"]`.
+When provided, the kernel populates `env["jd_utc"]` each step and enables simple analytic Sun/Moon ephemerides (`ephemeris_mode="analytic_simple"` by default), improving time dependence for:
+
+- SRP sun direction
+- Sun/Moon third-body vectors
+- NRLMSISE-00 epoch handling
+
+Ephemeris modes:
+
+- `analytic_enhanced` (default): improved low-cost Sun/Moon analytic model
+- `analytic_simple`: previous lightweight model
+- `external`: use `env["ephemeris_callable"](jd_utc, env)` returning `sun_pos_eci_km` and `moon_pos_eci_km`
+
 ### 3) Run a validation comparison against HPOP output
 
 ```bash
@@ -182,6 +197,7 @@ Common entry points in `examples/`:
 - `Satellite_One_Orbit_AttitudeKnowledge.py`
 - `Orbit_OneOrbit_PerturbationError_Demo.py`
 - `Orbit_SphericalHarmonics_8x8_Demo.py`
+- `Orbit_SRP_Eclipse_Demo.py`
 - `Rendezvous_HCW_AttitudeLQR_Demo.py`
 - `Rendezvous_HCW_AttitudeLQR_PredictiveEKF_Demo.py`
 - `Rendezvous_HCW_AttitudePD_PredictiveEKF_Demo.py`
@@ -233,7 +249,7 @@ Use this as the base for extending to real cFS message interfaces.
 ## Notes and Current Limitations
 
 - Plotting defaults are interactive for current scripts, with save modes where available.
-- SRP currently does not include eclipse/shadow gating in simulator force/torque paths.
+- SRP eclipse/shadow gating is modeled with configurable shadow mode (`conical`, `cylindrical`, or `none`).
 - Some validation differences are expected from integrator and model-convention differences.
 - In this environment, use the project venv to avoid NumPy/Matplotlib ABI conflicts.
 

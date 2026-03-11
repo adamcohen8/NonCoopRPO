@@ -52,6 +52,7 @@ class SimConfig:
     realtime_mode: bool = True
     controller_budget_ms: float = 2.0
     rng_seed: int = 0
+    initial_jd_utc: float | None = None
 
     def __post_init__(self) -> None:
         if self.dt_s <= 0.0:
@@ -60,6 +61,8 @@ class SimConfig:
             raise ValueError("steps must be positive")
         if self.controller_budget_ms <= 0.0:
             raise ValueError("controller_budget_ms must be positive")
+        if self.initial_jd_utc is not None and self.initial_jd_utc <= 0.0:
+            raise ValueError("initial_jd_utc must be positive when provided")
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,7 @@ class SimLog:
     controller_runtime_ms_by_object: dict[str, np.ndarray]
     controller_skipped_by_object: dict[str, np.ndarray]
     knowledge_by_observer: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
+    srp_shadow_by_object: dict[str, np.ndarray] = field(default_factory=dict)
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
@@ -111,4 +115,5 @@ class SimLog:
             "controller_skipped_by_object": {
                 k: v.astype(int).tolist() for k, v in self.controller_skipped_by_object.items()
             },
+            "srp_shadow_by_object": {k: v.tolist() for k, v in self.srp_shadow_by_object.items()},
         }

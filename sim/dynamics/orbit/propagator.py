@@ -16,6 +16,7 @@ from sim.dynamics.orbit.accelerations import (
     accel_two_body,
 )
 from sim.dynamics.orbit.atmosphere import density_from_model
+from sim.dynamics.orbit.epoch import resolve_sun_moon_positions
 from sim.dynamics.orbit.environment import MOON_MU_KM3_S2, SUN_MU_KM3_S2
 from sim.dynamics.orbit.integrators import integrate_adaptive, rk4_step_state
 from sim.dynamics.orbit.spherical_harmonics import (
@@ -103,16 +104,22 @@ def drag_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> 
 
 
 def srp_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
-    return accel_srp(ctx.mass_kg, ctx.area_m2, ctx.cr, env)
+    env_local = dict(env)
+    if "sun_dir_eci" not in env_local:
+        sun, _ = resolve_sun_moon_positions(env_local, t_s)
+        n = float(np.linalg.norm(sun))
+        if n > 0.0:
+            env_local["sun_dir_eci"] = sun / n
+    return accel_srp(x_eci[:3], ctx.mass_kg, ctx.area_m2, ctx.cr, t_s, env_local)
 
 
 def third_body_moon_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
-    moon = np.array(env.get("moon_pos_eci_km", np.array([384400.0, 0.0, 0.0])), dtype=float)
+    _, moon = resolve_sun_moon_positions(env, t_s)
     return accel_third_body(x_eci[:3], moon, MOON_MU_KM3_S2)
 
 
 def third_body_sun_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
-    sun = np.array(env.get("sun_pos_eci_km", np.array([149597870.7, 0.0, 0.0])), dtype=float)
+    sun, _ = resolve_sun_moon_positions(env, t_s)
     return accel_third_body(x_eci[:3], sun, SUN_MU_KM3_S2)
 
 

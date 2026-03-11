@@ -7,17 +7,20 @@ import numpy as np
 
 from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
 from sim.dynamics.orbit.frames import eci_to_ecef
+from sim.dynamics.orbit.epoch import julian_date_to_datetime
 
 AtmosphereModelName = Literal["exponential", "ussa1976", "nrlmsise00"]
 
 
-def _altitude_km_from_eci(r_eci_km: np.ndarray, t_s: float) -> float:
-    r_ecef_km = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s))
+def _altitude_km_from_eci(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) -> float:
+    env = {} if env is None else env
+    r_ecef_km = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s), jd_utc_start=env.get("jd_utc_start"))
     return float(max(0.0, np.linalg.norm(r_ecef_km) - EARTH_RADIUS_KM))
 
 
-def _spherical_lat_lon_deg_from_eci(r_eci_km: np.ndarray, t_s: float) -> tuple[float, float]:
-    r_ecef_km = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s))
+def _spherical_lat_lon_deg_from_eci(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) -> tuple[float, float]:
+    env = {} if env is None else env
+    r_ecef_km = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s), jd_utc_start=env.get("jd_utc_start"))
     r = float(np.linalg.norm(r_ecef_km))
     if r <= 0.0:
         return 0.0, 0.0
@@ -108,16 +111,20 @@ def density_nrlmsise00(r_eci_km: np.ndarray, t_s: float, env: dict | None = None
     - python package `nrlmsise00` with `msise_model`.
     """
     env = {} if env is None else dict(env)
-    alt_km = _altitude_km_from_eci(r_eci_km, t_s)
-    lat_deg, lon_deg = _spherical_lat_lon_deg_from_eci(r_eci_km, t_s)
+    alt_km = _altitude_km_from_eci(r_eci_km, t_s, env=env)
+    lat_deg, lon_deg = _spherical_lat_lon_deg_from_eci(r_eci_km, t_s, env=env)
 
-    base_epoch = env.get("atmo_epoch_utc", datetime(2020, 1, 1, tzinfo=timezone.utc))
-    if isinstance(base_epoch, datetime):
-        if base_epoch.tzinfo is None:
-            base_epoch = base_epoch.replace(tzinfo=timezone.utc)
-        dt_utc = base_epoch + timedelta(seconds=float(t_s))
+    jd_utc = env.get("jd_utc")
+    if jd_utc is not None:
+        dt_utc = julian_date_to_datetime(float(jd_utc))
     else:
-        dt_utc = datetime(2020, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=float(t_s))
+        base_epoch = env.get("atmo_epoch_utc", datetime(2020, 1, 1, tzinfo=timezone.utc))
+        if isinstance(base_epoch, datetime):
+            if base_epoch.tzinfo is None:
+                base_epoch = base_epoch.replace(tzinfo=timezone.utc)
+            dt_utc = base_epoch + timedelta(seconds=float(t_s))
+        else:
+            dt_utc = datetime(2020, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=float(t_s))
 
     custom_fn = env.get("nrlmsise00_density_callable", None)
     if callable(custom_fn):

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from sim.dynamics.orbit.atmosphere import density_exponential
+from sim.dynamics.orbit.eclipse import srp_shadow_factor
 from sim.dynamics.orbit.environment import EARTH_J2, EARTH_J3, EARTH_J4, EARTH_RADIUS_KM, EARTH_ROT_RATE_RAD_S, SOLAR_PRESSURE_N_M2
 
 
@@ -132,13 +133,13 @@ def accel_drag(
 
 
 def accel_srp(
+    r_eci_km: np.ndarray,
     mass_kg: float,
     area_m2: float,
     cr: float,
+    t_s: float,
     env: dict,
 ) -> np.ndarray:
-    # NOTE: Eclipse/shadowing is not currently modeled here. SRP is applied
-    # continuously based on sun_dir_eci when area > 0.
     if mass_kg <= 0.0:
         return np.zeros(3)
     area_eff_m2 = float(env.get("srp_area_m2", area_m2))
@@ -149,9 +150,12 @@ def accel_srp(
     if n == 0.0:
         return np.zeros(3)
     sun_dir_eci = sun_dir_eci / n
+    shadow = srp_shadow_factor(r_sc_eci_km=r_eci_km, t_s=t_s, env=env)
+    if shadow <= 0.0:
+        return np.zeros(3)
     force_n = SOLAR_PRESSURE_N_M2 * cr * area_eff_m2
     a_m_s2 = force_n / mass_kg
-    return -(a_m_s2 / 1e3) * sun_dir_eci
+    return -(a_m_s2 / 1e3) * shadow * sun_dir_eci
 
 
 def accel_third_body(r_eci_km: np.ndarray, body_pos_eci_km: np.ndarray, body_mu_km3_s2: float) -> np.ndarray:

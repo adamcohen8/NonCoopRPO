@@ -16,6 +16,19 @@ from sim.dynamics.orbit.atmosphere import (
     density_ussa1976,
 )
 from sim.dynamics.orbit.environment import EARTH_J2, EARTH_J3, EARTH_J4, EARTH_MU_KM3_S2, EARTH_RADIUS_KM
+from sim.dynamics.orbit.epoch import (
+    datetime_to_julian_date,
+    gmst_angle_rad_from_jd,
+    julian_date_to_datetime,
+    moon_position_eci_km_enhanced,
+    moon_position_eci_km_simple,
+    resolve_time_dependent_env,
+    resolve_sun_moon_positions,
+    resolved_jd_utc,
+    sun_position_eci_km_enhanced,
+    sun_position_eci_km_simple,
+)
+from sim.dynamics.orbit.eclipse import srp_shadow_factor
 from sim.dynamics.orbit.propagator import (
     OrbitPropagator,
     drag_plugin,
@@ -42,6 +55,17 @@ __all__ = [
     "EARTH_J2",
     "EARTH_J3",
     "EARTH_J4",
+    "datetime_to_julian_date",
+    "julian_date_to_datetime",
+    "gmst_angle_rad_from_jd",
+    "sun_position_eci_km_enhanced",
+    "sun_position_eci_km_simple",
+    "moon_position_eci_km_enhanced",
+    "moon_position_eci_km_simple",
+    "resolved_jd_utc",
+    "resolve_sun_moon_positions",
+    "resolve_time_dependent_env",
+    "srp_shadow_factor",
     "AtmosphereModelName",
     "SphericalHarmonicTerm",
     "OrbitContext",
