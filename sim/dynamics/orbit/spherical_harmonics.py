@@ -216,6 +216,62 @@ def load_icgem_gfc_terms(
     return out
 
 
+def load_hpop_ggm03_terms(
+    coeff_path: str | Path,
+    max_degree: int,
+    max_order: int | None = None,
+    normalized: bool = True,
+) -> list[SphericalHarmonicTerm]:
+    """
+    Load HPOP-style GGM03 coefficient table (e.g., GGM03C.txt).
+
+    Expected row format:
+      n  m  Cnm  Snm  sigmaC  sigmaS
+    """
+    path = Path(coeff_path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"HPOP gravity coefficient file not found: {path}")
+
+    n_max = int(max_degree)
+    if n_max < 2:
+        raise ValueError("max_degree must be >= 2.")
+    m_max = n_max if max_order is None else int(max_order)
+    if m_max < 0:
+        raise ValueError("max_order must be >= 0.")
+
+    out: list[SphericalHarmonicTerm] = []
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            s = line.strip()
+            if not s:
+                continue
+            parts = s.split()
+            if len(parts) < 4:
+                continue
+            try:
+                n = int(parts[0])
+                m = int(parts[1])
+                c_nm = float(parts[2])
+                s_nm = float(parts[3])
+            except ValueError:
+                continue
+            if n < 2 or n > n_max or m < 0 or m > min(n, m_max):
+                continue
+            out.append(
+                SphericalHarmonicTerm(
+                    n=n,
+                    m=m,
+                    c_nm=c_nm,
+                    s_nm=s_nm,
+                    normalized=bool(normalized),
+                )
+            )
+
+    if not out:
+        raise ValueError(f"No usable GGM03 terms found in {path} for n<= {n_max}, m<= {m_max}.")
+    return out
+
+
 _REAL_MODEL_URLS = {
     "EGM96": [
         # SatelliteToolboxGravityModels.jl documented direct ICGEM link.

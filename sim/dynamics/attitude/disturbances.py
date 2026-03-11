@@ -105,6 +105,8 @@ class DisturbanceTorqueModel:
         return np.cross(self.config.drag_cp_offset_body_m, f_drag_body)
 
     def _srp_torque(self, state: StateTruth, env: dict) -> np.ndarray:
+        # NOTE: Eclipse/shadowing is not currently modeled here. SRP torque is
+        # applied continuously using sun_dir_eci when enabled.
         sun_dir_eci = np.array(env.get("sun_dir_eci", self.config.sun_dir_eci), dtype=float)
         n = np.linalg.norm(sun_dir_eci)
         if n == 0.0:

@@ -136,10 +136,44 @@ def density_nrlmsise00(r_eci_km: np.ndarray, t_s: float, env: dict | None = None
         ) from exc
 
     out = msise_model(dt_utc, float(alt_km), float(lat_deg), float(lon_deg), float(f107a), float(f107), float(ap))
-    # python-nrlmsise00 returns total mass density in g/cm^3 at index 5.
-    rho_g_cm3 = float(out[5])
+    # nrlmsise00 backends vary in return shape (flat vector vs tuple(dens,temp)).
+    rho_g_cm3 = _extract_nrlmsise00_total_density_g_cm3(out)
     rho_kg_m3 = rho_g_cm3 * 1000.0
     return float(max(rho_kg_m3, 0.0))
+
+
+def _extract_nrlmsise00_total_density_g_cm3(out: object) -> float:
+    # Common case: flat array-like where index 5 is total mass density [g/cm^3].
+    try:
+        arr = np.asarray(out, dtype=float)
+        if arr.ndim == 1 and arr.size >= 6:
+            return float(arr[5])
+    except Exception:
+        pass
+
+    # Common alternative: tuple/list where first element is density vector.
+    if isinstance(out, (tuple, list)) and len(out) > 0:
+        first = out[0]
+        try:
+            dens = np.asarray(first, dtype=float).reshape(-1)
+            if dens.size >= 6:
+                return float(dens[5])
+        except Exception:
+            pass
+
+        # Fallback: first element in container that looks like a density vector.
+        for item in out:
+            try:
+                cand = np.asarray(item, dtype=float).reshape(-1)
+                if cand.size >= 6:
+                    return float(cand[5])
+            except Exception:
+                continue
+
+    raise RuntimeError(
+        "Unable to extract NRLMSISE-00 total mass density from backend output. "
+        "Provide env['nrlmsise00_density_callable'] for explicit control."
+    )
 
 
 def density_from_model(

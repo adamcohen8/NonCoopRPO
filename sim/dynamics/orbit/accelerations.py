@@ -137,6 +137,8 @@ def accel_srp(
     cr: float,
     env: dict,
 ) -> np.ndarray:
+    # NOTE: Eclipse/shadowing is not currently modeled here. SRP is applied
+    # continuously based on sun_dir_eci when area > 0.
     if mass_kg <= 0.0:
         return np.zeros(3)
     area_eff_m2 = float(env.get("srp_area_m2", area_m2))
