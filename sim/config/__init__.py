@@ -19,11 +19,13 @@ from sim.config.scenario_yaml import (
     BridgePointer,
     MonteCarloSection,
     MonteCarloVariation,
+    OutputsSection,
     SimulationScenarioConfig,
     SimulatorSection,
     load_simulation_yaml,
     scenario_config_from_dict,
 )
+from sim.config.plugin_validation import validate_scenario_plugins
 
 __all__ = [
     "SimulationProfileName",
@@ -45,7 +47,9 @@ __all__ = [
     "SimulatorSection",
     "MonteCarloVariation",
     "MonteCarloSection",
+    "OutputsSection",
     "SimulationScenarioConfig",
     "scenario_config_from_dict",
     "load_simulation_yaml",
+    "validate_scenario_plugins",
 ]

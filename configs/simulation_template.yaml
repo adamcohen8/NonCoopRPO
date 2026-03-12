@@ -1,6 +1,6 @@
 # Canonical simulation scenario config template
 # Sections:
-#   rocket, chaser, target, simulator, monte_carlo
+#   rocket, chaser, target, simulator, outputs, monte_carlo
 
 scenario_name: "asat_engagement_baseline"
 
@@ -42,12 +42,7 @@ rocket:
     module: "sim.control.attitude.zero_torque"
     class_name: "ZeroTorqueController"
     params: {}
-  mission_objectives:
-    - kind: "python"
-      module: "mission.objectives"
-      class_name: "InjectChaserObjective"
-      params:
-        deploy_time_s: 900.0
+  mission_objectives: []
   bridge:
     enabled: false
     mode: "sil"
@@ -78,28 +73,24 @@ chaser:
     attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
   initial_state:
     source: "rocket_deployment"
+    deploy_time_s: 900.0
     deploy_dv_body_m_s: [10.0, 0.0, 0.0]
   guidance:
     kind: "python"
-    module: "sim.control.orbit.baseline"
-    class_name: "StationkeepingController"
+    module: "sim.control.orbit.zero_controller"
+    class_name: "ZeroController"
     params: {}
   orbit_control:
     kind: "python"
-    module: "sim.control.orbit.lqr"
-    class_name: "HCWLQRController"
+    module: "sim.control.orbit.zero_controller"
+    class_name: "ZeroController"
     params: {}
   attitude_control:
     kind: "python"
-    module: "sim.control.attitude.ric_lqr"
-    class_name: "RICFrameLQRController"
+    module: "sim.control.attitude.zero_torque"
+    class_name: "ZeroTorqueController"
     params: {}
-  mission_objectives:
-    - kind: "python"
-      module: "mission.objectives"
-      class_name: "RendezvousObjective"
-      params:
-        target_id: "target"
+  mission_objectives: []
   bridge:
     enabled: false
     mode: "hil"
@@ -139,19 +130,15 @@ target:
     params: {}
   orbit_control:
     kind: "python"
-    module: "sim.control.orbit.baseline"
-    class_name: "SafetyBarrierController"
+    module: "sim.control.orbit.zero_controller"
+    class_name: "ZeroController"
     params: {}
   attitude_control:
     kind: "python"
-    module: "sim.control.attitude.ric_pd"
-    class_name: "RICFramePDController"
+    module: "sim.control.attitude.zero_torque"
+    class_name: "ZeroTorqueController"
     params: {}
-  mission_objectives:
-    - kind: "python"
-      module: "mission.objectives"
-      class_name: "SurvivalObjective"
-      params: {}
+  mission_objectives: []
   bridge:
     enabled: false
     mode: "sil"
@@ -174,6 +161,7 @@ target:
       type: "ekf"
 
 simulator:
+  scenario_type: "asat_phased_engagement"  # auto | asat_phased_engagement | rocket_ascent | free_tumble_one_orbit | free_tumble_one_orbit_ric
   duration_s: 7200.0
   dt_s: 1.0
   initial_jd_utc: null
@@ -204,9 +192,53 @@ simulator:
     ephemeris_mode: "analytic_simple"
     use_spice: false
     atmosphere_env: {}
+  plugin_validation:
+    strict: true
   termination:
     earth_impact_enabled: true
     earth_radius_km: 6378.137
+
+outputs:
+  output_dir: "outputs/asat_engagement_baseline"
+  mode: "interactive"  # interactive | save | both
+  stats:
+    enabled: true
+    print_summary: true
+    save_json: true
+    save_csv: false
+  plots:
+    enabled: true
+    reference_object_id: "target"
+    figure_ids:
+      - "orbit_eci"
+      - "trajectory_ecef"
+      - "trajectory_ric_rect"
+      - "trajectory_ric_curv"
+      - "trajectory_eci_multi"
+      - "trajectory_ecef_multi"
+      - "trajectory_ric_rect_multi"
+      - "trajectory_ric_curv_multi"
+      - "attitude"
+      - "quaternion_eci"
+      - "quaternion_ric"
+      - "rates_eci"
+      - "rates_ric"
+      - "control_thrust"
+      - "control_thrust_multi"
+      - "relative_range"
+      - "knowledge_timeline"
+    dpi: 160
+  animations:
+    enabled: false
+    types:
+      - "relative_3d"
+    fps: 30
+    speed_multiple: 10.0
+  monte_carlo:
+    save_iteration_summaries: true
+    save_aggregate_summary: true
+    save_histograms: true
+    save_raw_runs: false
 
 monte_carlo:
   enabled: false

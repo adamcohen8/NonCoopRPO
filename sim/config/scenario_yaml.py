@@ -41,12 +41,24 @@ class AgentSection:
 
 @dataclass(frozen=True)
 class SimulatorSection:
+    scenario_type: str = "auto"
     duration_s: float = 3600.0
     dt_s: float = 1.0
     initial_jd_utc: float | None = None
     dynamics: dict[str, Any] = field(default_factory=dict)
     environment: dict[str, Any] = field(default_factory=dict)
+    plugin_validation: dict[str, Any] = field(default_factory=lambda: {"strict": True})
     termination: dict[str, Any] = field(default_factory=lambda: {"earth_impact_enabled": True, "earth_radius_km": 6378.137})
+
+
+@dataclass(frozen=True)
+class OutputsSection:
+    output_dir: str = "outputs"
+    mode: str = "interactive"
+    stats: dict[str, Any] = field(default_factory=dict)
+    plots: dict[str, Any] = field(default_factory=dict)
+    animations: dict[str, Any] = field(default_factory=dict)
+    monte_carlo: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -75,6 +87,7 @@ class SimulationScenarioConfig:
     chaser: AgentSection = field(default_factory=lambda: AgentSection(enabled=False, role="chaser"))
     target: AgentSection = field(default_factory=lambda: AgentSection(enabled=True, role="target"))
     simulator: SimulatorSection = field(default_factory=SimulatorSection)
+    outputs: OutputsSection = field(default_factory=OutputsSection)
     monte_carlo: MonteCarloSection = field(default_factory=MonteCarloSection)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -142,17 +155,21 @@ def _parse_agent_section(value: Any, role: str) -> AgentSection:
 def _parse_simulator_section(value: Any) -> SimulatorSection:
     d = _as_dict(value, "simulator")
     out = SimulatorSection(
+        scenario_type=str(d.get("scenario_type", "auto")),
         duration_s=float(d.get("duration_s", 3600.0)),
         dt_s=float(d.get("dt_s", 1.0)),
         initial_jd_utc=float(d["initial_jd_utc"]) if d.get("initial_jd_utc") is not None else None,
         dynamics=dict(d.get("dynamics", {}) or {}),
         environment=dict(d.get("environment", {}) or {}),
+        plugin_validation=dict(d.get("plugin_validation", {}) or {}),
         termination=dict(d.get("termination", {}) or {}),
     )
     if out.dt_s <= 0.0:
         raise ValueError("simulator.dt_s must be positive.")
     if out.duration_s <= 0.0:
         raise ValueError("simulator.duration_s must be positive.")
+    if not out.scenario_type.strip():
+        raise ValueError("simulator.scenario_type must be non-empty.")
     return out
 
 
@@ -188,6 +205,23 @@ def _parse_monte_carlo_section(value: Any) -> MonteCarloSection:
     return out
 
 
+def _parse_outputs_section(value: Any) -> OutputsSection:
+    d = _as_dict(value, "outputs")
+    out = OutputsSection(
+        output_dir=str(d.get("output_dir", "outputs")),
+        mode=str(d.get("mode", "interactive")),
+        stats=dict(d.get("stats", {}) or {}),
+        plots=dict(d.get("plots", {}) or {}),
+        animations=dict(d.get("animations", {}) or {}),
+        monte_carlo=dict(d.get("monte_carlo", {}) or {}),
+    )
+    if out.mode not in ("interactive", "save", "both"):
+        raise ValueError("outputs.mode must be one of: interactive, save, both.")
+    if not out.output_dir.strip():
+        raise ValueError("outputs.output_dir must be non-empty.")
+    return out
+
+
 def scenario_config_from_dict(data: dict[str, Any]) -> SimulationScenarioConfig:
     root = _as_dict(data, "root")
     return SimulationScenarioConfig(
@@ -196,6 +230,7 @@ def scenario_config_from_dict(data: dict[str, Any]) -> SimulationScenarioConfig:
         chaser=_parse_agent_section(root.get("chaser"), role="chaser"),
         target=_parse_agent_section(root.get("target"), role="target"),
         simulator=_parse_simulator_section(root.get("simulator")),
+        outputs=_parse_outputs_section(root.get("outputs")),
         monte_carlo=_parse_monte_carlo_section(root.get("monte_carlo")),
         metadata=dict(root.get("metadata", {}) or {}),
     )

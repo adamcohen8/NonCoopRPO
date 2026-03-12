@@ -2,12 +2,21 @@ from sim.utils.frames import dcm_to_euler_321, ric_curv_to_rect, ric_dcm_ir_from
 from sim.utils.ground_track import ground_track_from_eci_history, split_ground_track_dateline
 from sim.utils.integration import rk4_step
 from sim.utils.io import write_json
-from sim.utils.plotting import (
+from sim.utils.plotting_capabilities import (
+    animate_ground_track,
+    animate_rectangular_prism_attitude,
+    animate_trajectory_frame,
     plot_angular_rates,
     plot_attitude_ric,
     plot_attitude_tumble,
+    plot_body_rates,
+    plot_control_commands,
     plot_ground_track,
+    plot_multi_control_commands,
+    plot_multi_trajectory_frame,
     plot_orbit_eci,
+    plot_quaternion_components,
+    plot_trajectory_frame,
 )
 from sim.utils.quaternion import (
     dcm_to_quaternion_bn,
@@ -32,6 +41,15 @@ __all__ = [
     "plot_attitude_ric",
     "plot_angular_rates",
     "plot_ground_track",
+    "plot_quaternion_components",
+    "plot_body_rates",
+    "plot_trajectory_frame",
+    "plot_multi_trajectory_frame",
+    "plot_control_commands",
+    "plot_multi_control_commands",
+    "animate_rectangular_prism_attitude",
+    "animate_trajectory_frame",
+    "animate_ground_track",
     "normalize_quaternion",
     "omega_matrix",
     "quaternion_multiply",

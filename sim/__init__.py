@@ -46,6 +46,7 @@ from sim.config import (
     BridgePointer,
     MonteCarloSection,
     MonteCarloVariation,
+    OutputsSection,
     PROFILE_FAST,
     PROFILE_HIGH_FIDELITY,
     PROFILE_OPS,
@@ -63,6 +64,7 @@ from sim.config import (
     resolve_dt_s,
     resolve_steps_for_duration,
     scenario_config_from_dict,
+    validate_scenario_plugins,
 )
 from sim.core.kernel import SimObject, SimulationKernel
 from sim.core.models import Command, ObjectConfig, SimConfig, SimLog, StateBelief, StateTruth
@@ -177,7 +179,21 @@ from sim.sensors import (
     RelativeSensor,
     SensorNoiseConfig,
 )
-from sim.utils import ground_track_from_eci_history, plot_ground_track, split_ground_track_dateline
+from sim.master_simulator import run_master_simulation
+from sim.utils import (
+    animate_ground_track,
+    animate_rectangular_prism_attitude,
+    animate_trajectory_frame,
+    ground_track_from_eci_history,
+    plot_body_rates,
+    plot_control_commands,
+    plot_ground_track,
+    plot_multi_control_commands,
+    plot_multi_trajectory_frame,
+    plot_quaternion_components,
+    plot_trajectory_frame,
+    split_ground_track_dateline,
+)
 
 __all__ = [
     "ActuatorLimits",
@@ -227,9 +243,11 @@ __all__ = [
     "SimulatorSection",
     "MonteCarloVariation",
     "MonteCarloSection",
+    "OutputsSection",
     "SimulationScenarioConfig",
     "scenario_config_from_dict",
     "load_simulation_yaml",
+    "validate_scenario_plugins",
     "PoseCommandGenerator",
     "QuaternionPDController",
     "ReactionWheelPDController",
@@ -332,6 +350,15 @@ __all__ = [
     "ground_track_from_eci_history",
     "split_ground_track_dateline",
     "plot_ground_track",
+    "plot_quaternion_components",
+    "plot_body_rates",
+    "plot_trajectory_frame",
+    "plot_multi_trajectory_frame",
+    "plot_control_commands",
+    "plot_multi_control_commands",
+    "animate_rectangular_prism_attitude",
+    "animate_trajectory_frame",
+    "animate_ground_track",
     "run_free_tumble_one_orbit",
     "run_free_tumble_one_orbit_ric",
     "run_full_stack_demo",
@@ -341,6 +368,7 @@ __all__ = [
     "run_asat_phased_engagement",
     "MonteCarloConfig",
     "run_monte_carlo",
+    "run_master_simulation",
     "GuidanceCommand",
     "RocketAeroConfig",
     "RocketGuidanceLaw",
