@@ -182,6 +182,7 @@ from sim.sensors import (
 from sim.master_simulator import run_master_simulation
 from sim.utils import (
     animate_ground_track,
+    animate_multi_ground_track,
     animate_rectangular_prism_attitude,
     animate_trajectory_frame,
     ground_track_from_eci_history,
@@ -359,6 +360,7 @@ __all__ = [
     "animate_rectangular_prism_attitude",
     "animate_trajectory_frame",
     "animate_ground_track",
+    "animate_multi_ground_track",
     "run_free_tumble_one_orbit",
     "run_free_tumble_one_orbit_ric",
     "run_full_stack_demo",

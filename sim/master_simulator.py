@@ -31,6 +31,8 @@ from sim.sensors.noisy_own_state import NoisyOwnStateSensor
 from sim.utils.io import write_json
 from sim.utils.plotting import plot_attitude_tumble, plot_orbit_eci
 from sim.utils.plotting_capabilities import (
+    animate_ground_track,
+    animate_multi_ground_track,
     plot_body_rates,
     plot_control_commands,
     plot_multi_control_commands,
@@ -38,6 +40,7 @@ from sim.utils.plotting_capabilities import (
     plot_quaternion_components,
     plot_trajectory_frame,
 )
+from sim.utils.ground_track import ground_track_from_eci_history
 from sim.utils.quaternion import quaternion_to_dcm_bn
 
 
@@ -141,14 +144,88 @@ def _combine_commands(orb: Command, att: Command) -> Command:
     )
 
 
+def _coe_to_rv_eci(
+    *,
+    a_km: float,
+    ecc: float,
+    inc_deg: float,
+    raan_deg: float,
+    argp_deg: float,
+    true_anomaly_deg: float,
+    mu_km3_s2: float = EARTH_MU_KM3_S2,
+) -> tuple[np.ndarray, np.ndarray]:
+    a = float(a_km)
+    e = float(ecc)
+    if a <= 0.0:
+        raise ValueError("COE a_km must be positive.")
+    if e < 0.0 or e >= 1.0:
+        raise ValueError("COE eccentricity must satisfy 0 <= e < 1 for current support.")
+
+    inc = np.deg2rad(float(inc_deg))
+    raan = np.deg2rad(float(raan_deg))
+    argp = np.deg2rad(float(argp_deg))
+    nu = np.deg2rad(float(true_anomaly_deg))
+
+    p = a * (1.0 - e * e)
+    if p <= 0.0:
+        raise ValueError("Invalid COE set: semi-latus rectum must be positive.")
+
+    cnu, snu = np.cos(nu), np.sin(nu)
+    r_pf = np.array([p * cnu / (1.0 + e * cnu), p * snu / (1.0 + e * cnu), 0.0], dtype=float)
+    v_pf = np.sqrt(mu_km3_s2 / p) * np.array([-snu, e + cnu, 0.0], dtype=float)
+
+    cO, sO = np.cos(raan), np.sin(raan)
+    ci, si = np.cos(inc), np.sin(inc)
+    cw, sw = np.cos(argp), np.sin(argp)
+    q_pf_to_eci = np.array(
+        [
+            [cO * cw - sO * sw * ci, -cO * sw - sO * cw * ci, sO * si],
+            [sO * cw + cO * sw * ci, -sO * sw + cO * cw * ci, -cO * si],
+            [sw * si, cw * si, ci],
+        ],
+        dtype=float,
+    )
+    r_eci = q_pf_to_eci @ r_pf
+    v_eci = q_pf_to_eci @ v_pf
+    return r_eci, v_eci
+
+
+def _rv_from_initial_state(s0: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    if "position_eci_km" in s0:
+        pos = np.array(s0.get("position_eci_km", [7000.0, 0.0, 0.0]), dtype=float)
+        if "velocity_eci_km_s" in s0:
+            vel = np.array(s0["velocity_eci_km_s"], dtype=float)
+        else:
+            spd = float(np.sqrt(EARTH_MU_KM3_S2 / max(np.linalg.norm(pos), EARTH_RADIUS_KM + 1.0)))
+            vel = np.array([0.0, spd, 0.0], dtype=float)
+        return pos, vel
+
+    coes = s0.get("coes")
+    if isinstance(coes, dict):
+        d = dict(coes)
+        a_km = float(d.get("a_km", d.get("semi_major_axis_km", 7000.0)))
+        ecc = float(d.get("ecc", d.get("e", 0.0)))
+        inc_deg = float(d.get("inc_deg", d.get("inclination_deg", 0.0)))
+        raan_deg = float(d.get("raan_deg", 0.0))
+        argp_deg = float(d.get("argp_deg", d.get("arg_periapsis_deg", 0.0)))
+        ta_deg = float(d.get("ta_deg", d.get("true_anomaly_deg", 0.0)))
+        return _coe_to_rv_eci(
+            a_km=a_km,
+            ecc=ecc,
+            inc_deg=inc_deg,
+            raan_deg=raan_deg,
+            argp_deg=argp_deg,
+            true_anomaly_deg=ta_deg,
+        )
+
+    pos = np.array([7000.0, 0.0, 0.0], dtype=float)
+    spd = float(np.sqrt(EARTH_MU_KM3_S2 / np.linalg.norm(pos)))
+    return pos, np.array([0.0, spd, 0.0], dtype=float)
+
+
 def _default_truth_from_agent(agent_cfg: Any, t_s: float = 0.0) -> StateTruth:
     s0 = dict(agent_cfg.initial_state or {})
-    pos = np.array(s0.get("position_eci_km", [7000.0, 0.0, 0.0]), dtype=float)
-    if "velocity_eci_km_s" in s0:
-        vel = np.array(s0["velocity_eci_km_s"], dtype=float)
-    else:
-        spd = float(np.sqrt(EARTH_MU_KM3_S2 / max(np.linalg.norm(pos), EARTH_RADIUS_KM + 1.0)))
-        vel = np.array([0.0, spd, 0.0], dtype=float)
+    pos, vel = _rv_from_initial_state(s0)
     return StateTruth(
         position_eci_km=pos,
         velocity_eci_km_s=vel,
@@ -577,6 +654,71 @@ def _plot_outputs(
     return out
 
 
+def _animate_outputs(
+    *,
+    cfg: SimulationScenarioConfig,
+    t_s: np.ndarray,
+    truth_hist: dict[str, np.ndarray],
+    outdir: Path,
+) -> dict[str, str]:
+    out: dict[str, str] = {}
+    anim_cfg = dict(cfg.outputs.animations or {})
+    if not bool(anim_cfg.get("enabled", False)):
+        return out
+
+    mode = cfg.outputs.mode
+    fps = float(anim_cfg.get("fps", 30.0))
+    speed_multiple = float(anim_cfg.get("speed_multiple", 10.0))
+    frame_stride = int(anim_cfg.get("frame_stride", 1))
+    draw_earth_map = bool(anim_cfg.get("draw_earth_map", True))
+    types = list(anim_cfg.get("types", []) or [])
+    if not types:
+        return out
+
+    if "ground_track_multi" in types:
+        p = outdir / "ground_track_multi.mp4"
+        animate_multi_ground_track(
+            t_s=t_s,
+            truth_hist_by_object=truth_hist,
+            jd_utc_start=cfg.simulator.initial_jd_utc,
+            mode=mode,
+            out_path=str(p),
+            fps=fps,
+            speed_multiple=speed_multiple,
+            draw_earth_map=draw_earth_map,
+            frame_stride=frame_stride,
+        )
+        if mode in ("save", "both"):
+            out["ground_track_multi"] = str(p)
+
+    if "ground_track" in types:
+        for oid, hist in truth_hist.items():
+            if hist.size == 0 or not np.any(np.isfinite(hist[:, 0])):
+                continue
+            lat_deg, lon_deg, _ = ground_track_from_eci_history(
+                hist[:, :3],
+                t_s=t_s,
+                jd_utc_start=cfg.simulator.initial_jd_utc,
+            )
+            p = outdir / f"{oid}_ground_track.mp4"
+            animate_ground_track(
+                lon_deg=lon_deg,
+                lat_deg=lat_deg,
+                t_s=t_s,
+                jd_utc_start=cfg.simulator.initial_jd_utc,
+                mode=mode,
+                out_path=str(p),
+                fps=fps,
+                speed_multiple=speed_multiple,
+                draw_earth_map=draw_earth_map,
+                frame_stride=frame_stride,
+            )
+            if mode in ("save", "both"):
+                out[f"{oid}_ground_track"] = str(p)
+
+    return out
+
+
 def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
     dt = float(cfg.simulator.dt_s)
     n = int(np.floor(float(cfg.simulator.duration_s) / dt)) + 1
@@ -750,6 +892,12 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
         knowledge_hist=knowledge_out,
         outdir=outdir,
     )
+    animation_outputs = _animate_outputs(
+        cfg=cfg,
+        t_s=t_out,
+        truth_hist=truth_out,
+        outdir=outdir,
+    )
 
     summary = {
         "scenario_name": cfg.scenario_name,
@@ -762,6 +910,7 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
         "termination_time_s": termination_time_s,
         "termination_object_id": termination_object_id,
         "plot_outputs": plot_outputs,
+        "animation_outputs": animation_outputs,
     }
 
     payload = {

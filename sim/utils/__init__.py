@@ -4,6 +4,7 @@ from sim.utils.integration import rk4_step
 from sim.utils.io import write_json
 from sim.utils.plotting_capabilities import (
     animate_ground_track,
+    animate_multi_ground_track,
     animate_rectangular_prism_attitude,
     animate_trajectory_frame,
     plot_angular_rates,
@@ -50,6 +51,7 @@ __all__ = [
     "animate_rectangular_prism_attitude",
     "animate_trajectory_frame",
     "animate_ground_track",
+    "animate_multi_ground_track",
     "normalize_quaternion",
     "omega_matrix",
     "quaternion_multiply",

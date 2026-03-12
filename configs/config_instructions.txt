@@ -58,6 +58,16 @@ Agent Sections (rocket/chaser/target)
 - role: descriptive role string
 - specs: physical or preset references
 - initial_state: initial conditions (or deployment source)
+  - satellites support either:
+    - Cartesian state: position_eci_km + velocity_eci_km_s
+    - COEs via initial_state.coes:
+      - a_km (or semi_major_axis_km)
+      - ecc (or e)
+      - inc_deg (or inclination_deg)
+      - raan_deg
+      - argp_deg (or arg_periapsis_deg)
+      - true_anomaly_deg (or ta_deg)
+    - if both are provided, Cartesian position_eci_km/velocity_eci_km_s is used.
 - guidance: rocket guidance or agent-level guidance pointer
 - orbit_control: orbit controller pointer
 - attitude_control: attitude controller pointer
@@ -115,7 +125,10 @@ Outputs Section
   - control_thrust
   - control_thrust_multi
 - animations: animation options.
-  Example keys: enabled, types, fps, speed_multiple.
+  Example keys: enabled, types, fps, speed_multiple, draw_earth_map.
+  Supported types currently:
+  - ground_track: one animation per object
+  - ground_track_multi: all objects on one ground-track animation
 - monte_carlo: Monte Carlo output options.
   Example keys: save_iteration_summaries, save_aggregate_summary, save_histograms, save_raw_runs.
 
