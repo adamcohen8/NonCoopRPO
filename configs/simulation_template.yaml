@@ -1,0 +1,226 @@
+# Canonical simulation scenario config template
+# Sections:
+#   rocket, chaser, target, simulator, monte_carlo
+
+scenario_name: "asat_engagement_baseline"
+
+metadata:
+  owner: "team"
+  notes: "Edit this file and load with sim.config.load_simulation_yaml(...)"
+
+rocket:
+  enabled: true
+  role: "rocket"
+  specs:
+    preset_stack: "BASIC_TWO_STAGE_STACK"
+    payload_mass_kg: 150.0
+    thrust_axis_body: [1.0, 0.0, 0.0]
+    mass_properties:
+      inertia_kg_m2: [[800000.0, 0.0, 0.0], [0.0, 800000.0, 0.0], [0.0, 0.0, 20000.0]]
+  initial_state:
+    launch_lat_deg: 28.5
+    launch_lon_deg: -80.6
+    launch_alt_km: 0.0
+    launch_azimuth_deg: 90.0
+  guidance:
+    kind: "python"
+    module: "sim.rocket.guidance"
+    class_name: "OpenLoopPitchProgramGuidance"
+    params:
+      vertical_hold_s: 8.0
+      pitch_start_s: 8.0
+      pitch_end_s: 190.0
+      pitch_final_deg: 75.0
+      max_throttle: 1.0
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.zero_controller"
+    class_name: "ZeroController"
+    params: {}
+  attitude_control:
+    kind: "python"
+    module: "sim.control.attitude.zero_torque"
+    class_name: "ZeroTorqueController"
+    params: {}
+  mission_objectives:
+    - kind: "python"
+      module: "mission.objectives"
+      class_name: "InjectChaserObjective"
+      params:
+        deploy_time_s: 900.0
+  bridge:
+    enabled: false
+    mode: "sil"
+    endpoint: "udp://127.0.0.1:50100"
+    module: "integrations.cfs_sil.python_bridge"
+    class_name: "CFSBridge"
+    params: {}
+  knowledge:
+    refresh_rate_s: 2.0
+    targets:
+      - "target"
+    conditions:
+      require_line_of_sight: true
+      max_range_km: 50000.0
+    sensor_error:
+      pos_sigma_km: [0.01, 0.01, 0.01]
+      vel_sigma_km_s: [0.0001, 0.0001, 0.0001]
+    estimation:
+      type: "ekf"
+
+chaser:
+  enabled: true
+  role: "chaser"
+  specs:
+    preset_satellite: "BASIC_SATELLITE"
+    mass_kg: 200.0
+    thruster: "BASIC_CHEMICAL_Z_BOTTOM"
+    attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
+  initial_state:
+    source: "rocket_deployment"
+    deploy_dv_body_m_s: [10.0, 0.0, 0.0]
+  guidance:
+    kind: "python"
+    module: "sim.control.orbit.baseline"
+    class_name: "StationkeepingController"
+    params: {}
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.lqr"
+    class_name: "HCWLQRController"
+    params: {}
+  attitude_control:
+    kind: "python"
+    module: "sim.control.attitude.ric_lqr"
+    class_name: "RICFrameLQRController"
+    params: {}
+  mission_objectives:
+    - kind: "python"
+      module: "mission.objectives"
+      class_name: "RendezvousObjective"
+      params:
+        target_id: "target"
+  bridge:
+    enabled: false
+    mode: "hil"
+    endpoint: "udp://127.0.0.1:51100"
+    module: "integrations.hil.bridge"
+    class_name: "HILBridge"
+    params: {}
+  knowledge:
+    refresh_rate_s: 1.0
+    targets:
+      - "target"
+    conditions:
+      require_line_of_sight: true
+      max_range_km: 10000.0
+    sensor_error:
+      pos_sigma_km: [0.005, 0.005, 0.005]
+      vel_sigma_km_s: [0.00005, 0.00005, 0.00005]
+    estimation:
+      type: "ekf"
+
+target:
+  enabled: true
+  role: "target"
+  specs:
+    preset_satellite: "BASIC_SATELLITE"
+    mass_kg: 400.0
+    attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
+  initial_state:
+    position_eci_km: [7000.0, 0.0, 0.0]
+    velocity_eci_km_s: [0.0, 7.546, 0.0]
+    attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+    angular_rate_body_rad_s: [0.0, 0.0, 0.0]
+  guidance:
+    kind: "python"
+    module: "sim.control.orbit.zero_controller"
+    class_name: "ZeroController"
+    params: {}
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.baseline"
+    class_name: "SafetyBarrierController"
+    params: {}
+  attitude_control:
+    kind: "python"
+    module: "sim.control.attitude.ric_pd"
+    class_name: "RICFramePDController"
+    params: {}
+  mission_objectives:
+    - kind: "python"
+      module: "mission.objectives"
+      class_name: "SurvivalObjective"
+      params: {}
+  bridge:
+    enabled: false
+    mode: "sil"
+    endpoint: null
+    module: null
+    class_name: null
+    params: {}
+  knowledge:
+    refresh_rate_s: 5.0
+    targets:
+      - "rocket"
+      - "chaser"
+    conditions:
+      require_line_of_sight: true
+      max_range_km: 50000.0
+    sensor_error:
+      pos_sigma_km: [0.02, 0.02, 0.02]
+      vel_sigma_km_s: [0.0002, 0.0002, 0.0002]
+    estimation:
+      type: "ekf"
+
+simulator:
+  duration_s: 7200.0
+  dt_s: 1.0
+  initial_jd_utc: null
+  dynamics:
+    orbit:
+      model: "two_body"
+      j2: true
+      j3: false
+      j4: false
+      spherical_harmonics:
+        enabled: false
+        degree: 8
+        order: 8
+    attitude:
+      enabled: true
+      disturbance_torques:
+        gravity_gradient: true
+        magnetic: true
+        drag: true
+        srp: true
+    rocket:
+      enabled: true
+      atmosphere_model: "ussa1976"
+      aero_model_enabled: true
+      max_q_limiter_enabled: true
+      max_q_pa: 45000.0
+  environment:
+    ephemeris_mode: "analytic_simple"
+    use_spice: false
+    atmosphere_env: {}
+  termination:
+    earth_impact_enabled: true
+    earth_radius_km: 6378.137
+
+monte_carlo:
+  enabled: false
+  iterations: 100
+  base_seed: 1000
+  variations:
+    - parameter_path: "rocket.initial_state.launch_azimuth_deg"
+      mode: "normal"
+      mean: 90.0
+      std: 0.5
+    - parameter_path: "simulator.environment.atmosphere_env.solar_flux_f107"
+      mode: "choice"
+      options: [90.0, 120.0, 150.0, 180.0]
+    - parameter_path: "chaser.initial_state.deploy_dv_body_m_s[0]"
+      mode: "uniform"
+      low: 5.0
+      high: 15.0

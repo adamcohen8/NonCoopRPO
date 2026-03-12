@@ -1,0 +1,111 @@
+Simulation YAML Config Instructions
+File: configs/simulation_template.yaml
+
+Purpose
+- Define a full simulation setup in one YAML file:
+  - rocket
+  - chaser
+  - target
+  - simulator
+  - monte_carlo (optional)
+
+Quick Start
+1. Copy the template:
+   cp configs/simulation_template.yaml configs/my_scenario.yaml
+2. Edit your scenario values in configs/my_scenario.yaml.
+3. Validate load/parsing:
+   .venv/bin/python examples/Simulation_Config_Load_Demo.py --config /Users/adamcohen/Downloads/NonCooperativeRPO/configs/my_scenario.yaml
+
+Top-Level Sections
+- scenario_name: Human-readable scenario label.
+- metadata: Freeform notes/tags.
+- rocket: Rocket object settings and algorithm pointers.
+- chaser: Chaser object settings and algorithm pointers.
+- target: Target object settings and algorithm pointers.
+- simulator: Dynamics/environment/time/termination settings.
+- monte_carlo: Optional campaign settings and parameter variations.
+
+Algorithm Pointer Format
+- Any guidance/orbit_control/attitude_control/mission_objectives entry can use:
+  kind: "python"
+  module: "python.module.path"
+  class_name: "ClassName"
+  function: "optional_function_name"
+  file: "optional/path/to/file.py"
+  params:
+    key: value
+
+Notes:
+- Use module + class_name for class-based controllers/guidance.
+- Use module + function for function-based handlers.
+- params is a freeform dict passed later by scenario wiring code.
+
+Bridge Pointer Format (SIL/HIL)
+- bridge:
+    enabled: true|false
+    mode: "sil" | "hil"
+    endpoint: "udp://host:port" (or your bridge endpoint format)
+    module: "bridge.module"
+    class_name: "BridgeClass"
+    params: {}
+
+Agent Sections (rocket/chaser/target)
+- enabled: true/false
+- role: descriptive role string
+- specs: physical or preset references
+- initial_state: initial conditions (or deployment source)
+- guidance: rocket guidance or agent-level guidance pointer
+- orbit_control: orbit controller pointer
+- attitude_control: attitude controller pointer
+- mission_objectives: list of objective pointers
+- bridge: SIL/HIL pointer
+- knowledge: refresh/conditions/noise/estimation settings
+
+Simulator Section
+- duration_s: total simulation duration
+- dt_s: primary simulation step
+- initial_jd_utc: optional epoch start (null if unused)
+- dynamics: orbit/attitude/rocket model switches
+- environment: ephemeris/atmosphere/etc settings
+- termination:
+  - earth_impact_enabled: true/false
+  - earth_radius_km: usually 6378.137
+
+Monte Carlo Section
+- enabled: true/false
+- iterations: number of runs
+- base_seed: seed offset
+- variations: list of parameter variation definitions
+
+Variation Entry Fields
+- parameter_path: dot-path to parameter to vary
+  Example: "rocket.initial_state.launch_azimuth_deg"
+  Example: "chaser.initial_state.deploy_dv_body_m_s[0]"
+- mode: "choice" | "uniform" | "normal"
+- choice mode:
+  - options: [v1, v2, ...]
+- uniform mode:
+  - low: value
+  - high: value
+- normal mode:
+  - mean: value
+  - std: value
+
+Validation Rules (Current Loader)
+- YAML root must be a mapping/object.
+- simulator.dt_s > 0
+- simulator.duration_s > 0
+- monte_carlo.iterations > 0
+- monte_carlo.variations[*].parameter_path must be a non-empty string.
+
+Important Current Scope
+- The loader validates and parses the YAML into typed config objects.
+- Full end-to-end execution from YAML is not yet universal for all scenario runners.
+- Use this file now for standardized scenario definitions and input validation.
+
+Recommended Workflow
+1. Keep a base scenario YAML.
+2. Create variants by changing only metadata + key parameter overrides.
+3. Validate with Simulation_Config_Load_Demo.
+4. Run your chosen scenario script using parsed config integration as available.
+

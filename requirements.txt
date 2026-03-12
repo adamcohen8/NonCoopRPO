@@ -6,6 +6,9 @@ matplotlib>=3.7
 # Progress bars used in Monte Carlo / ML loops
 tqdm>=4.65
 
+# YAML config loading
+PyYAML>=6.0
+
 # Machine learning stack
 torch>=2.1
 lightning>=2.2

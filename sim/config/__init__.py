@@ -13,6 +13,17 @@ from sim.config.profiles import (
     resolve_dt_s,
     resolve_steps_for_duration,
 )
+from sim.config.scenario_yaml import (
+    AgentSection,
+    AlgorithmPointer,
+    BridgePointer,
+    MonteCarloSection,
+    MonteCarloVariation,
+    SimulationScenarioConfig,
+    SimulatorSection,
+    load_simulation_yaml,
+    scenario_config_from_dict,
+)
 
 __all__ = [
     "SimulationProfileName",
@@ -28,4 +39,13 @@ __all__ = [
     "default_disturbance_config_for_profile",
     "build_orbit_propagator_for_profile",
     "build_default_ops_orbit_propagator",
+    "AlgorithmPointer",
+    "BridgePointer",
+    "AgentSection",
+    "SimulatorSection",
+    "MonteCarloVariation",
+    "MonteCarloSection",
+    "SimulationScenarioConfig",
+    "scenario_config_from_dict",
+    "load_simulation_yaml",
 ]
