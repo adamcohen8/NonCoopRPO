@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from sim.dynamics.attitude.rigid_body import propagate_attitude_exponential_map
 from sim.dynamics.orbit.accelerations import OrbitContext
+from sim.dynamics.orbit.atmosphere import atmosphere_state_from_model
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
 from sim.dynamics.orbit.frames import ecef_to_eci, eci_to_ecef_rotation
 from sim.dynamics.orbit.propagator import OrbitPropagator, drag_plugin, j2_plugin, j3_plugin, j4_plugin, srp_plugin
+from sim.rocket.aero import RocketAeroConfig, compute_aero_loads, compute_aero_state
 from sim.rocket.models import (
     GuidanceCommand,
     RocketGuidanceLaw,
@@ -102,6 +104,9 @@ class RocketAscentSimulator:
         self._stage_prop0 = np.array([s.propellant_mass_kg for s in stages], dtype=float)
         self._stage_thrust = np.array([s.max_thrust_n for s in stages], dtype=float)
         self._stage_isp = np.array([s.isp_s for s in stages], dtype=float)
+        self._stage_area_ref_m2 = np.array([np.pi * 0.25 * float(s.diameter_m) * float(s.diameter_m) for s in stages], dtype=float)
+        self._stage_ref_length_m = np.array([float(s.length_m) for s in stages], dtype=float)
+        self._base_aero_ref_length_m = float(max(self.sim_cfg.aero.reference_length_m, 1e-9))
         if self.sim_cfg.area_ref_m2 is None:
             d = float(stages[0].diameter_m)
             self._area_ref_m2 = np.pi * 0.25 * d * d
@@ -115,11 +120,29 @@ class RocketAscentSimulator:
             plugins.append(j3_plugin)
         if self.sim_cfg.enable_j4:
             plugins.append(j4_plugin)
-        if self.sim_cfg.enable_drag:
+        if self.sim_cfg.enable_drag and not self.sim_cfg.aero.enabled:
             plugins.append(drag_plugin)
         if self.sim_cfg.enable_srp:
             plugins.append(srp_plugin)
         self._propagator = OrbitPropagator(integrator="rk4", plugins=plugins)
+
+    def _resolve_aero_config_for_stage(self, stage_i: int) -> RocketAeroConfig:
+        cfg = self.sim_cfg.aero
+        if not cfg.enabled:
+            return cfg
+        idx = int(np.clip(stage_i, 0, len(self._stage_ref_length_m) - 1))
+
+        # Optional global override keeps area fixed regardless of stage.
+        area_m2 = float(self.sim_cfg.area_ref_m2) if self.sim_cfg.area_ref_m2 is not None else float(cfg.reference_area_m2)
+        ref_len_m = float(cfg.reference_length_m)
+        cp_offset = np.array(cfg.cp_offset_body_m, dtype=float).reshape(3)
+        if self.sim_cfg.use_stagewise_aero_geometry:
+            if self.sim_cfg.area_ref_m2 is None:
+                area_m2 = float(self._stage_area_ref_m2[idx])
+            ref_len_m = float(max(self._stage_ref_length_m[idx], 1e-9))
+            scale = ref_len_m / self._base_aero_ref_length_m
+            cp_offset = cp_offset * scale
+        return replace(cfg, reference_area_m2=area_m2, reference_length_m=ref_len_m, cp_offset_body_m=cp_offset)
 
     def initial_state(self) -> RocketState:
         r0, v0 = _launch_position_velocity_eci(
@@ -159,9 +182,19 @@ class RocketAscentSimulator:
         alt = np.zeros(steps + 1)
         ecc = np.zeros(steps + 1)
         sma = np.zeros(steps + 1)
+        q_dyn = np.zeros(steps + 1)
+        mach = np.zeros(steps + 1)
+        alpha_deg = np.zeros(steps + 1)
+        beta_deg = np.zeros(steps + 1)
+        cd = np.zeros(steps + 1)
+        aero_force_n = np.zeros(steps + 1)
+        aero_moment_nm = np.zeros(steps + 1)
 
         inserted = False
         insertion_time = None
+        terminated_early = False
+        termination_reason = None
+        termination_time = None
         insertion_hold_counter = 0.0
         hold_needed = self.sim_cfg.insertion_hold_time_s
 
@@ -185,6 +218,46 @@ class RocketAscentSimulator:
             thr_cmd[k] = throttle
             state = self._step_once(state, cmd, throttle, dt)
             thrust_n[k] = float(state._last_step_thrust_n) if hasattr(state, "_last_step_thrust_n") else 0.0
+            q_dyn[k] = float(getattr(state, "_last_step_q_dyn_pa", 0.0))
+            mach[k] = float(getattr(state, "_last_step_mach", 0.0))
+            alpha_deg[k] = float(getattr(state, "_last_step_alpha_deg", 0.0))
+            beta_deg[k] = float(getattr(state, "_last_step_beta_deg", 0.0))
+            cd[k] = float(getattr(state, "_last_step_cd", 0.0))
+            aero_force_n[k] = float(getattr(state, "_last_step_aero_force_n", 0.0))
+            aero_moment_nm[k] = float(getattr(state, "_last_step_aero_moment_nm", 0.0))
+
+            if self.sim_cfg.terminate_on_earth_impact:
+                if float(np.linalg.norm(state.position_eci_km)) <= float(self.sim_cfg.earth_impact_radius_km):
+                    terminated_early = True
+                    termination_reason = "earth_impact"
+                    termination_time = float(state.t_s)
+                    n = k + 2
+                    return RocketSimResult(
+                        time_s=t[:n].copy(),
+                        position_eci_km=r[:n, :].copy(),
+                        velocity_eci_km_s=v[:n, :].copy(),
+                        attitude_quat_bn=q[:n, :].copy(),
+                        angular_rate_body_rad_s=w[:n, :].copy(),
+                        mass_kg=m[:n].copy(),
+                        active_stage_index=stg[:n].copy(),
+                        throttle_cmd=thr_cmd[:n].copy(),
+                        thrust_n=thrust_n[:n].copy(),
+                        altitude_km=alt[:n].copy(),
+                        eccentricity=ecc[:n].copy(),
+                        sma_km=sma[:n].copy(),
+                        dynamic_pressure_pa=q_dyn[:n].copy(),
+                        mach=mach[:n].copy(),
+                        alpha_deg=alpha_deg[:n].copy(),
+                        beta_deg=beta_deg[:n].copy(),
+                        cd=cd[:n].copy(),
+                        aero_force_n=aero_force_n[:n].copy(),
+                        aero_moment_nm=aero_moment_nm[:n].copy(),
+                        inserted=inserted,
+                        insertion_time_s=insertion_time,
+                        terminated_early=terminated_early,
+                        termination_reason=termination_reason,
+                        termination_time_s=termination_time,
+                    )
 
             # insertion criterion: altitude near target and low eccentricity while coasting.
             near_alt = abs((np.linalg.norm(state.position_eci_km) - EARTH_RADIUS_KM) - self.sim_cfg.target_altitude_km) <= self.sim_cfg.target_altitude_tolerance_km
@@ -210,8 +283,18 @@ class RocketAscentSimulator:
                         altitude_km=alt[:n].copy(),
                         eccentricity=ecc[:n].copy(),
                         sma_km=sma[:n].copy(),
+                        dynamic_pressure_pa=q_dyn[:n].copy(),
+                        mach=mach[:n].copy(),
+                        alpha_deg=alpha_deg[:n].copy(),
+                        beta_deg=beta_deg[:n].copy(),
+                        cd=cd[:n].copy(),
+                        aero_force_n=aero_force_n[:n].copy(),
+                        aero_moment_nm=aero_moment_nm[:n].copy(),
                         inserted=inserted,
                         insertion_time_s=insertion_time,
+                        terminated_early=terminated_early,
+                        termination_reason=termination_reason,
+                        termination_time_s=termination_time,
                     )
             else:
                 insertion_hold_counter = 0.0
@@ -229,9 +312,25 @@ class RocketAscentSimulator:
             altitude_km=alt,
             eccentricity=ecc,
             sma_km=sma,
+            dynamic_pressure_pa=q_dyn,
+            mach=mach,
+            alpha_deg=alpha_deg,
+            beta_deg=beta_deg,
+            cd=cd,
+            aero_force_n=aero_force_n,
+            aero_moment_nm=aero_moment_nm,
             inserted=inserted,
             insertion_time_s=insertion_time,
+            terminated_early=terminated_early,
+            termination_reason=termination_reason,
+            termination_time_s=termination_time,
         )
+
+    def step(self, state: RocketState, command: GuidanceCommand, dt_s: float | None = None) -> RocketState:
+        """Public single-step API for external scenario orchestrators."""
+        h = float(self.sim_cfg.dt_s if dt_s is None else dt_s)
+        throttle = _clamp(float(command.throttle), 0.0, 1.0)
+        return self._step_once(state=state, cmd=command, throttle=throttle, dt_s=h)
 
     def _step_once(self, state: RocketState, cmd: GuidanceCommand, throttle: float, dt_s: float) -> RocketState:
         s = state.copy()
@@ -262,9 +361,51 @@ class RocketAscentSimulator:
         thrust_axis_body = _unit(np.array(self.vehicle_cfg.thrust_axis_body, dtype=float))
         thrust_axis_eci = c_bn.T @ thrust_axis_body
         accel_thrust_eci_km_s2 = (thrust_n / max(s.mass_kg, 1e-9)) * thrust_axis_eci / 1e3
+        torque_aero_body_nm = np.zeros(3)
+        accel_aero_eci_km_s2 = np.zeros(3)
+        last_q_dyn = 0.0
+        last_mach = 0.0
+        last_alpha_deg = 0.0
+        last_beta_deg = 0.0
+        last_cd = 0.0
+        last_aero_force_n = 0.0
+        last_aero_moment_nm = 0.0
+
+        env = {"atmosphere_model": self.sim_cfg.atmosphere_model, **dict(self.sim_cfg.atmosphere_env)}
+        if self.sim_cfg.aero.enabled:
+            omega_earth = np.array([0.0, 0.0, 7.2921159e-5], dtype=float)
+            v_atm_eci_km_s = np.cross(omega_earth, s.position_eci_km)
+            v_rel_eci_m_s = (s.velocity_eci_km_s - v_atm_eci_km_s) * 1e3
+            v_rel_body_m_s = c_bn @ v_rel_eci_m_s
+            atmos = atmosphere_state_from_model(
+                model=str(self.sim_cfg.atmosphere_model).lower(),
+                r_eci_km=s.position_eci_km,
+                t_s=s.t_s,
+                env=env,
+            )
+            aero_state = compute_aero_state(
+                rho_kg_m3=float(atmos["density_kg_m3"]),
+                pressure_pa=float(atmos["pressure_pa"]),
+                temperature_k=float(atmos["temperature_k"]),
+                sound_speed_m_s=float(atmos["sound_speed_m_s"]),
+                v_rel_body_m_s=v_rel_body_m_s,
+                alpha_limit_deg=float(self.sim_cfg.aero.alpha_limit_deg),
+                beta_limit_deg=float(self.sim_cfg.aero.beta_limit_deg),
+            )
+            aero_cfg = self._resolve_aero_config_for_stage(stage_i=stage_i)
+            loads = compute_aero_loads(v_rel_body_m_s=v_rel_body_m_s, atmos=aero_state, cfg=aero_cfg)
+            f_aero_eci_n = c_bn.T @ loads.force_body_n
+            accel_aero_eci_km_s2 = f_aero_eci_n / max(s.mass_kg, 1e-9) / 1e3
+            torque_aero_body_nm = loads.moment_body_nm
+            last_q_dyn = float(loads.state.dynamic_pressure_pa)
+            last_mach = float(loads.state.mach)
+            last_alpha_deg = float(np.rad2deg(loads.state.alpha_rad))
+            last_beta_deg = float(np.rad2deg(loads.state.beta_rad))
+            last_cd = float(-loads.coeff_force_body[0])
+            last_aero_force_n = float(np.linalg.norm(loads.force_body_n))
+            last_aero_moment_nm = float(np.linalg.norm(loads.moment_body_nm))
 
         x_orbit = np.hstack((s.position_eci_km, s.velocity_eci_km_s))
-        env = {"atmosphere_model": self.sim_cfg.atmosphere_model}
         ctx = OrbitContext(
             mu_km3_s2=EARTH_MU_KM3_S2,
             mass_kg=s.mass_kg,
@@ -276,12 +417,13 @@ class RocketAscentSimulator:
             x_eci=x_orbit,
             dt_s=dt_s,
             t_s=s.t_s,
-            command_accel_eci_km_s2=accel_thrust_eci_km_s2,
+            command_accel_eci_km_s2=accel_thrust_eci_km_s2 + accel_aero_eci_km_s2,
             env=env,
             ctx=ctx,
         )
 
         torque_cmd = np.zeros(3) if cmd.torque_body_nm_cmd is None else np.array(cmd.torque_body_nm_cmd, dtype=float)
+        torque_cmd = torque_cmd + torque_aero_body_nm
         att_h = max(min(self.sim_cfg.attitude_substep_s, dt_s), 1e-4)
         rem = dt_s
         qn = s.attitude_quat_bn.copy()
@@ -305,4 +447,11 @@ class RocketAscentSimulator:
         # attach last-step telemetry attribute for logging convenience.
         setattr(s, "_last_step_thrust_n", thrust_n)
         setattr(s, "_last_step_stage_sep", stage_separated)
+        setattr(s, "_last_step_q_dyn_pa", last_q_dyn)
+        setattr(s, "_last_step_mach", last_mach)
+        setattr(s, "_last_step_alpha_deg", last_alpha_deg)
+        setattr(s, "_last_step_beta_deg", last_beta_deg)
+        setattr(s, "_last_step_cd", last_cd)
+        setattr(s, "_last_step_aero_force_n", last_aero_force_n)
+        setattr(s, "_last_step_aero_moment_nm", last_aero_moment_nm)
         return s

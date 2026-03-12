@@ -134,7 +134,11 @@ from sim.knowledge import (
     TrackedObjectConfig,
 )
 from sim.scenarios import (
+    ASATPhasedScenarioConfig,
+    AgentStrategyConfig,
+    KnowledgeGateConfig,
     MonteCarloConfig,
+    run_asat_phased_engagement,
     run_free_tumble_one_orbit,
     run_free_tumble_one_orbit_ric,
     run_full_stack_demo,
@@ -143,7 +147,9 @@ from sim.scenarios import (
 from sim.rocket import (
     GuidanceCommand,
     HoldAttitudeGuidance,
+    MaxQThrottleLimiterGuidance,
     OpenLoopPitchProgramGuidance,
+    RocketAeroConfig,
     RocketAscentSimulator,
     RocketGuidanceLaw,
     RocketSimConfig,
@@ -311,9 +317,14 @@ __all__ = [
     "run_free_tumble_one_orbit",
     "run_free_tumble_one_orbit_ric",
     "run_full_stack_demo",
+    "ASATPhasedScenarioConfig",
+    "AgentStrategyConfig",
+    "KnowledgeGateConfig",
+    "run_asat_phased_engagement",
     "MonteCarloConfig",
     "run_monte_carlo",
     "GuidanceCommand",
+    "RocketAeroConfig",
     "RocketGuidanceLaw",
     "RocketSimConfig",
     "RocketVehicleConfig",
@@ -321,5 +332,6 @@ __all__ = [
     "RocketSimResult",
     "RocketAscentSimulator",
     "OpenLoopPitchProgramGuidance",
+    "MaxQThrottleLimiterGuidance",
     "HoldAttitudeGuidance",
 ]

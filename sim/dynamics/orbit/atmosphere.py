@@ -102,6 +102,25 @@ def density_ussa1976(r_eci_km: np.ndarray, t_s: float) -> float:
     return float(np.exp(lrho))
 
 
+def _temperature_from_altitude_k_approx(alt_km: float) -> float:
+    h = float(max(alt_km, 0.0))
+    if h < 11.0:
+        return 288.15 - 6.5 * h
+    if h < 20.0:
+        return 216.65
+    if h < 32.0:
+        return 216.65 + (h - 20.0) * 1.0
+    if h < 47.0:
+        return 228.65 + (h - 32.0) * 2.8
+    if h < 51.0:
+        return 270.65
+    if h < 71.0:
+        return 270.65 - (h - 51.0) * 2.8
+    if h < 86.0:
+        return 214.65 - (h - 71.0) * 2.0
+    return 186.87
+
+
 def density_nrlmsise00(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) -> float:
     """
     NRLMSISE-00 density model via optional external dependency.
@@ -180,6 +199,80 @@ def density_jb2008(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) ->
         "JB2008 model requested but backend is unavailable. "
         "Provide env['jb2008_density_callable']."
     )
+
+
+def atmosphere_state_from_model(
+    model: AtmosphereModelName,
+    r_eci_km: np.ndarray,
+    t_s: float,
+    env: dict | None = None,
+) -> dict[str, float]:
+    """
+    Return atmosphere state dictionary with at least:
+    - density_kg_m3
+    - temperature_k
+    - pressure_pa
+    - sound_speed_m_s
+    """
+    env_local = {} if env is None else dict(env)
+    alt_km = _altitude_km_from_eci(r_eci_km, t_s, env=env_local)
+    lat_deg, lon_deg = _spherical_lat_lon_deg_from_eci(r_eci_km, t_s, env=env_local)
+    r_air = float(env_local.get("air_gas_constant_j_kg_k", 287.05287))
+    gamma = float(env_local.get("air_gamma", 1.4))
+
+    jd_utc = env_local.get("jd_utc")
+    if jd_utc is not None:
+        dt_utc = julian_date_to_datetime(float(jd_utc))
+    else:
+        base_epoch = env_local.get("atmo_epoch_utc", datetime(2020, 1, 1, tzinfo=timezone.utc))
+        if isinstance(base_epoch, datetime):
+            if base_epoch.tzinfo is None:
+                base_epoch = base_epoch.replace(tzinfo=timezone.utc)
+            dt_utc = base_epoch + timedelta(seconds=float(t_s))
+        else:
+            dt_utc = datetime(2020, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=float(t_s))
+
+    m = str(model).lower()
+    cb = None
+    if m == "nrlmsise00":
+        cb = env_local.get("nrlmsise00_density_callable", None)
+    elif m == "jb2008":
+        cb = env_local.get("jb2008_density_callable", None)
+
+    if callable(cb):
+        out = cb(alt_km, lat_deg, lon_deg, dt_utc, env_local)
+        if isinstance(out, dict):
+            rho = float(out.get("density_kg_m3", out.get("rho_kg_m3", 0.0)))
+            t_k = float(out.get("temperature_k", _temperature_from_altitude_k_approx(alt_km)))
+            p_pa = float(out.get("pressure_pa", max(rho, 0.0) * r_air * max(t_k, 1.0)))
+            a_m_s = float(out.get("sound_speed_m_s", np.sqrt(max(gamma * r_air * max(t_k, 1.0), 1e-9))))
+            return {
+                "density_kg_m3": max(rho, 0.0),
+                "temperature_k": max(t_k, 1.0),
+                "pressure_pa": max(p_pa, 0.0),
+                "sound_speed_m_s": max(a_m_s, 1e-3),
+            }
+        rho = float(out)
+        t_k = _temperature_from_altitude_k_approx(alt_km)
+        p_pa = max(rho, 0.0) * r_air * t_k
+        a_m_s = float(np.sqrt(max(gamma * r_air * t_k, 1e-9)))
+        return {
+            "density_kg_m3": max(rho, 0.0),
+            "temperature_k": t_k,
+            "pressure_pa": max(p_pa, 0.0),
+            "sound_speed_m_s": max(a_m_s, 1e-3),
+        }
+
+    rho = density_from_model(model, r_eci_km, t_s, env=env_local)
+    t_k = _temperature_from_altitude_k_approx(alt_km)
+    p_pa = max(rho, 0.0) * r_air * t_k
+    a_m_s = float(np.sqrt(max(gamma * r_air * t_k, 1e-9)))
+    return {
+        "density_kg_m3": max(float(rho), 0.0),
+        "temperature_k": max(t_k, 1.0),
+        "pressure_pa": max(float(p_pa), 0.0),
+        "sound_speed_m_s": max(a_m_s, 1e-3),
+    }
 
 
 def _extract_nrlmsise00_total_density_g_cm3(out: object) -> float:

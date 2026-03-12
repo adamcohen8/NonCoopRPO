@@ -6,6 +6,7 @@ from typing import Protocol
 import numpy as np
 
 from presets.rockets import RocketStackPreset
+from sim.rocket.aero import RocketAeroConfig
 
 
 @dataclass(frozen=True)
@@ -26,9 +27,14 @@ class RocketSimConfig:
     enable_j2: bool = True
     enable_j3: bool = False
     enable_j4: bool = False
+    terminate_on_earth_impact: bool = True
+    earth_impact_radius_km: float = 6378.137
     area_ref_m2: float | None = None
+    use_stagewise_aero_geometry: bool = True
     cd: float = 0.35
     cr: float = 1.2
+    aero: RocketAeroConfig = field(default_factory=RocketAeroConfig)
+    atmosphere_env: dict = field(default_factory=dict)
     inertia_kg_m2: np.ndarray = field(default_factory=lambda: np.diag([8.0e5, 8.0e5, 2.0e4]))
     attitude_substep_s: float = 0.02
 
@@ -45,6 +51,8 @@ class RocketSimConfig:
             raise ValueError("insertion_hold_time_s must be non-negative.")
         if self.attitude_substep_s <= 0.0:
             raise ValueError("attitude_substep_s must be positive.")
+        if self.earth_impact_radius_km <= 0.0:
+            raise ValueError("earth_impact_radius_km must be positive.")
 
 
 @dataclass(frozen=True)
@@ -115,5 +123,15 @@ class RocketSimResult:
     altitude_km: np.ndarray
     eccentricity: np.ndarray
     sma_km: np.ndarray
+    dynamic_pressure_pa: np.ndarray
+    mach: np.ndarray
+    alpha_deg: np.ndarray
+    beta_deg: np.ndarray
+    cd: np.ndarray
+    aero_force_n: np.ndarray
+    aero_moment_nm: np.ndarray
     inserted: bool
     insertion_time_s: float | None
+    terminated_early: bool = False
+    termination_reason: str | None = None
+    termination_time_s: float | None = None

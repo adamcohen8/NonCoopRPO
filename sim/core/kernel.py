@@ -54,6 +54,11 @@ class SimulationKernel:
         srp_shadow_by_object = {oid: np.ones(n) for oid in self.object_ids}
 
         pending_applied_command = {oid: Command.zero() for oid in self.object_ids}
+        terminated_early = False
+        termination_reason: str | None = None
+        termination_step: int | None = None
+        termination_object_id: str | None = None
+        final_index = self.config.steps
 
         for oid in self.object_ids:
             obj = self.objects[oid]
@@ -153,16 +158,45 @@ class SimulationKernel:
                     env=env_next,
                 )
 
+            if self.config.terminate_on_earth_impact:
+                for oid in self.object_ids:
+                    if float(np.linalg.norm(self.objects[oid].truth.position_eci_km)) <= float(self.config.earth_impact_radius_km):
+                        terminated_early = True
+                        termination_reason = "earth_impact"
+                        termination_step = k + 1
+                        termination_object_id = oid
+                        final_index = k + 1
+                        break
+                if terminated_early:
+                    break
+
+        n_used = final_index + 1
+        t_out = t_s[:n_used].copy()
+        truth_out = {oid: arr[:n_used, :].copy() for oid, arr in truth_by_object.items()}
+        belief_out = {oid: arr[:n_used, :].copy() for oid, arr in belief_by_object.items()}
+        thrust_out = {oid: arr[:n_used, :].copy() for oid, arr in thrust_by_object.items()}
+        torque_out = {oid: arr[:n_used, :].copy() for oid, arr in torque_by_object.items()}
+        runtime_out = {oid: arr[:n_used].copy() for oid, arr in runtime_by_object.items()}
+        skipped_out = {oid: arr[:n_used].copy() for oid, arr in skipped_by_object.items()}
+        shadow_out = {oid: arr[:n_used].copy() for oid, arr in srp_shadow_by_object.items()}
+        knowledge_out: dict[str, dict[str, np.ndarray]] = {}
+        for obs, by_tgt in knowledge_by_observer.items():
+            knowledge_out[obs] = {tgt: hist[:n_used, :].copy() for tgt, hist in by_tgt.items()}
+
         return SimLog(
-            t_s=t_s,
-            truth_by_object=truth_by_object,
-            belief_by_object=belief_by_object,
-            knowledge_by_observer=knowledge_by_observer,
-            applied_thrust_by_object=thrust_by_object,
-            applied_torque_by_object=torque_by_object,
-            controller_runtime_ms_by_object=runtime_by_object,
-            controller_skipped_by_object=skipped_by_object,
-            srp_shadow_by_object=srp_shadow_by_object,
+            t_s=t_out,
+            truth_by_object=truth_out,
+            belief_by_object=belief_out,
+            knowledge_by_observer=knowledge_out,
+            applied_thrust_by_object=thrust_out,
+            applied_torque_by_object=torque_out,
+            controller_runtime_ms_by_object=runtime_out,
+            controller_skipped_by_object=skipped_out,
+            srp_shadow_by_object=shadow_out,
+            terminated_early=terminated_early,
+            termination_reason=termination_reason,
+            termination_step=termination_step,
+            termination_object_id=termination_object_id,
         )
 
 

@@ -65,6 +65,48 @@ class TestRocketAscentEngine(unittest.TestCase):
         self.assertEqual(out.angular_rate_body_rad_s.shape, (n, 3))
         self.assertEqual(out.mass_kg.shape, (n,))
 
+    def test_stagewise_aero_geometry_updates_with_stage(self):
+        sim_cfg = RocketSimConfig(
+            dt_s=1.0,
+            max_time_s=1.0,
+            enable_drag=True,
+            enable_j2=False,
+            enable_j3=False,
+            enable_j4=False,
+            area_ref_m2=None,
+            use_stagewise_aero_geometry=True,
+        )
+        vehicle_cfg = RocketVehicleConfig(stack=self._tiny_stack(), payload_mass_kg=0.0)
+        sim = RocketAscentSimulator(sim_cfg=sim_cfg, vehicle_cfg=vehicle_cfg, guidance=HoldAttitudeGuidance(throttle=0.0))
+
+        cfg0 = sim._resolve_aero_config_for_stage(0)
+        cfg1 = sim._resolve_aero_config_for_stage(1)
+        a0_expected = np.pi * 0.25 * (1.5**2)
+        a1_expected = np.pi * 0.25 * (1.2**2)
+        self.assertAlmostEqual(cfg0.reference_area_m2, a0_expected, places=10)
+        self.assertAlmostEqual(cfg1.reference_area_m2, a1_expected, places=10)
+        self.assertAlmostEqual(cfg0.reference_length_m, 8.0, places=10)
+        self.assertAlmostEqual(cfg1.reference_length_m, 5.0, places=10)
+
+    def test_area_override_takes_priority_over_stage_geometry(self):
+        sim_cfg = RocketSimConfig(
+            dt_s=1.0,
+            max_time_s=1.0,
+            enable_drag=True,
+            enable_j2=False,
+            enable_j3=False,
+            enable_j4=False,
+            area_ref_m2=4.2,
+            use_stagewise_aero_geometry=True,
+        )
+        vehicle_cfg = RocketVehicleConfig(stack=self._tiny_stack(), payload_mass_kg=0.0)
+        sim = RocketAscentSimulator(sim_cfg=sim_cfg, vehicle_cfg=vehicle_cfg, guidance=HoldAttitudeGuidance(throttle=0.0))
+
+        cfg0 = sim._resolve_aero_config_for_stage(0)
+        cfg1 = sim._resolve_aero_config_for_stage(1)
+        self.assertAlmostEqual(cfg0.reference_area_m2, 4.2, places=12)
+        self.assertAlmostEqual(cfg1.reference_area_m2, 4.2, places=12)
+
 
 if __name__ == "__main__":
     unittest.main()

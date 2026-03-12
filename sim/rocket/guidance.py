@@ -4,8 +4,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from sim.dynamics.orbit.atmosphere import atmosphere_state_from_model
 from sim.rocket.models import GuidanceCommand, RocketGuidanceLaw, RocketSimConfig, RocketState, RocketVehicleConfig
-from sim.utils.quaternion import dcm_to_quaternion_bn
+from sim.utils.quaternion import dcm_to_quaternion_bn, quaternion_to_dcm_bn
 
 
 def _unit(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -73,3 +74,47 @@ class HoldAttitudeGuidance(RocketGuidanceLaw):
 
     def command(self, state: RocketState, sim_cfg: RocketSimConfig, vehicle_cfg: RocketVehicleConfig) -> GuidanceCommand:
         return GuidanceCommand(throttle=float(np.clip(self.throttle, 0.0, 1.0)), attitude_quat_bn_cmd=None, torque_body_nm_cmd=np.zeros(3))
+
+
+@dataclass(frozen=True)
+class MaxQThrottleLimiterGuidance(RocketGuidanceLaw):
+    """Wrap a base guidance law and limit throttle when dynamic pressure exceeds max_q."""
+
+    base_guidance: RocketGuidanceLaw
+    max_q_pa: float = 45_000.0
+    min_throttle: float = 0.0
+
+    def _estimate_dynamic_pressure_pa(self, state: RocketState, sim_cfg: RocketSimConfig) -> float:
+        env = {"atmosphere_model": sim_cfg.atmosphere_model, **dict(sim_cfg.atmosphere_env)}
+        atmos = atmosphere_state_from_model(
+            model=str(sim_cfg.atmosphere_model).lower(),
+            r_eci_km=state.position_eci_km,
+            t_s=state.t_s,
+            env=env,
+        )
+        rho = float(max(atmos["density_kg_m3"], 0.0))
+        c_bn = quaternion_to_dcm_bn(state.attitude_quat_bn)
+        omega_earth = np.array([0.0, 0.0, 7.2921159e-5], dtype=float)
+        v_atm_eci_km_s = np.cross(omega_earth, state.position_eci_km)
+        v_rel_eci_m_s = (state.velocity_eci_km_s - v_atm_eci_km_s) * 1e3
+        v_rel_body_m_s = c_bn @ v_rel_eci_m_s
+        speed = float(np.linalg.norm(v_rel_body_m_s))
+        return 0.5 * rho * speed * speed
+
+    def command(self, state: RocketState, sim_cfg: RocketSimConfig, vehicle_cfg: RocketVehicleConfig) -> GuidanceCommand:
+        cmd = self.base_guidance.command(state, sim_cfg, vehicle_cfg)
+        thr_cmd = float(np.clip(cmd.throttle, 0.0, 1.0))
+        if self.max_q_pa <= 0.0 or thr_cmd <= 0.0:
+            return cmd
+
+        q_now = self._estimate_dynamic_pressure_pa(state=state, sim_cfg=sim_cfg)
+        if q_now <= self.max_q_pa:
+            return cmd
+
+        scale = float(np.clip(self.max_q_pa / max(q_now, 1e-9), 0.0, 1.0))
+        thr_limited = float(np.clip(thr_cmd * scale, self.min_throttle, thr_cmd))
+        return GuidanceCommand(
+            throttle=thr_limited,
+            attitude_quat_bn_cmd=cmd.attitude_quat_bn_cmd,
+            torque_body_nm_cmd=cmd.torque_body_nm_cmd,
+        )

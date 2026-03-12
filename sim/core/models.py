@@ -53,6 +53,8 @@ class SimConfig:
     controller_budget_ms: float = 2.0
     rng_seed: int = 0
     initial_jd_utc: float | None = None
+    terminate_on_earth_impact: bool = True
+    earth_impact_radius_km: float = 6378.137
 
     def __post_init__(self) -> None:
         if self.dt_s <= 0.0:
@@ -63,6 +65,8 @@ class SimConfig:
             raise ValueError("controller_budget_ms must be positive")
         if self.initial_jd_utc is not None and self.initial_jd_utc <= 0.0:
             raise ValueError("initial_jd_utc must be positive when provided")
+        if self.earth_impact_radius_km <= 0.0:
+            raise ValueError("earth_impact_radius_km must be positive")
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,10 @@ class SimLog:
     controller_skipped_by_object: dict[str, np.ndarray]
     knowledge_by_observer: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
     srp_shadow_by_object: dict[str, np.ndarray] = field(default_factory=dict)
+    terminated_early: bool = False
+    termination_reason: str | None = None
+    termination_step: int | None = None
+    termination_object_id: str | None = None
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
@@ -116,4 +124,8 @@ class SimLog:
                 k: v.astype(int).tolist() for k, v in self.controller_skipped_by_object.items()
             },
             "srp_shadow_by_object": {k: v.tolist() for k, v in self.srp_shadow_by_object.items()},
+            "terminated_early": bool(self.terminated_early),
+            "termination_reason": self.termination_reason,
+            "termination_step": self.termination_step,
+            "termination_object_id": self.termination_object_id,
         }

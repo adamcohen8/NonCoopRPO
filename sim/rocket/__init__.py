@@ -1,5 +1,6 @@
 from sim.rocket.engine import RocketAscentSimulator
-from sim.rocket.guidance import HoldAttitudeGuidance, OpenLoopPitchProgramGuidance
+from sim.rocket.guidance import HoldAttitudeGuidance, MaxQThrottleLimiterGuidance, OpenLoopPitchProgramGuidance
+from sim.rocket.aero import RocketAeroConfig
 from sim.rocket.models import (
     GuidanceCommand,
     RocketGuidanceLaw,
@@ -11,6 +12,7 @@ from sim.rocket.models import (
 
 __all__ = [
     "RocketAscentSimulator",
+    "RocketAeroConfig",
     "RocketSimConfig",
     "RocketVehicleConfig",
     "RocketState",
@@ -18,5 +20,6 @@ __all__ = [
     "GuidanceCommand",
     "RocketGuidanceLaw",
     "OpenLoopPitchProgramGuidance",
+    "MaxQThrottleLimiterGuidance",
     "HoldAttitudeGuidance",
 ]
