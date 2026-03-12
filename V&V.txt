@@ -1,0 +1,125 @@
+Verification and Validation (V&V) Plan
+Project: NonCooperativeRPO
+Use Case: ASAT missile + interceptor with proprietary guidance
+Date: 2026-03-12
+
+Objective
+- Quantify how closely simulation outcomes represent reality for ASAT engagement analysis.
+- Move from qualitative insight to bounded, decision-support confidence.
+
+Confidence Framework
+- Level 0 (Exploratory): trend-only confidence; no formal error bounds.
+- Level 1 (Subsystem Validated): each major subsystem has benchmark error bounds.
+- Level 2 (Integrated Validated): coupled end-to-end scenarios validated in envelope.
+- Level 3 (Decision Grade): statistically defensible uncertainty bounds vs trusted truth data.
+
+Success Metric
+- Produce confidence statements in the form:
+  "For envelope E, with confidence C, simulation miss-distance/time/fuel errors are within bounds B."
+
+Phase A: Verification (Build Correctness)
+1. Deterministic unit tests (continuous integration)
+- Orbit propagation: 2-body, J2/J3/J4, harmonics, drag, SRP, third-body.
+- Attitude propagation: quaternion/exponential-map stability, torque sign checks.
+- Rocket/ascent: staging, mass flow, thrust logic, max-Q limiter, termination conditions.
+- Knowledge/EKF: update cadence, dropout behavior, consistency checks (NIS/NEES math).
+- Pass criteria: >95% branch coverage on critical dynamics/control paths; zero failing regression tests.
+
+2. Numerical verification
+- Integrator convergence studies: dt sweep and tolerance sweep.
+- Event timing verification: staging/deployment/cutoff events hit within tolerance.
+- Pass criteria: state error decreases with timestep as expected; event timing error < configured threshold.
+
+3. Interface verification
+- Validate units/contracts for all interfaces (km vs m, body vs ECI vs RIC).
+- Pass criteria: automated dimensional/shape/unit checks in scenario setup and logs.
+
+Phase B: Subsystem Validation (Physics Fidelity)
+4. Orbital truth-model validation
+- Compare against trusted reference (HPOP/STK/GMAT/MATLAB truth runs) for matched initial conditions.
+- Validate one perturbation at a time, then stacked models.
+- Metrics: RMS/max position and velocity error over duration windows.
+- Pass criteria: documented tolerance by regime (LEO/MEO/cislunar), with known integrator contribution.
+
+5. Attitude and disturbance validation
+- Validate gravity-gradient, SRP torque, drag torque magnitudes and directions against analytic/independent models.
+- Reaction wheel/actuator behavior vs expected torque and momentum limits.
+- Pass criteria: torque and rate response within predefined envelopes.
+
+6. Rocket/ascent validation
+- Validate ascent profile against known trajectory references for similar vehicle class.
+- Include atmosphere/wind sensitivity, max-Q timing/magnitude, burnout conditions.
+- Metrics: altitude/velocity/mach/max-Q/staging-time deviations.
+- Pass criteria: bounded errors across nominal and dispersed cases.
+
+7. Sensor/knowledge/estimation validation
+- Validate measurement noise, bias, dropout distributions vs specified stats.
+- EKF consistency (NIS/NEES) over Monte Carlo.
+- Pass criteria: innovation statistics inside confidence bounds over target percentage of runs.
+
+Phase C: Integrated ASAT Scenario Validation
+8. Engagement chain validation
+- Scenario sequence: launch -> mutual knowledge onset -> maneuver policies -> chaser deployment -> terminal phase.
+- Validate timing, state handoff, and frame consistency at each phase boundary.
+- Pass criteria: phase transitions occur at commanded conditions with zero contract violations.
+
+9. Adversary behavior validation
+- Create standardized target behavior library (coast/evasive/deceptive/pulsed thrust).
+- Confirm reproducibility with fixed seeds and expected diversity with varied seeds.
+- Pass criteria: scenario behavior matches scripted policy definitions and uncertainty model.
+
+10. End-to-end benchmark campaigns
+- Run matched campaigns against trusted high-fidelity baseline for representative threat envelopes.
+- Metrics: miss distance, closest approach time, fuel use, state-estimation error, intercept/survival outcomes.
+- Pass criteria: error distributions within agreed bounds for each envelope.
+
+Phase D: Uncertainty Quantification and Confidence Statements
+11. Calibration and uncertainty model
+- Calibrate uncertain parameters (aero coeffs, thrust dispersion, sensor bias, timing jitter, etc.) using available data.
+- Use Bayesian or likelihood-based calibration where feasible.
+
+12. Monte Carlo confidence characterization
+- Large campaign matrix over initial conditions, environment, and hardware dispersions.
+- Compute confidence intervals for mission outcomes and key errors.
+- Deliver ROC-style curves for attacker/defender advantage under each scenario family.
+
+13. Global sensitivity analysis
+- Identify dominant contributors to outcome uncertainty.
+- Prioritize model-improvement investments by impact.
+
+Phase E: Acceptance and Governance
+14. Validation report package (per release)
+- Configuration snapshot (commit hash, environment, dependency versions).
+- Model assumptions and known limitations.
+- Benchmark comparisons and pass/fail matrix.
+- Confidence statements and restricted envelope of validity.
+
+15. Change-control gate
+- Any change to dynamics/control/estimation requires:
+  - full regression pass,
+  - targeted re-validation,
+  - updated confidence statement if affected.
+
+Suggested Initial Quantitative Gates (Draft)
+- Orbit-only (validated envelope): position max error <= threshold per regime and duration.
+- Attitude-only: quaternion/rate tracking errors within controller-specific thresholds.
+- Rocket ascent: max-Q timing/value and burnout state within specified deltas.
+- Engagement outcomes: miss-distance distribution shift relative to baseline within confidence interval.
+
+Data Requirements (Minimum)
+- Vehicle truth data or high-fidelity truth-model outputs for the specific ASAT/interceptor class.
+- Sensor performance characterization (noise, bias, dropout, latency).
+- Propulsion and actuator performance maps with uncertainty bounds.
+- Environmental datasets for representative operational windows.
+
+Current Project Status vs This Plan (Practical View)
+- Strong foundation in modular dynamics/control/knowledge architecture.
+- Partial subsystem validation completed (not full decision-grade yet).
+- Missing for high confidence: full calibration, integrated benchmark campaigns, and formal uncertainty/confidence reporting.
+
+Immediate Next 4 Tasks (Recommended)
+1. Build an automated V&V harness script that runs the benchmark suite and outputs pass/fail + metrics JSON.
+2. Define envelope-specific tolerance tables (LEO, high-LEO, cislunar) and wire them into the harness.
+3. Add EKF consistency tests (NIS/NEES) and include them in CI.
+4. Stand up first integrated ASAT benchmark campaign and produce a baseline validation report template.
+
