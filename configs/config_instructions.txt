@@ -44,6 +44,37 @@ Notes:
 - Use module + function for function-based handlers.
 - params is a freeform dict passed later by scenario wiring code.
 
+Mission Module Pointers
+- mission_objectives are executed each master_sim step when provided.
+- Satellite mission module:
+  module: "sim.mission.modules"
+  class_name: "SatelliteMissionModule"
+  params:
+    orbital_mode: "coast" | "pursuit_knowledge" | "evade_knowledge" | "pursuit_blind" | "evade_blind"
+    attitude_mode: "hold_eci" | "hold_ric" | "spotlight" | "sun_track" | "pursuit" | "evade" | "sensing"
+    target_id: "<object_id>"
+    max_accel_km_s2: <float>
+    hold_quat_bn: [q0,q1,q2,q3]
+    hold_quat_br: [q0,q1,q2,q3]
+    boresight_body: [x,y,z]
+    spotlight_lat_deg: <float>
+    spotlight_lon_deg: <float>
+    spotlight_alt_km: <float>
+    spotlight_ric_direction: [R,I,C]
+    use_knowledge_for_targeting: true|false
+- Rocket mission module:
+  module: "sim.mission.modules"
+  class_name: "RocketMissionModule"
+  params:
+    launch_mode: "go_now" | "go_when_possible" | "wait_optimal_window"
+    orbital_goal: "pursuit" | "predefined_orbit"
+    target_id: "<object_id>"
+    go_when_possible_margin_m_s: <float>
+    window_period_s: <float>
+    window_open_duration_s: <float>
+    predef_target_alt_km: <float>
+    predef_target_ecc: <float>
+
 Bridge Pointer Format (SIL/HIL)
 - bridge:
     enabled: true|false
@@ -72,6 +103,7 @@ Agent Sections (rocket/chaser/target)
 - orbit_control: orbit controller pointer
 - attitude_control: attitude controller pointer
 - mission_objectives: list of objective pointers
+  - these can act as mission modules that drive thrust/attitude/launch timing.
 - bridge: SIL/HIL pointer
 - knowledge: refresh/conditions/noise/estimation settings
 

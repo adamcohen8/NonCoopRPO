@@ -125,6 +125,7 @@ from sim.estimation import (
     OrbitUKFEstimator,
 )
 from sim.metrics import EngagementMetrics, ScoreSummary, compute_engagement_metrics, compute_scores
+from sim.mission import RocketMissionModule, SatelliteMissionModule
 from sim.optimization import (
     AttitudeTuneCase,
     ControllerAlgorithm,
@@ -326,6 +327,8 @@ __all__ = [
     "compute_scores",
     "EngagementMetrics",
     "compute_engagement_metrics",
+    "SatelliteMissionModule",
+    "RocketMissionModule",
     "ParameterBound",
     "OptimizationResult",
     "PSOConfig",

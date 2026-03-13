@@ -41,6 +41,7 @@ from sim.utils.plotting_capabilities import (
     plot_trajectory_frame,
 )
 from sim.utils.ground_track import ground_track_from_eci_history
+from sim.utils.frames import ric_dcm_ir_from_rv, ric_rect_to_curv
 from sim.utils.quaternion import quaternion_to_dcm_bn
 
 
@@ -273,6 +274,8 @@ class AgentRuntime:
     deploy_source: str | None
     deploy_time_s: float | None
     deploy_dv_body_m_s: np.ndarray | None
+    mission_modules: list[Any]
+    waiting_for_launch: bool
 
 
 def _create_satellite_runtime(
@@ -314,6 +317,8 @@ def _create_satellite_runtime(
         orbit_propagator=_build_orbit_propagator(cfg),
     )
     bridge = _module_obj(agent_cfg.bridge) if (agent_cfg.bridge is not None and agent_cfg.bridge.enabled) else None
+    missions = [_module_obj(p) for p in list(agent_cfg.mission_objectives or [])]
+    missions = [m for m in missions if m is not None]
     return AgentRuntime(
         object_id=object_id,
         kind="satellite",
@@ -334,6 +339,8 @@ def _create_satellite_runtime(
         deploy_source=str((agent_cfg.initial_state or {}).get("source", "")) or None,
         deploy_time_s=float((agent_cfg.initial_state or {}).get("deploy_time_s", 0.0)),
         deploy_dv_body_m_s=np.array((agent_cfg.initial_state or {}).get("deploy_dv_body_m_s", [0.0, 0.0, 0.0]), dtype=float),
+        mission_modules=missions,
+        waiting_for_launch=False,
     )
 
 
@@ -362,6 +369,8 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
     rt = _rocket_state_to_truth(rs)
     belief = StateBelief(state=np.hstack((rt.position_eci_km, rt.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=0.0)
     bridge = _module_obj(rc.bridge) if (rc.bridge is not None and rc.bridge.enabled) else None
+    missions = [_module_obj(p) for p in list(rc.mission_objectives or [])]
+    missions = [m for m in missions if m is not None]
     return AgentRuntime(
         object_id="rocket",
         kind="rocket",
@@ -382,6 +391,8 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         deploy_source=None,
         deploy_time_s=None,
         deploy_dv_body_m_s=None,
+        mission_modules=missions,
+        waiting_for_launch=False,
     )
 
 
@@ -440,6 +451,44 @@ def _deploy_from_rocket(agent: AgentRuntime, rocket: AgentRuntime, t_next: float
     )
     agent.belief = StateBelief(state=np.hstack((agent.truth.position_eci_km, agent.truth.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=t_next)
     agent.active = True
+
+
+def _run_mission_modules(
+    *,
+    agent: AgentRuntime,
+    world_truth: dict[str, StateTruth],
+    t_s: float,
+    dt_s: float,
+    env: dict[str, Any],
+) -> dict[str, Any]:
+    if not agent.mission_modules:
+        return {}
+    own_knowledge = agent.knowledge_base.snapshot() if agent.knowledge_base is not None else {}
+    truth = world_truth.get(agent.object_id)
+    if truth is None:
+        return {}
+    out: dict[str, Any] = {}
+    for m in agent.mission_modules:
+        if not hasattr(m, "update"):
+            continue
+        try:
+            ret = m.update(
+                object_id=agent.object_id,
+                truth=truth,
+                belief=agent.belief,
+                own_knowledge=own_knowledge,
+                world_truth=world_truth,
+                env=env,
+                t_s=t_s,
+                dt_s=dt_s,
+                rocket_state=agent.rocket_state,
+                rocket_vehicle_cfg=(agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
+            )
+        except TypeError:
+            ret = m.update(truth=truth, t_s=t_s)
+        if isinstance(ret, dict):
+            out.update(ret)
+    return out
 
 
 def _plot_outputs(
@@ -811,30 +860,78 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
             if not a.active:
                 continue
             tr_now = world_truth[aid]
+            env_common = {**dict(cfg.simulator.environment or {}), "world_truth": world_truth}
+            mission_out = _run_mission_modules(
+                agent=a,
+                world_truth=world_truth,
+                t_s=t_next,
+                dt_s=dt,
+                env=env_common,
+            )
 
             if a.kind == "rocket":
-                cmd = a.rocket_guidance.command(a.rocket_state, a.rocket_sim.sim_cfg, a.rocket_sim.vehicle_cfg)
-                throttle_hist["rocket"][k] = float(np.clip(cmd.throttle, 0.0, 1.0))
-                a.rocket_state = a.rocket_sim.step(a.rocket_state, cmd, dt_s=dt)
-                a.truth = _rocket_state_to_truth(a.rocket_state)
-                if a.belief is not None:
-                    a.belief = StateBelief(
-                        state=np.hstack((a.truth.position_eci_km, a.truth.velocity_eci_km_s)),
-                        covariance=a.belief.covariance,
-                        last_update_t_s=t_next,
-                    )
-                thrust_n = float(getattr(a.rocket_state, "_last_step_thrust_n", 0.0))
-                axis_eci = quaternion_to_dcm_bn(a.rocket_state.attitude_quat_bn).T @ np.array(a.rocket_sim.vehicle_cfg.thrust_axis_body, dtype=float)
-                accel = (thrust_n / max(a.rocket_state.mass_kg, 1e-9)) * axis_eci / 1e3
-                thrust_hist[aid][k + 1, :] = accel
-                torque_hist[aid][k + 1, :] = np.array(a.rocket_state.angular_rate_body_rad_s, dtype=float) * 0.0
+                launch_auth = bool(mission_out.get("launch_authorized", True))
+                a.waiting_for_launch = not launch_auth
+                if not launch_auth:
+                    a.rocket_state.t_s = float(t_next)
+                    a.truth = _rocket_state_to_truth(a.rocket_state)
+                    if a.belief is not None:
+                        a.belief = StateBelief(
+                            state=np.hstack((a.truth.position_eci_km, a.truth.velocity_eci_km_s)),
+                            covariance=a.belief.covariance,
+                            last_update_t_s=t_next,
+                        )
+                    throttle_hist["rocket"][k] = 0.0
+                    thrust_hist[aid][k + 1, :] = np.zeros(3, dtype=float)
+                    torque_hist[aid][k + 1, :] = np.zeros(3, dtype=float)
+                else:
+                    cmd = a.rocket_guidance.command(a.rocket_state, a.rocket_sim.sim_cfg, a.rocket_sim.vehicle_cfg)
+                    if "guidance_throttle" in mission_out:
+                        cmd = type(cmd)(
+                            throttle=float(mission_out.get("guidance_throttle", cmd.throttle)),
+                            attitude_quat_bn_cmd=cmd.attitude_quat_bn_cmd,
+                            torque_body_nm_cmd=cmd.torque_body_nm_cmd,
+                        )
+                    throttle_hist["rocket"][k] = float(np.clip(cmd.throttle, 0.0, 1.0))
+                    a.rocket_state = a.rocket_sim.step(a.rocket_state, cmd, dt_s=dt)
+                    a.truth = _rocket_state_to_truth(a.rocket_state)
+                    if a.belief is not None:
+                        a.belief = StateBelief(
+                            state=np.hstack((a.truth.position_eci_km, a.truth.velocity_eci_km_s)),
+                            covariance=a.belief.covariance,
+                            last_update_t_s=t_next,
+                        )
+                    thrust_n = float(getattr(a.rocket_state, "_last_step_thrust_n", 0.0))
+                    axis_eci = quaternion_to_dcm_bn(a.rocket_state.attitude_quat_bn).T @ np.array(a.rocket_sim.vehicle_cfg.thrust_axis_body, dtype=float)
+                    accel = (thrust_n / max(a.rocket_state.mass_kg, 1e-9)) * axis_eci / 1e3
+                    thrust_hist[aid][k + 1, :] = accel
+                    torque_hist[aid][k + 1, :] = np.array(a.rocket_state.angular_rate_body_rad_s, dtype=float) * 0.0
             else:
                 meas = a.sensor.measure(truth=tr_now, env={"world_truth": world_truth}, t_s=t_next) if a.sensor is not None else None
                 if a.estimator is not None and a.belief is not None:
                     a.belief = a.estimator.update(a.belief, meas, t_next)
                 elif a.belief is None:
                     a.belief = StateBelief(state=np.hstack((tr_now.position_eci_km, tr_now.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=t_next)
-                c_orb = a.orbit_controller.act(a.belief, t_next, 2.0) if a.orbit_controller is not None else Command.zero()
+                orb_belief = a.belief
+                if a.orbit_controller is not None and orb_belief is not None:
+                    chief_truth = world_truth.get("target")
+                    if chief_truth is not None and aid != "target" and hasattr(a.orbit_controller, "ric_curv_state_slice"):
+                        r_c = np.array(chief_truth.position_eci_km, dtype=float)
+                        v_c = np.array(chief_truth.velocity_eci_km_s, dtype=float)
+                        r_s = np.array(tr_now.position_eci_km, dtype=float)
+                        v_s = np.array(tr_now.velocity_eci_km_s, dtype=float)
+                        c_ir = ric_dcm_ir_from_rv(r_c, v_c)
+                        dr_ric = c_ir.T @ (r_s - r_c)
+                        dv_ric = c_ir.T @ (v_s - v_c)
+                        x_rect = np.hstack((dr_ric, dv_ric))
+                        x_curv = ric_rect_to_curv(x_rect, r0_km=float(np.linalg.norm(r_c)))
+                        orb_state = np.hstack((x_curv, np.hstack((r_c, v_c))))
+                        orb_belief = StateBelief(
+                            state=orb_state,
+                            covariance=np.eye(12) * 1e-4,
+                            last_update_t_s=orb_belief.last_update_t_s,
+                        )
+                c_orb = a.orbit_controller.act(orb_belief, t_next, 2.0) if a.orbit_controller is not None and orb_belief is not None else Command.zero()
                 att_belief = a.belief
                 if att_belief is not None and att_belief.state.size < 13:
                     att_state = np.hstack(
@@ -849,9 +946,37 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
                         covariance=att_belief.covariance,
                         last_update_t_s=att_belief.last_update_t_s,
                     )
+                # Mission module can set attitude targets on compatible controllers.
+                if "desired_attitude_quat_bn" in mission_out and a.attitude_controller is not None:
+                    q_des = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)
+                    if q_des.size == 4 and hasattr(a.attitude_controller, "set_target"):
+                        try:
+                            a.attitude_controller.set_target(q_des)
+                        except Exception:
+                            pass
+                if "desired_attitude_quat_br" in mission_out and a.attitude_controller is not None:
+                    q_des_r = np.array(mission_out["desired_attitude_quat_br"], dtype=float).reshape(-1)
+                    if q_des_r.size == 4 and hasattr(a.attitude_controller, "set_target"):
+                        try:
+                            a.attitude_controller.set_target(q_des_r)
+                        except Exception:
+                            pass
+                if "desired_ric_euler_rad" in mission_out and a.attitude_controller is not None and hasattr(a.attitude_controller, "set_desired_ric_state"):
+                    e = np.array(mission_out["desired_ric_euler_rad"], dtype=float).reshape(-1)
+                    if e.size == 3:
+                        try:
+                            a.attitude_controller.set_desired_ric_state(float(e[0]), float(e[1]), float(e[2]))
+                        except Exception:
+                            pass
                 c_att = a.attitude_controller.act(att_belief, t_next, 2.0) if a.attitude_controller is not None and att_belief is not None else Command.zero()
                 cmd = _combine_commands(c_orb, c_att)
-                env = {**dict(cfg.simulator.environment or {}), "world_truth": world_truth, "atmosphere_model": cfg.simulator.dynamics.get("rocket", {}).get("atmosphere_model", "ussa1976")}
+                if "thrust_eci_km_s2" in mission_out:
+                    cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
+                env = {
+                    **dict(cfg.simulator.environment or {}),
+                    "world_truth": world_truth,
+                    "atmosphere_model": cfg.simulator.dynamics.get("rocket", {}).get("atmosphere_model", "ussa1976"),
+                }
                 a.truth = a.dynamics.step(state=tr_now, command=cmd, env=env, dt_s=dt)
                 thrust_hist[aid][k + 1, :] = cmd.thrust_eci_km_s2
                 torque_hist[aid][k + 1, :] = cmd.torque_body_nm
@@ -880,6 +1005,8 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
             re = float(cfg.simulator.termination.get("earth_radius_km", EARTH_RADIUS_KM))
             for aid, a in agents.items():
                 if not a.active:
+                    continue
+                if a.kind == "rocket" and a.waiting_for_launch:
                     continue
                 tr = a.truth if a.kind == "satellite" else _rocket_state_to_truth(a.rocket_state)
                 if float(np.linalg.norm(tr.position_eci_km)) <= re:

@@ -1,15 +1,14 @@
 # Canonical simulation scenario config template
-# Sections:
-#   rocket, chaser, target, simulator, outputs, monte_carlo
+# "Everything On" baseline template
 
-scenario_name: "two_sat_ground_track_animation"
+scenario_name: "everything_on_template"
 
 metadata:
   owner: "team"
-  notes: "Two passive satellites with slightly different eccentricity/inclination signatures."
+  notes: "Full-feature baseline with rocket + target + chaser, broad dynamics, mission hooks, plots, and animations enabled."
 
 rocket:
-  enabled: false
+  enabled: true
   role: "rocket"
   specs:
     preset_stack: "BASIC_TWO_STAGE_STACK"
@@ -42,7 +41,14 @@ rocket:
     module: "sim.control.attitude.zero_torque"
     class_name: "ZeroTorqueController"
     params: {}
-  mission_objectives: []
+  mission_objectives:
+    - kind: "python"
+      module: "sim.mission.modules"
+      class_name: "RocketMissionModule"
+      params:
+        launch_mode: "go_now"
+        orbital_goal: "pursuit"
+        target_id: "target"
   bridge:
     enabled: false
     mode: "sil"
@@ -51,7 +57,7 @@ rocket:
     class_name: "CFSBridge"
     params: {}
   knowledge:
-    refresh_rate_s: 2.0
+    refresh_rate_s: 1.0
     targets:
       - "target"
     conditions:
@@ -72,13 +78,9 @@ chaser:
     thruster: "BASIC_CHEMICAL_Z_BOTTOM"
     attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
   initial_state:
-    coes:
-      a_km: 10000.0
-      ecc: 0.2
-      inc_deg: 50.0
-      raan_deg: 20.0
-      argp_deg: 40.0
-      true_anomaly_deg: 0.0
+    source: "rocket_deployment"
+    deploy_time_s: 900.0
+    deploy_dv_body_m_s: [10.0, 0.0, 0.0]
     attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
     angular_rate_body_rad_s: [0.0, 0.0, 0.0]
   guidance:
@@ -88,15 +90,37 @@ chaser:
     params: {}
   orbit_control:
     kind: "python"
-    module: "sim.control.orbit.zero_controller"
-    class_name: "ZeroController"
-    params: {}
+    module: "sim.control.orbit.lqr"
+    class_name: "HCWLQRController"
+    params:
+      mean_motion_rad_s: 0.001078
+      max_accel_km_s2: 2.0e-6
+      design_dt_s: 10.0
+      ric_curv_state_slice: [0, 6]
+      chief_eci_state_slice: [6, 12]
   attitude_control:
     kind: "python"
-    module: "sim.control.attitude.zero_torque"
-    class_name: "ZeroTorqueController"
-    params: {}
-  mission_objectives: []
+    module: "sim.control.attitude.surrogate_snap"
+    class_name: "SurrogateSnapECIController"
+    params:
+      desired_attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+      cancel_rate_mag_rad_s2: 1.0
+      rate_tolerance_rad_s: 1.0e-3
+      slew_time_180_s: 1.0
+      pointing_sigma_deg: 0.05
+      default_dt_s: 1.0
+      rng_seed: 2
+  mission_objectives:
+    - kind: "python"
+      module: "sim.mission.modules"
+      class_name: "SatelliteMissionModule"
+      params:
+        orbital_mode: "pursuit_knowledge"
+        attitude_mode: "pursuit"
+        target_id: "target"
+        max_accel_km_s2: 2.0e-6
+        boresight_body: [1.0, 0.0, 0.0]
+        use_knowledge_for_targeting: true
   bridge:
     enabled: false
     mode: "hil"
@@ -127,7 +151,7 @@ target:
   initial_state:
     coes:
       a_km: 7000.0
-      ecc: 0.0
+      ecc: 0.001
       inc_deg: 45.0
       raan_deg: 0.0
       argp_deg: 0.0
@@ -146,10 +170,24 @@ target:
     params: {}
   attitude_control:
     kind: "python"
-    module: "sim.control.attitude.zero_torque"
-    class_name: "ZeroTorqueController"
-    params: {}
-  mission_objectives: []
+    module: "sim.control.attitude.surrogate_snap"
+    class_name: "SurrogateSnapECIController"
+    params:
+      desired_attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+      cancel_rate_mag_rad_s2: 1.0
+      rate_tolerance_rad_s: 1.0e-3
+      slew_time_180_s: 1.0
+      pointing_sigma_deg: 0.05
+      default_dt_s: 1.0
+      rng_seed: 3
+  mission_objectives:
+    - kind: "python"
+      module: "sim.mission.modules"
+      class_name: "SatelliteMissionModule"
+      params:
+        orbital_mode: "coast"
+        attitude_mode: "hold_eci"
+        hold_quat_bn: [1.0, 0.0, 0.0, 0.0]
   bridge:
     enabled: false
     mode: "sil"
@@ -158,7 +196,7 @@ target:
     class_name: null
     params: {}
   knowledge:
-    refresh_rate_s: 5.0
+    refresh_rate_s: 1.0
     targets:
       - "rocket"
       - "chaser"
@@ -172,29 +210,31 @@ target:
       type: "ekf"
 
 simulator:
-  scenario_type: "auto"  # auto | asat_phased_engagement | rocket_ascent | free_tumble_one_orbit | free_tumble_one_orbit_ric
-  duration_s: 6000.0
+  scenario_type: "auto"
+  duration_s: 7200.0
   dt_s: 1.0
   initial_jd_utc: null
   dynamics:
     orbit:
       model: "two_body"
       j2: true
-      j3: false
-      j4: false
+      j3: true
+      j4: true
+      drag: true
+      srp: true
       spherical_harmonics:
-        enabled: false
+        enabled: true
         degree: 8
         order: 8
     attitude:
       enabled: true
       disturbance_torques:
-        gravity_gradient: false
-        magnetic: false
-        drag: false
-        srp: false
+        gravity_gradient: true
+        magnetic: true
+        drag: true
+        srp: true
     rocket:
-      enabled: false
+      enabled: true
       atmosphere_model: "ussa1976"
       aero_model_enabled: true
       max_q_limiter_enabled: true
@@ -210,25 +250,44 @@ simulator:
     earth_radius_km: 6378.137
 
 outputs:
-  output_dir: "outputs/two_sat_ground_track_animation"
-  mode: "interactive"  # interactive | save | both
+  output_dir: "outputs/everything_on_template"
+  mode: "both"  # interactive | save | both
   stats:
-    enabled: false
-    print_summary: false
-    save_json: false
+    enabled: true
+    print_summary: true
+    save_json: true
     save_csv: false
+    save_full_log: true
   plots:
-    enabled: false
+    enabled: true
     reference_object_id: "target"
-    figure_ids: []
+    figure_ids:
+      - "orbit_eci"
+      - "trajectory_eci_multi"
+      - "trajectory_ecef_multi"
+      - "trajectory_ric_rect_multi"
+      - "trajectory_ric_curv_multi"
+      - "trajectory_ecef"
+      - "trajectory_ric_rect"
+      - "trajectory_ric_curv"
+      - "attitude"
+      - "quaternion_eci"
+      - "quaternion_ric"
+      - "rates_eci"
+      - "rates_ric"
+      - "relative_range"
+      - "knowledge_timeline"
+      - "control_thrust"
+      - "control_thrust_multi"
     dpi: 160
   animations:
     enabled: true
     types:
       - "ground_track_multi"
-    fps: 60
-    speed_multiple: 1.0
-    frame_stride: 5
+      - "ground_track"
+    fps: 30
+    speed_multiple: 5.0
+    frame_stride: 2
     draw_earth_map: true
   monte_carlo:
     save_iteration_summaries: true
