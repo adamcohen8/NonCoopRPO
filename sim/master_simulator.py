@@ -460,6 +460,10 @@ def _run_mission_modules(
     t_s: float,
     dt_s: float,
     env: dict[str, Any],
+    orbit_controller: Any | None = None,
+    attitude_controller: Any | None = None,
+    orb_belief: StateBelief | None = None,
+    att_belief: StateBelief | None = None,
 ) -> dict[str, Any]:
     if not agent.mission_modules:
         return {}
@@ -481,6 +485,10 @@ def _run_mission_modules(
                 env=env,
                 t_s=t_s,
                 dt_s=dt_s,
+                orbit_controller=orbit_controller,
+                attitude_controller=attitude_controller,
+                orb_belief=orb_belief,
+                att_belief=att_belief,
                 rocket_state=agent.rocket_state,
                 rocket_vehicle_cfg=(agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
             )
@@ -861,15 +869,16 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
                 continue
             tr_now = world_truth[aid]
             env_common = {**dict(cfg.simulator.environment or {}), "world_truth": world_truth}
-            mission_out = _run_mission_modules(
-                agent=a,
-                world_truth=world_truth,
-                t_s=t_next,
-                dt_s=dt,
-                env=env_common,
-            )
+            mission_out: dict[str, Any] = {}
 
             if a.kind == "rocket":
+                mission_out = _run_mission_modules(
+                    agent=a,
+                    world_truth=world_truth,
+                    t_s=t_next,
+                    dt_s=dt,
+                    env=env_common,
+                )
                 launch_auth = bool(mission_out.get("launch_authorized", True))
                 a.waiting_for_launch = not launch_auth
                 if not launch_auth:
@@ -946,6 +955,17 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
                         covariance=att_belief.covariance,
                         last_update_t_s=att_belief.last_update_t_s,
                     )
+                mission_out = _run_mission_modules(
+                    agent=a,
+                    world_truth=world_truth,
+                    t_s=t_next,
+                    dt_s=dt,
+                    env=env_common,
+                    orbit_controller=a.orbit_controller,
+                    attitude_controller=a.attitude_controller,
+                    orb_belief=orb_belief,
+                    att_belief=att_belief,
+                )
                 # Mission module can set attitude targets on compatible controllers.
                 if "desired_attitude_quat_bn" in mission_out and a.attitude_controller is not None:
                     q_des = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)
@@ -969,9 +989,21 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
                         except Exception:
                             pass
                 c_att = a.attitude_controller.act(att_belief, t_next, 2.0) if a.attitude_controller is not None and att_belief is not None else Command.zero()
-                cmd = _combine_commands(c_orb, c_att)
-                if "thrust_eci_km_s2" in mission_out:
-                    cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
+                if bool(mission_out.get("mission_use_integrated_command", False)):
+                    cmd = Command.zero()
+                    if "thrust_eci_km_s2" in mission_out:
+                        cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
+                    if "torque_body_nm" in mission_out:
+                        cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
+                    cmd.mode_flags["mode"] = "mission_integrated"
+                    if "mission_mode" in mission_out:
+                        cmd.mode_flags["mission_mode"] = mission_out["mission_mode"]
+                else:
+                    cmd = _combine_commands(c_orb, c_att)
+                    if "thrust_eci_km_s2" in mission_out:
+                        cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
+                    if "torque_body_nm" in mission_out:
+                        cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
                 env = {
                     **dict(cfg.simulator.environment or {}),
                     "world_truth": world_truth,

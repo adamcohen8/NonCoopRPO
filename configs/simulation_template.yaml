@@ -217,9 +217,9 @@ simulator:
   dynamics:
     orbit:
       model: "two_body"
-      j2: true
-      j3: true
-      j4: true
+      j2: false
+      j3: false
+      j4: false
       drag: true
       srp: true
       spherical_harmonics:

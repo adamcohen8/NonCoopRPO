@@ -62,6 +62,38 @@ Mission Module Pointers
     spotlight_alt_km: <float>
     spotlight_ric_direction: [R,I,C]
     use_knowledge_for_targeting: true|false
+- End-state maneuver mission module (generic desired end-state + current knowledge):
+  module: "sim.mission.modules"
+  class_name: "EndStateManeuverMissionModule"
+  params:
+    target_id: "<object_id>"
+    use_knowledge_for_targeting: true|false
+    desired_state_source: "target" | "explicit"
+    desired_position_eci_km: [x,y,z]   # required when desired_state_source=explicit
+    desired_velocity_eci_km_s: [vx,vy,vz]  # required when desired_state_source=explicit
+    strategy: "thrust_limited" | "impulsive"
+    max_thrust_n: <float>
+    min_thrust_n: <float>
+    burn_dt_s: <float>
+    available_delta_v_km_s: <float>
+    require_attitude_alignment: true|false
+    thruster_position_body_m: [x,y,z] | null
+    thruster_direction_body: [x,y,z]
+    alignment_tolerance_rad: <float>
+    terminate_on_velocity_tolerance_km_s: <float>
+- Integrated command mission module (mission brain that arbitrates orbital + attitude commands each timestep):
+  module: "sim.mission.modules"
+  class_name: "IntegratedCommandMissionModule"
+  params:
+    target_id: "<object_id>"
+    desired_state_source: "target" | "explicit"
+    use_knowledge_for_targeting: true|false
+    desired_position_eci_km: [x,y,z]          # for desired_state_source=explicit
+    desired_velocity_eci_km_s: [vx,vy,vz]     # for desired_state_source=explicit
+    require_attitude_alignment: true|false
+    thruster_direction_body: [x,y,z]
+    alignment_tolerance_rad: <float>
+    min_burn_accel_km_s2: <float>
 - Rocket mission module:
   module: "sim.mission.modules"
   class_name: "RocketMissionModule"
