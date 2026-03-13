@@ -12,7 +12,7 @@ from sim.dynamics.orbit.environment import EARTH_ROT_RATE_RAD_S
 from sim.dynamics.orbit.accelerations import OrbitContext
 from sim.dynamics.orbit.propagator import OrbitPropagator
 from sim.dynamics.spacecraft_geometry import RectangularPrismGeometry
-from sim.utils.quaternion import quaternion_to_dcm_bn
+from sim.utils.quaternion import normalize_quaternion, quaternion_to_dcm_bn
 
 
 @dataclass(frozen=True)
@@ -96,6 +96,16 @@ class OrbitalAttitudeDynamics(DynamicsModel):
                 torque_body_nm=total_torque,
                 dt_s=h,
             )
+
+        # Optional direct attitude state override for surrogate controller testing.
+        att_override = dict(command.mode_flags.get("attitude_state_override", {}) or {})
+        if att_override:
+            q_cmd = np.array(att_override.get("q_next_bn", q_next), dtype=float).reshape(-1)
+            w_cmd = np.array(att_override.get("w_next_body_rad_s", w_next), dtype=float).reshape(-1)
+            if q_cmd.size == 4:
+                q_next = normalize_quaternion(q_cmd)
+            if w_cmd.size == 3:
+                w_next = w_cmd
         delta_mass_kg = float(command.mode_flags.get("delta_mass_kg", 0.0))
         mass_next = max(0.0, state.mass_kg - delta_mass_kg)
 

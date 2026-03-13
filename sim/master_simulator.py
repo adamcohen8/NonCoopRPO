@@ -504,8 +504,9 @@ def _plot_outputs(
             fig.savefig(p, dpi=int(cfg.outputs.plots.get("dpi", 150)))
             out["relative_ranges"] = str(p)
         if mode in ("interactive", "both"):
-            plt.show()
-        plt.close(fig)
+            plt.show(block=False)
+        else:
+            plt.close(fig)
 
     # Multi-agent shared-figure trajectory plots.
     if "trajectory_eci_multi" in figure_ids:
@@ -648,8 +649,9 @@ def _plot_outputs(
             fig.savefig(p, dpi=int(cfg.outputs.plots.get("dpi", 150)))
             out["knowledge_timeline"] = str(p)
         if mode in ("interactive", "both"):
-            plt.show()
-        plt.close(fig)
+            plt.show(block=False)
+        else:
+            plt.close(fig)
 
     return out
 
@@ -833,7 +835,21 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
                 elif a.belief is None:
                     a.belief = StateBelief(state=np.hstack((tr_now.position_eci_km, tr_now.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=t_next)
                 c_orb = a.orbit_controller.act(a.belief, t_next, 2.0) if a.orbit_controller is not None else Command.zero()
-                c_att = a.attitude_controller.act(a.belief, t_next, 2.0) if a.attitude_controller is not None else Command.zero()
+                att_belief = a.belief
+                if att_belief is not None and att_belief.state.size < 13:
+                    att_state = np.hstack(
+                        (
+                            np.array(att_belief.state[:6], dtype=float),
+                            np.array(tr_now.attitude_quat_bn, dtype=float),
+                            np.array(tr_now.angular_rate_body_rad_s, dtype=float),
+                        )
+                    )
+                    att_belief = StateBelief(
+                        state=att_state,
+                        covariance=att_belief.covariance,
+                        last_update_t_s=att_belief.last_update_t_s,
+                    )
+                c_att = a.attitude_controller.act(att_belief, t_next, 2.0) if a.attitude_controller is not None and att_belief is not None else Command.zero()
                 cmd = _combine_commands(c_orb, c_att)
                 env = {**dict(cfg.simulator.environment or {}), "world_truth": world_truth, "atmosphere_model": cfg.simulator.dynamics.get("rocket", {}).get("atmosphere_model", "ussa1976")}
                 a.truth = a.dynamics.step(state=tr_now, command=cmd, env=env, dt_s=dt)
@@ -892,6 +908,10 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
         knowledge_hist=knowledge_out,
         outdir=outdir,
     )
+    if cfg.outputs.mode in ("interactive", "both") and bool(cfg.outputs.plots.get("enabled", True)):
+        import matplotlib.pyplot as plt
+
+        plt.show()
     animation_outputs = _animate_outputs(
         cfg=cfg,
         t_s=t_out,

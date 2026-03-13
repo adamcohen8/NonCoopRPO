@@ -44,8 +44,10 @@ def _show_save_close(fig: plt.Figure, *, mode: PlotMode, out_path: str | None, d
         p.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(str(p), dpi=dpi)
     if mode in ("interactive", "both"):
-        plt.show()
-    plt.close(fig)
+        # Non-blocking show lets master simulation queue all figures first.
+        plt.show(block=False)
+    else:
+        plt.close(fig)
 
 
 def _draw_stylized_earth_map(ax: plt.Axes) -> None:
@@ -556,17 +558,6 @@ def animate_ground_track(
         return [line, dot, time_text]
 
     interval_ms = 1000.0 / max(float(fps) * max(speed_multiple, 1e-6), 1e-3)
-    ani = None
-    if mode in ("save", "both"):
-        ani = animation.FuncAnimation(fig, update, frames=int(frame_ids.size), interval=interval_ms, blit=False)
-        if out_path is None:
-            raise ValueError("out_path is required when mode is 'save' or 'both'.")
-        p = Path(out_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            ani.save(str(p), fps=max(float(fps), 1.0))
-        except Exception as exc:
-            print(f"Warning: failed to save animation ({exc}).")
     if mode in ("interactive", "both"):
         # Explicit interactive loop is more reliable than backend animation playback in IDE windows.
         plt.ion()
@@ -577,7 +568,16 @@ def animate_ground_track(
             plt.pause(interval_ms / 1000.0)
         plt.ioff()
         plt.show()
-    if ani is not None:
+    if mode in ("save", "both"):
+        ani = animation.FuncAnimation(fig, update, frames=int(frame_ids.size), interval=interval_ms, blit=False)
+        if out_path is None:
+            raise ValueError("out_path is required when mode is 'save' or 'both'.")
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ani.save(str(p), fps=max(float(fps), 1.0))
+        except Exception as exc:
+            print(f"Warning: failed to save animation ({exc}).")
         del ani
     plt.close(fig)
 
@@ -675,17 +675,6 @@ def animate_multi_ground_track(
         return artists
 
     interval_ms = 1000.0 / max(float(fps) * max(speed_multiple, 1e-6), 1e-3)
-    ani = None
-    if mode in ("save", "both"):
-        ani = animation.FuncAnimation(fig, update, frames=int(frame_ids.size), interval=interval_ms, blit=False)
-        if out_path is None:
-            raise ValueError("out_path is required when mode is 'save' or 'both'.")
-        p = Path(out_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            ani.save(str(p), fps=max(float(fps), 1.0))
-        except Exception as exc:
-            print(f"Warning: failed to save animation ({exc}).")
     if mode in ("interactive", "both"):
         # Explicit interactive loop is more reliable than backend animation playback in IDE windows.
         plt.ion()
@@ -696,7 +685,16 @@ def animate_multi_ground_track(
             plt.pause(interval_ms / 1000.0)
         plt.ioff()
         plt.show()
-    if ani is not None:
+    if mode in ("save", "both"):
+        ani = animation.FuncAnimation(fig, update, frames=int(frame_ids.size), interval=interval_ms, blit=False)
+        if out_path is None:
+            raise ValueError("out_path is required when mode is 'save' or 'both'.")
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ani.save(str(p), fps=max(float(fps), 1.0))
+        except Exception as exc:
+            print(f"Warning: failed to save animation ({exc}).")
         del ani
     plt.close(fig)
 

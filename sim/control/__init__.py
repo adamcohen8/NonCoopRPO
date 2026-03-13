@@ -9,6 +9,8 @@ from sim.control.attitude import (
     SmallAngleLQRController,
     SnapAndHoldRICAttitudeController,
     SnapAttitudeController,
+    SurrogateSnapECIController,
+    SurrogateSnapRICController,
     ZeroTorqueController,
 )
 from sim.control.orbit import (
@@ -57,6 +59,8 @@ __all__ = [
     "PoseCommandGenerator",
     "SnapAttitudeController",
     "SnapAndHoldRICAttitudeController",
+    "SurrogateSnapECIController",
+    "SurrogateSnapRICController",
     "QuaternionPDController",
     "ReactionWheelPDController",
     "ReactionWheelPIDController",

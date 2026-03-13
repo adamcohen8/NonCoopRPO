@@ -211,7 +211,7 @@ simulator:
 
 outputs:
   output_dir: "outputs/two_sat_ground_track_animation"
-  mode: "both"  # interactive | save | both
+  mode: "interactive"  # interactive | save | both
   stats:
     enabled: false
     print_summary: false
