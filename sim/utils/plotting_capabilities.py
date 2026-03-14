@@ -264,16 +264,23 @@ def plot_trajectory_frame(
     )
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection="3d")
-    ax.plot(r[:, 0], r[:, 1], r[:, 2], linewidth=1.4)
+    if frame in ("ric_rect", "ric_curv"):
+        # Display RIC with radial on y-axis: x=I, y=R, z=C.
+        ix, iy, iz = 1, 0, 2
+        xlbl, ylbl, zlbl = "I", "R", "C"
+    else:
+        ix, iy, iz = 0, 1, 2
+        xlbl, ylbl, zlbl = "x", "y", "z"
+    ax.plot(r[:, ix], r[:, iy], r[:, iz], linewidth=1.4)
     i0, i1 = _first_last_finite_indices(r)
     if i0 is not None:
-        ax.scatter([r[i0, 0]], [r[i0, 1]], [r[i0, 2]], color="green", s=28, zorder=5)
+        ax.scatter([r[i0, ix]], [r[i0, iy]], [r[i0, iz]], color="green", s=28, zorder=5)
     if i1 is not None:
-        ax.scatter([r[i1, 0]], [r[i1, 1]], [r[i1, 2]], color="red", s=28, zorder=5)
+        ax.scatter([r[i1, ix]], [r[i1, iy]], [r[i1, iz]], color="red", s=28, zorder=5)
     ax.set_title(f"Trajectory ({frame.upper()})")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
+    ax.set_xlabel(xlbl)
+    ax.set_ylabel(ylbl)
+    ax.set_zlabel(zlbl)
     fig.tight_layout()
     _show_save_close(fig, mode=mode, out_path=out_path)
 
@@ -290,6 +297,13 @@ def plot_multi_trajectory_frame(
 ) -> None:
     fig = plt.figure(figsize=(9, 7))
     ax = fig.add_subplot(111, projection="3d")
+    if frame in ("ric_rect", "ric_curv"):
+        # Display RIC with radial on y-axis: x=I, y=R, z=C.
+        ix, iy, iz = 1, 0, 2
+        xlbl, ylbl, zlbl = "I", "R", "C"
+    else:
+        ix, iy, iz = 0, 1, 2
+        xlbl, ylbl, zlbl = "x", "y", "z"
     for oid, hist in truth_hist_by_object.items():
         if hist.size == 0 or not np.any(np.isfinite(hist[:, 0])):
             continue
@@ -300,16 +314,16 @@ def plot_multi_trajectory_frame(
             jd_utc_start=jd_utc_start,
             reference_truth_hist=reference_truth_hist,
         )
-        ax.plot(r[:, 0], r[:, 1], r[:, 2], linewidth=1.4, label=oid)
+        ax.plot(r[:, ix], r[:, iy], r[:, iz], linewidth=1.4, label=oid)
         i0, i1 = _first_last_finite_indices(r)
         if i0 is not None:
-            ax.scatter([r[i0, 0]], [r[i0, 1]], [r[i0, 2]], color="green", s=24, zorder=5)
+            ax.scatter([r[i0, ix]], [r[i0, iy]], [r[i0, iz]], color="green", s=24, zorder=5)
         if i1 is not None:
-            ax.scatter([r[i1, 0]], [r[i1, 1]], [r[i1, 2]], color="red", s=24, zorder=5)
+            ax.scatter([r[i1, ix]], [r[i1, iy]], [r[i1, iz]], color="red", s=24, zorder=5)
     ax.set_title(f"Trajectories ({frame.upper()})")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
+    ax.set_xlabel(xlbl)
+    ax.set_ylabel(ylbl)
+    ax.set_zlabel(zlbl)
     ax.legend(loc="best")
     fig.tight_layout()
     _show_save_close(fig, mode=mode, out_path=out_path)

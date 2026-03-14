@@ -664,6 +664,8 @@ class PredictiveIntegratedCommandMissionModule:
     thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
     min_burn_accel_km_s2: float = 1e-12
     mu_km3_s2: float = 398600.4418
+    orbit_controller_budget_ms: float = 2.0
+    attitude_controller_budget_ms: float = 2.0
     _countdown_s: float = field(default=-1.0, init=False, repr=False)
     _planned_accel_eci_km_s2: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float), init=False, repr=False)
     _planned_attitude_quat_bn: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0, 0.0], dtype=float), init=False, repr=False)
@@ -757,7 +759,11 @@ class PredictiveIntegratedCommandMissionModule:
                 self_truth=truth,
                 target_state_eci=target_state,
             )
-            c_orb_pred = orbit_controller.act(b_pred, float(t_s), 2.0) if orbit_controller is not None else Command.zero()
+            c_orb_pred = (
+                orbit_controller.act(b_pred, float(t_s), float(max(self.orbit_controller_budget_ms, 1e-9)))
+                if orbit_controller is not None
+                else Command.zero()
+            )
             self._planned_accel_eci_km_s2 = np.array(c_orb_pred.thrust_eci_km_s2, dtype=float).reshape(3)
             if not np.all(np.isfinite(self._planned_accel_eci_km_s2)):
                 self._planned_accel_eci_km_s2 = np.zeros(3, dtype=float)
@@ -784,7 +790,11 @@ class PredictiveIntegratedCommandMissionModule:
                 covariance=np.eye(7) * 1e-6,
                 last_update_t_s=float(truth.t_s),
             )
-        c_att = attitude_controller.act(att_belief_eff, float(t_s), 2.0) if attitude_controller is not None and att_belief_eff is not None else Command.zero()
+        c_att = (
+            attitude_controller.act(att_belief_eff, float(t_s), float(max(self.attitude_controller_budget_ms, 1e-9)))
+            if attitude_controller is not None and att_belief_eff is not None
+            else Command.zero()
+        )
 
         fire = False
         align_ok, align_angle = self._alignment(truth=truth, accel_eci_km_s2=self._planned_accel_eci_km_s2)
@@ -806,5 +816,7 @@ class PredictiveIntegratedCommandMissionModule:
             "fire": bool(fire),
             "alignment_ok": bool(align_ok),
             "alignment_angle_rad": float(align_angle),
+            "orbit_controller_budget_ms": float(self.orbit_controller_budget_ms),
+            "attitude_controller_budget_ms": float(self.attitude_controller_budget_ms),
         }
         return out

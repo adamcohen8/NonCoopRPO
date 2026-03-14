@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import importlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -44,7 +44,7 @@ from sim.utils.plotting_capabilities import (
     plot_trajectory_frame,
 )
 from sim.utils.ground_track import ground_track_from_eci_history
-from sim.utils.frames import ric_dcm_ir_from_rv, ric_rect_to_curv
+from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
 from sim.utils.quaternion import quaternion_to_dcm_bn
 
 
@@ -249,6 +249,59 @@ def _default_truth_from_agent(agent_cfg: Any, t_s: float = 0.0) -> StateTruth:
     )
 
 
+def _resolve_chaser_relative_ric_init(initial_state: dict[str, Any]) -> tuple[np.ndarray, str] | None:
+    s0 = dict(initial_state or {})
+    rel_block = s0.get("relative_to_target_ric")
+    if isinstance(rel_block, dict):
+        frame = str(rel_block.get("frame", "rect")).strip().lower()
+        state = np.array(rel_block.get("state", []), dtype=float).reshape(-1)
+        if state.size != 6:
+            raise ValueError("chaser.initial_state.relative_to_target_ric.state must be length-6.")
+        if frame not in ("rect", "curv"):
+            raise ValueError("chaser.initial_state.relative_to_target_ric.frame must be 'rect' or 'curv'.")
+        return state, frame
+
+    if "relative_ric_rect" in s0:
+        state = np.array(s0.get("relative_ric_rect"), dtype=float).reshape(-1)
+        if state.size != 6:
+            raise ValueError("chaser.initial_state.relative_ric_rect must be length-6.")
+        return state, "rect"
+    if "relative_ric_curv" in s0:
+        state = np.array(s0.get("relative_ric_curv"), dtype=float).reshape(-1)
+        if state.size != 6:
+            raise ValueError("chaser.initial_state.relative_ric_curv must be length-6.")
+        return state, "curv"
+    return None
+
+
+def _apply_chaser_relative_init_from_target(
+    *,
+    chaser: AgentRuntime,
+    target: AgentRuntime,
+    initial_state: dict[str, Any],
+) -> None:
+    rel = _resolve_chaser_relative_ric_init(initial_state)
+    if rel is None:
+        return
+    x_rel, frame = rel
+    if chaser.truth is None or target.truth is None:
+        return
+
+    r_t = np.array(target.truth.position_eci_km, dtype=float)
+    v_t = np.array(target.truth.velocity_eci_km_s, dtype=float)
+    r0 = float(np.linalg.norm(r_t))
+    if r0 <= 0.0:
+        return
+
+    x_rel_rect = ric_curv_to_rect(x_rel, r0_km=r0) if frame == "curv" else np.array(x_rel, dtype=float).reshape(6)
+    dr_ric = x_rel_rect[:3]
+    dv_ric = x_rel_rect[3:]
+    c_ir = ric_dcm_ir_from_rv(r_t, v_t)
+
+    chaser.truth.position_eci_km = r_t + c_ir @ dr_ric
+    chaser.truth.velocity_eci_km_s = v_t + c_ir @ dv_ric
+
+
 def _build_orbit_propagator(cfg: SimulationScenarioConfig) -> OrbitPropagator:
     o = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
     plugins = []
@@ -290,6 +343,26 @@ class AgentRuntime:
     waiting_for_launch: bool
 
 
+@dataclass
+class _RateLimitedController:
+    base: Any
+    period_s: float
+    _last_eval_t_s: float | None = None
+    _last_cmd: Command = field(default_factory=Command.zero, init=False)
+
+    def __post_init__(self) -> None:
+        self.period_s = float(max(self.period_s, 1e-9))
+
+    def act(self, belief: StateBelief, t_s: float, budget_ms: float) -> Command:
+        if self._last_eval_t_s is None or float(t_s) - float(self._last_eval_t_s) >= self.period_s - 1e-12:
+            self._last_cmd = self.base.act(belief, t_s, budget_ms)
+            self._last_eval_t_s = float(t_s)
+        return self._last_cmd
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self.base, item)
+
+
 def _create_satellite_runtime(
     object_id: str,
     agent_cfg: Any,
@@ -308,11 +381,15 @@ def _create_satellite_runtime(
         process_noise_diag=np.array([1e-8, 1e-8, 1e-8, 1e-10, 1e-10, 1e-10]),
         meas_noise_diag=np.array([1e-6, 1e-6, 1e-6, 1e-10, 1e-10, 1e-10]),
     )
-    orbit_ctrl = _module_obj(agent_cfg.orbit_control) or ZeroController()
-    att_ctrl = _module_obj(agent_cfg.attitude_control) or ZeroTorqueController()
+    orbit_ctrl_base = _module_obj(agent_cfg.orbit_control) or ZeroController()
+    att_ctrl_base = _module_obj(agent_cfg.attitude_control) or ZeroTorqueController()
     orbit_cfg = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
     att_cfg = dict(cfg.simulator.dynamics.get("attitude", {}) or {})
     dist_cfg = dict(att_cfg.get("disturbance_torques", {}) or {})
+    orbit_ctrl_period_s = float(max(float(orbit_cfg.get("orbit_substep_s", cfg.simulator.dt_s) or cfg.simulator.dt_s), 1e-9))
+    att_ctrl_period_s = float(max(float(att_cfg.get("attitude_substep_s", cfg.simulator.dt_s) or cfg.simulator.dt_s), 1e-9))
+    orbit_ctrl = _RateLimitedController(base=orbit_ctrl_base, period_s=orbit_ctrl_period_s)
+    att_ctrl = _RateLimitedController(base=att_ctrl_base, period_s=att_ctrl_period_s)
     dmodel = DisturbanceTorqueModel(
         mu_km3_s2=EARTH_MU_KM3_S2,
         inertia_kg_m2=np.diag([120.0, 100.0, 80.0]),
@@ -993,7 +1070,10 @@ def _animate_outputs(
     return out
 
 
-def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
+def _run_single_config(
+    cfg: SimulationScenarioConfig,
+    step_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
     dt = float(cfg.simulator.dt_s)
     n = int(np.floor(float(cfg.simulator.duration_s) / dt)) + 1
     t_s = np.arange(n, dtype=float) * dt
@@ -1015,6 +1095,12 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
         agents["target"] = target
     if chaser is not None:
         agents["chaser"] = chaser
+    if chaser is not None and target is not None and chaser.deploy_source != "rocket_deployment":
+        _apply_chaser_relative_init_from_target(
+            chaser=chaser,
+            target=target,
+            initial_state=dict(cfg.chaser.initial_state or {}),
+        )
 
     for aid, a in agents.items():
         cfg_src = cfg.rocket if aid == "rocket" else (cfg.chaser if aid == "chaser" else cfg.target)
@@ -1052,6 +1138,13 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
         truth_hist[aid][0, :] = _state_truth_to_array(tr)
         if a.belief is not None:
             belief_hist[aid][0, :] = a.belief.state[:6]
+
+    total_steps = max(n - 1, 0)
+    if step_callback is not None:
+        try:
+            step_callback(0, total_steps)
+        except Exception:
+            pass
 
     for k in range(n - 1):
         t = float(t_s[k])
@@ -1131,102 +1224,124 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
                     thrust_hist[aid][k + 1, :] = accel
                     torque_hist[aid][k + 1, :] = np.array(a.rocket_state.angular_rate_body_rad_s, dtype=float) * 0.0
             else:
-                meas = a.sensor.measure(truth=tr_now, env={"world_truth": world_truth}, t_s=t_next) if a.sensor is not None else None
-                if a.estimator is not None and a.belief is not None:
-                    a.belief = a.estimator.update(a.belief, meas, t_next)
-                elif a.belief is None:
-                    a.belief = StateBelief(state=np.hstack((tr_now.position_eci_km, tr_now.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=t_next)
-                orb_belief = a.belief
-                if a.orbit_controller is not None and orb_belief is not None:
-                    chief_truth = world_truth.get("target")
-                    if chief_truth is not None and aid != "target" and hasattr(a.orbit_controller, "ric_curv_state_slice"):
-                        r_c = np.array(chief_truth.position_eci_km, dtype=float)
-                        v_c = np.array(chief_truth.velocity_eci_km_s, dtype=float)
-                        r_s = np.array(tr_now.position_eci_km, dtype=float)
-                        v_s = np.array(tr_now.velocity_eci_km_s, dtype=float)
-                        c_ir = ric_dcm_ir_from_rv(r_c, v_c)
-                        dr_ric = c_ir.T @ (r_s - r_c)
-                        dv_ric = c_ir.T @ (v_s - v_c)
-                        x_rect = np.hstack((dr_ric, dv_ric))
-                        x_curv = ric_rect_to_curv(x_rect, r0_km=float(np.linalg.norm(r_c)))
-                        orb_state = np.hstack((x_curv, np.hstack((r_c, v_c))))
-                        orb_belief = StateBelief(
-                            state=orb_state,
-                            covariance=np.eye(12) * 1e-4,
-                            last_update_t_s=orb_belief.last_update_t_s,
+                orbit_cfg = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
+                att_cfg = dict(cfg.simulator.dynamics.get("attitude", {}) or {})
+                orbit_substep_s = float(max(float(orbit_cfg.get("orbit_substep_s", dt) or dt), 1e-9))
+                attitude_substep_s = float(max(float(att_cfg.get("attitude_substep_s", dt) or dt), 1e-9))
+                sim_substep_s = float(min(orbit_substep_s, attitude_substep_s))
+                t_inner = float(t)
+                tr_inner = tr_now
+                cmd = Command.zero()
+                while t_inner < t_next - 1e-12:
+                    h = float(min(sim_substep_s, t_next - t_inner))
+                    t_eval = t_inner + h
+                    world_truth_inner = dict(world_truth)
+                    world_truth_inner[aid] = tr_inner
+                    env_inner_common = {**dict(cfg.simulator.environment or {}), "world_truth": world_truth_inner}
+                    meas = a.sensor.measure(truth=tr_inner, env={"world_truth": world_truth_inner}, t_s=t_eval) if a.sensor is not None else None
+                    if a.estimator is not None and a.belief is not None:
+                        a.belief = a.estimator.update(a.belief, meas, t_eval)
+                    elif a.belief is None:
+                        a.belief = StateBelief(state=np.hstack((tr_inner.position_eci_km, tr_inner.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=t_eval)
+                    orb_belief = a.belief
+                    if a.orbit_controller is not None and orb_belief is not None:
+                        chief_truth = world_truth_inner.get("target")
+                        if chief_truth is not None and aid != "target" and hasattr(a.orbit_controller, "ric_curv_state_slice"):
+                            r_c = np.array(chief_truth.position_eci_km, dtype=float)
+                            v_c = np.array(chief_truth.velocity_eci_km_s, dtype=float)
+                            r_s = np.array(tr_inner.position_eci_km, dtype=float)
+                            v_s = np.array(tr_inner.velocity_eci_km_s, dtype=float)
+                            c_ir = ric_dcm_ir_from_rv(r_c, v_c)
+                            dr_ric = c_ir.T @ (r_s - r_c)
+                            dv_ric = c_ir.T @ (v_s - v_c)
+                            x_rect = np.hstack((dr_ric, dv_ric))
+                            x_curv = ric_rect_to_curv(x_rect, r0_km=float(np.linalg.norm(r_c)))
+                            orb_state = np.hstack((x_curv, np.hstack((r_c, v_c))))
+                            orb_belief = StateBelief(
+                                state=orb_state,
+                                covariance=np.eye(12) * 1e-4,
+                                last_update_t_s=orb_belief.last_update_t_s,
+                            )
+                    att_belief = a.belief
+                    if att_belief is not None and att_belief.state.size < 13:
+                        att_state = np.hstack(
+                            (
+                                np.array(att_belief.state[:6], dtype=float),
+                                np.array(tr_inner.attitude_quat_bn, dtype=float),
+                                np.array(tr_inner.angular_rate_body_rad_s, dtype=float),
+                            )
                         )
-                c_orb = a.orbit_controller.act(orb_belief, t_next, 2.0) if a.orbit_controller is not None and orb_belief is not None else Command.zero()
-                att_belief = a.belief
-                if att_belief is not None and att_belief.state.size < 13:
-                    att_state = np.hstack(
-                        (
-                            np.array(att_belief.state[:6], dtype=float),
-                            np.array(tr_now.attitude_quat_bn, dtype=float),
-                            np.array(tr_now.angular_rate_body_rad_s, dtype=float),
+                        att_belief = StateBelief(
+                            state=att_state,
+                            covariance=att_belief.covariance,
+                            last_update_t_s=att_belief.last_update_t_s,
                         )
+                    mission_out = _run_mission_modules(
+                        agent=a,
+                        world_truth=world_truth_inner,
+                        t_s=t_eval,
+                        dt_s=h,
+                        env=env_inner_common,
+                        orbit_controller=a.orbit_controller,
+                        attitude_controller=a.attitude_controller,
+                        orb_belief=orb_belief,
+                        att_belief=att_belief,
                     )
-                    att_belief = StateBelief(
-                        state=att_state,
-                        covariance=att_belief.covariance,
-                        last_update_t_s=att_belief.last_update_t_s,
+                    # Mission module can set attitude targets on compatible controllers.
+                    if "desired_attitude_quat_bn" in mission_out and a.attitude_controller is not None:
+                        q_des = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)
+                        if q_des.size == 4 and hasattr(a.attitude_controller, "set_target"):
+                            try:
+                                a.attitude_controller.set_target(q_des)
+                            except Exception:
+                                pass
+                    if "desired_attitude_quat_br" in mission_out and a.attitude_controller is not None:
+                        q_des_r = np.array(mission_out["desired_attitude_quat_br"], dtype=float).reshape(-1)
+                        if q_des_r.size == 4 and hasattr(a.attitude_controller, "set_target"):
+                            try:
+                                a.attitude_controller.set_target(q_des_r)
+                            except Exception:
+                                pass
+                    if "desired_ric_euler_rad" in mission_out and a.attitude_controller is not None and hasattr(a.attitude_controller, "set_desired_ric_state"):
+                        e = np.array(mission_out["desired_ric_euler_rad"], dtype=float).reshape(-1)
+                        if e.size == 3:
+                            try:
+                                a.attitude_controller.set_desired_ric_state(float(e[0]), float(e[1]), float(e[2]))
+                            except Exception:
+                                pass
+                    use_integrated_cmd = bool(mission_out.get("mission_use_integrated_command", False))
+                    c_orb = (
+                        a.orbit_controller.act(orb_belief, t_eval, 2.0)
+                        if (not use_integrated_cmd) and a.orbit_controller is not None and orb_belief is not None
+                        else Command.zero()
                     )
-                mission_out = _run_mission_modules(
-                    agent=a,
-                    world_truth=world_truth,
-                    t_s=t_next,
-                    dt_s=dt,
-                    env=env_common,
-                    orbit_controller=a.orbit_controller,
-                    attitude_controller=a.attitude_controller,
-                    orb_belief=orb_belief,
-                    att_belief=att_belief,
-                )
-                # Mission module can set attitude targets on compatible controllers.
-                if "desired_attitude_quat_bn" in mission_out and a.attitude_controller is not None:
-                    q_des = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)
-                    if q_des.size == 4 and hasattr(a.attitude_controller, "set_target"):
-                        try:
-                            a.attitude_controller.set_target(q_des)
-                        except Exception:
-                            pass
-                if "desired_attitude_quat_br" in mission_out and a.attitude_controller is not None:
-                    q_des_r = np.array(mission_out["desired_attitude_quat_br"], dtype=float).reshape(-1)
-                    if q_des_r.size == 4 and hasattr(a.attitude_controller, "set_target"):
-                        try:
-                            a.attitude_controller.set_target(q_des_r)
-                        except Exception:
-                            pass
-                if "desired_ric_euler_rad" in mission_out and a.attitude_controller is not None and hasattr(a.attitude_controller, "set_desired_ric_state"):
-                    e = np.array(mission_out["desired_ric_euler_rad"], dtype=float).reshape(-1)
-                    if e.size == 3:
-                        try:
-                            a.attitude_controller.set_desired_ric_state(float(e[0]), float(e[1]), float(e[2]))
-                        except Exception:
-                            pass
-                c_att = a.attitude_controller.act(att_belief, t_next, 2.0) if a.attitude_controller is not None and att_belief is not None else Command.zero()
-                if bool(mission_out.get("mission_use_integrated_command", False)):
-                    cmd = Command.zero()
-                    if "thrust_eci_km_s2" in mission_out:
-                        cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
-                    if "torque_body_nm" in mission_out:
-                        cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
-                    if "command_mode_flags" in mission_out and isinstance(mission_out["command_mode_flags"], dict):
-                        cmd.mode_flags.update(dict(mission_out["command_mode_flags"]))
-                    cmd.mode_flags["mode"] = "mission_integrated"
-                    if "mission_mode" in mission_out:
-                        cmd.mode_flags["mission_mode"] = mission_out["mission_mode"]
-                else:
-                    cmd = _combine_commands(c_orb, c_att)
-                    if "thrust_eci_km_s2" in mission_out:
-                        cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
-                    if "torque_body_nm" in mission_out:
-                        cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
-                env = {
-                    **dict(cfg.simulator.environment or {}),
-                    "world_truth": world_truth,
-                    "atmosphere_model": cfg.simulator.dynamics.get("rocket", {}).get("atmosphere_model", "ussa1976"),
-                }
-                a.truth = a.dynamics.step(state=tr_now, command=cmd, env=env, dt_s=dt)
+                    c_att = a.attitude_controller.act(att_belief, t_eval, 2.0) if a.attitude_controller is not None and att_belief is not None else Command.zero()
+                    if use_integrated_cmd:
+                        cmd = Command.zero()
+                        if "thrust_eci_km_s2" in mission_out:
+                            cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
+                        if "torque_body_nm" in mission_out:
+                            cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
+                        if "command_mode_flags" in mission_out and isinstance(mission_out["command_mode_flags"], dict):
+                            cmd.mode_flags.update(dict(mission_out["command_mode_flags"]))
+                        cmd.mode_flags["mode"] = "mission_integrated"
+                        if "mission_mode" in mission_out:
+                            cmd.mode_flags["mission_mode"] = mission_out["mission_mode"]
+                    else:
+                        cmd = _combine_commands(c_orb, c_att)
+                        if "thrust_eci_km_s2" in mission_out:
+                            cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
+                        if "torque_body_nm" in mission_out:
+                            cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
+                    env_inner = {
+                        **dict(cfg.simulator.environment or {}),
+                        "world_truth": world_truth_inner,
+                        "atmosphere_model": cfg.simulator.dynamics.get("rocket", {}).get("atmosphere_model", "ussa1976"),
+                    }
+                    tr_inner = a.dynamics.step(state=tr_inner, command=cmd, env=env_inner, dt_s=h)
+                    t_inner = t_eval
+
+                a.truth = tr_inner
                 thrust_hist[aid][k + 1, :] = cmd.thrust_eci_km_s2
                 torque_hist[aid][k + 1, :] = cmd.torque_body_nm
 
@@ -1240,6 +1355,12 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
                     except Exception as ex:
                         evt["bridge_error"] = str(ex)
                 bridge_hist[aid].append(evt)
+
+        if step_callback is not None:
+            try:
+                step_callback(k + 1, total_steps)
+            except Exception:
+                pass
 
         # Log k+1
         for aid, a in agents.items():
@@ -1343,7 +1464,10 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
     return payload
 
 
-def run_master_simulation(config_path: str | Path) -> dict[str, Any]:
+def run_master_simulation(
+    config_path: str | Path,
+    step_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
     cfg = load_simulation_yaml(config_path)
     strict_plugins = bool(cfg.simulator.plugin_validation.get("strict", True))
     if strict_plugins:
@@ -1352,7 +1476,7 @@ def run_master_simulation(config_path: str | Path) -> dict[str, Any]:
             msg = "Plugin validation failed:\n- " + "\n- ".join(errs)
             raise ValueError(msg)
     if not cfg.monte_carlo.enabled:
-        out = _run_single_config(cfg)
+        out = _run_single_config(cfg, step_callback=step_callback)
         return {
             "config_path": str(Path(config_path).resolve()),
             "scenario_name": cfg.scenario_name,

@@ -81,6 +81,10 @@ chaser:
     source: "rocket_deployment"
     deploy_time_s: 900.0
     deploy_dv_body_m_s: [10.0, 0.0, 0.0]
+    # Optional alternative: initialize chaser relative to target in RIC instead of deployment/absolute state.
+    # relative_to_target_ric:
+    #   frame: "rect"   # "rect" | "curv"
+    #   state: [2.0, -8.0, 1.2, 0.0008, -0.0012, 0.0004]  # [R,I,C,dR,dI,dC] (km, km/s)
     attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
     angular_rate_body_rad_s: [0.0, 0.0, 0.0]
   guidance:

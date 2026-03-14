@@ -143,6 +143,21 @@ Agent Sections (rocket/chaser/target)
       - argp_deg (or arg_periapsis_deg)
       - true_anomaly_deg (or ta_deg)
     - if both are provided, Cartesian position_eci_km/velocity_eci_km_s is used.
+  - chaser can also be initialized relative to target in RIC:
+    - compact fields:
+      - initial_state.relative_ric_rect: [R, I, C, dR, dI, dC]
+      - initial_state.relative_ric_curv: [R, I, C, dR, dI, dC]
+    - explicit block:
+      - initial_state.relative_to_target_ric:
+          frame: "rect" | "curv"
+          state: [R, I, C, dR, dI, dC]
+    - units:
+      - position terms in km
+      - velocity terms in km/s
+    - notes:
+      - this is target-centered (chaser wrt target).
+      - when present, this relative initialization overrides chaser absolute ECI/COE startup state
+        (except rocket_deployment mode).
 - guidance: rocket guidance or agent-level guidance pointer
 - orbit_control: orbit controller pointer
 - attitude_control: attitude controller pointer
