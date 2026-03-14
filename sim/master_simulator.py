@@ -33,11 +33,14 @@ from sim.utils.plotting import plot_attitude_tumble, plot_orbit_eci
 from sim.utils.plotting_capabilities import (
     animate_ground_track,
     animate_multi_ground_track,
+    animate_multi_rectangular_prism_ric_curv,
     plot_body_rates,
     plot_control_commands,
     plot_multi_control_commands,
+    plot_multi_ric_2d_projections,
     plot_multi_trajectory_frame,
     plot_quaternion_components,
+    plot_ric_2d_projections,
     plot_trajectory_frame,
 )
 from sim.utils.ground_track import ground_track_from_eci_history
@@ -226,13 +229,22 @@ def _rv_from_initial_state(s0: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
 
 def _default_truth_from_agent(agent_cfg: Any, t_s: float = 0.0) -> StateTruth:
     s0 = dict(agent_cfg.initial_state or {})
+    specs = dict(agent_cfg.specs or {})
+    if ("dry_mass_kg" in specs) or ("fuel_mass_kg" in specs):
+        dry_mass_kg = float(specs.get("dry_mass_kg", 0.0))
+        fuel_mass_kg = float(specs.get("fuel_mass_kg", 0.0))
+        if dry_mass_kg < 0.0 or fuel_mass_kg < 0.0:
+            raise ValueError("dry_mass_kg and fuel_mass_kg must be non-negative.")
+        mass_kg = dry_mass_kg + fuel_mass_kg
+    else:
+        mass_kg = float(specs.get("mass_kg", 300.0))
     pos, vel = _rv_from_initial_state(s0)
     return StateTruth(
         position_eci_km=pos,
         velocity_eci_km_s=vel,
         attitude_quat_bn=np.array(s0.get("attitude_quat_bn", [1.0, 0.0, 0.0, 0.0]), dtype=float),
         angular_rate_body_rad_s=np.array(s0.get("angular_rate_body_rad_s", [0.0, 0.0, 0.0]), dtype=float),
-        mass_kg=float(agent_cfg.specs.get("mass_kg", 300.0)),
+        mass_kg=mass_kg,
         t_s=t_s,
     )
 
@@ -298,6 +310,7 @@ def _create_satellite_runtime(
     )
     orbit_ctrl = _module_obj(agent_cfg.orbit_control) or ZeroController()
     att_ctrl = _module_obj(agent_cfg.attitude_control) or ZeroTorqueController()
+    orbit_cfg = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
     att_cfg = dict(cfg.simulator.dynamics.get("attitude", {}) or {})
     dist_cfg = dict(att_cfg.get("disturbance_torques", {}) or {})
     dmodel = DisturbanceTorqueModel(
@@ -314,6 +327,8 @@ def _create_satellite_runtime(
         mu_km3_s2=EARTH_MU_KM3_S2,
         inertia_kg_m2=np.diag([120.0, 100.0, 80.0]),
         disturbance_model=dmodel if bool(att_cfg.get("enabled", True)) else None,
+        orbit_substep_s=float(orbit_cfg["orbit_substep_s"]) if orbit_cfg.get("orbit_substep_s") is not None else None,
+        attitude_substep_s=float(att_cfg["attitude_substep_s"]) if att_cfg.get("attitude_substep_s") is not None else None,
         orbit_propagator=_build_orbit_propagator(cfg),
     )
     bridge = _module_obj(agent_cfg.bridge) if (agent_cfg.bridge is not None and agent_cfg.bridge.enabled) else None
@@ -513,6 +528,7 @@ def _plot_outputs(
         return out
     mode = cfg.outputs.mode
     figure_ids = list(cfg.outputs.plots.get("figure_ids", []) or [])
+    ric_2d_planes = list(cfg.outputs.plots.get("ric_2d_planes", ["ri", "ic", "rc"]) or ["ri", "ic", "rc"])
     reference_object_id = str(cfg.outputs.plots.get("reference_object_id", "")).strip()
     if reference_object_id and reference_object_id not in truth_hist:
         reference_object_id = ""
@@ -521,6 +537,11 @@ def _plot_outputs(
     if not reference_object_id and truth_hist:
         reference_object_id = sorted(truth_hist.keys())[0]
     reference_truth = truth_hist.get(reference_object_id) if reference_object_id else None
+    ric_truth_hist = (
+        {oid: hist for oid, hist in truth_hist.items() if oid != reference_object_id}
+        if reference_object_id
+        else dict(truth_hist)
+    )
     if not figure_ids:
         return out
     for oid, hist in truth_hist.items():
@@ -580,7 +601,7 @@ def _plot_outputs(
         p = outdir / "trajectory_ric_rect_multi.png"
         plot_multi_trajectory_frame(
             t_s,
-            truth_hist,
+            ric_truth_hist,
             frame="ric_rect",
             reference_truth_hist=reference_truth,
             mode=mode,
@@ -592,7 +613,7 @@ def _plot_outputs(
         p = outdir / "trajectory_ric_curv_multi.png"
         plot_multi_trajectory_frame(
             t_s,
-            truth_hist,
+            ric_truth_hist,
             frame="ric_curv",
             reference_truth_hist=reference_truth,
             mode=mode,
@@ -600,6 +621,32 @@ def _plot_outputs(
         )
         if mode in ("save", "both"):
             out["trajectory_ric_curv_multi"] = str(p)
+    if "trajectory_ric_rect_2d_multi" in figure_ids and reference_truth is not None:
+        p = outdir / "trajectory_ric_rect_2d_multi.png"
+        plot_multi_ric_2d_projections(
+            t_s,
+            ric_truth_hist,
+            frame="ric_rect",
+            reference_truth_hist=reference_truth,
+            planes=ric_2d_planes,
+            mode=mode,
+            out_path=str(p),
+        )
+        if mode in ("save", "both"):
+            out["trajectory_ric_rect_2d_multi"] = str(p)
+    if "trajectory_ric_curv_2d_multi" in figure_ids and reference_truth is not None:
+        p = outdir / "trajectory_ric_curv_2d_multi.png"
+        plot_multi_ric_2d_projections(
+            t_s,
+            ric_truth_hist,
+            frame="ric_curv",
+            reference_truth_hist=reference_truth,
+            planes=ric_2d_planes,
+            mode=mode,
+            out_path=str(p),
+        )
+        if mode in ("save", "both"):
+            out["trajectory_ric_curv_2d_multi"] = str(p)
 
     for oid, hist in truth_hist.items():
         if not np.any(np.isfinite(hist[:, 0])):
@@ -629,7 +676,7 @@ def _plot_outputs(
             plot_trajectory_frame(t_s, hist, frame="ecef", mode=mode, out_path=str(p))
             if mode in ("save", "both"):
                 out[f"{oid}_traj_ecef"] = str(p)
-        if "trajectory_ric_rect" in figure_ids and reference_truth is not None:
+        if "trajectory_ric_rect" in figure_ids and reference_truth is not None and oid != reference_object_id:
             p = outdir / f"{oid}_traj_ric_rect.png"
             plot_trajectory_frame(
                 t_s,
@@ -641,7 +688,7 @@ def _plot_outputs(
             )
             if mode in ("save", "both"):
                 out[f"{oid}_traj_ric_rect"] = str(p)
-        if "trajectory_ric_curv" in figure_ids and reference_truth is not None:
+        if "trajectory_ric_curv" in figure_ids and reference_truth is not None and oid != reference_object_id:
             p = outdir / f"{oid}_traj_ric_curv.png"
             plot_trajectory_frame(
                 t_s,
@@ -653,6 +700,49 @@ def _plot_outputs(
             )
             if mode in ("save", "both"):
                 out[f"{oid}_traj_ric_curv"] = str(p)
+        if "trajectory_ric_rect_2d" in figure_ids and reference_truth is not None and oid != reference_object_id:
+            p = outdir / f"{oid}_traj_ric_rect_2d.png"
+            plot_ric_2d_projections(
+                t_s,
+                hist,
+                frame="ric_rect",
+                reference_truth_hist=reference_truth,
+                planes=ric_2d_planes,
+                mode=mode,
+                out_path=str(p),
+            )
+            if mode in ("save", "both"):
+                out[f"{oid}_traj_ric_rect_2d"] = str(p)
+        if "trajectory_ric_curv_2d" in figure_ids and reference_truth is not None and oid != reference_object_id:
+            p = outdir / f"{oid}_traj_ric_curv_2d.png"
+            plot_ric_2d_projections(
+                t_s,
+                hist,
+                frame="ric_curv",
+                reference_truth_hist=reference_truth,
+                planes=ric_2d_planes,
+                mode=mode,
+                out_path=str(p),
+            )
+            if mode in ("save", "both"):
+                out[f"{oid}_traj_ric_curv_2d"] = str(p)
+
+    thrust_hist_ric: dict[str, np.ndarray] = {}
+    if ("control_thrust_ric" in figure_ids) or ("control_thrust_ric_multi" in figure_ids):
+        for oid, u in thrust_hist.items():
+            hist = truth_hist.get(oid)
+            if hist is None or hist.size == 0:
+                continue
+            n_s = min(u.shape[0], hist.shape[0], t_s.size)
+            ur = np.full((u.shape[0], 3), np.nan, dtype=float)
+            for k in range(n_s):
+                a_eci = np.array(u[k, :], dtype=float)
+                rv = np.array(hist[k, 0:6], dtype=float)
+                if not (np.all(np.isfinite(a_eci)) and np.all(np.isfinite(rv))):
+                    continue
+                c_ir = ric_dcm_ir_from_rv(rv[:3], rv[3:6])
+                ur[k, :] = c_ir.T @ a_eci
+            thrust_hist_ric[oid] = ur
 
     if "control_thrust" in figure_ids:
         for oid, u in thrust_hist.items():
@@ -671,6 +761,25 @@ def _plot_outputs(
             )
             if mode in ("save", "both"):
                 out[f"{oid}_control_thrust"] = str(p)
+
+    if "control_thrust_ric" in figure_ids:
+        for oid, u in thrust_hist_ric.items():
+            if not np.any(np.isfinite(u[:, 0])):
+                continue
+            p = outdir / f"{oid}_control_thrust_ric.png"
+            plot_control_commands(
+                t_s,
+                u,
+                layout="subplots",
+                input_labels=["aR", "aI", "aC"],
+                title=f"Thrust Commands RIC ({oid})",
+                y_label="km/s^2",
+                mode=mode,
+                out_path=str(p),
+            )
+            if mode in ("save", "both"):
+                out[f"{oid}_control_thrust_ric"] = str(p)
+
     if "control_thrust_multi" in figure_ids:
         for i_comp, lbl in enumerate(("ax", "ay", "az")):
             p = outdir / f"control_thrust_multi_{lbl}.png"
@@ -685,6 +794,89 @@ def _plot_outputs(
             )
             if mode in ("save", "both"):
                 out[f"control_thrust_multi_{lbl}"] = str(p)
+
+    if "control_thrust_ric_multi" in figure_ids:
+        for i_comp, lbl in enumerate(("aR", "aI", "aC")):
+            p = outdir / f"control_thrust_ric_multi_{lbl}.png"
+            plot_multi_control_commands(
+                t_s,
+                thrust_hist_ric,
+                component_index=i_comp,
+                title=f"Thrust Command Overlay RIC ({lbl})",
+                y_label="km/s^2",
+                mode=mode,
+                out_path=str(p),
+            )
+            if mode in ("save", "both"):
+                out[f"control_thrust_ric_multi_{lbl}"] = str(p)
+
+    if "thrust_alignment_error" in figure_ids:
+        import matplotlib.pyplot as plt
+
+        thrust_dir_body = np.array(cfg.outputs.plots.get("thrust_direction_body", [1.0, 0.0, 0.0]), dtype=float).reshape(-1)
+        if thrust_dir_body.size != 3:
+            thrust_dir_body = np.array([1.0, 0.0, 0.0], dtype=float)
+        n_t = float(np.linalg.norm(thrust_dir_body))
+        if n_t <= 0.0:
+            thrust_dir_body = np.array([1.0, 0.0, 0.0], dtype=float)
+            n_t = 1.0
+        thrust_dir_body = thrust_dir_body / n_t
+
+        for oid, hist in truth_hist.items():
+            u = thrust_hist.get(oid)
+            if u is None or hist.size == 0:
+                continue
+            thrust_norm = np.linalg.norm(np.nan_to_num(u, nan=0.0), axis=1)
+            if not np.any(thrust_norm > 1e-15):
+                continue
+            err_deg = np.full(t_s.shape, np.nan, dtype=float)
+            for k in range(min(hist.shape[0], u.shape[0], t_s.size)):
+                a_cmd = np.array(u[k, :], dtype=float)
+                if not np.all(np.isfinite(a_cmd)):
+                    continue
+                a_norm = float(np.linalg.norm(a_cmd))
+                if a_norm <= 1e-15:
+                    continue
+                q_bn = np.array(hist[k, 6:10], dtype=float)
+                if not np.all(np.isfinite(q_bn)):
+                    continue
+                c_bn = quaternion_to_dcm_bn(q_bn)
+                thrust_axis_eci = c_bn.T @ thrust_dir_body
+                burn_dir_eci = -a_cmd / a_norm
+                cosang = float(np.clip(np.dot(thrust_axis_eci, burn_dir_eci), -1.0, 1.0))
+                if not np.isfinite(cosang):
+                    continue
+                err_deg[k] = float(np.degrees(np.arccos(cosang)))
+
+            fig, ax = plt.subplots(figsize=(10, 5))
+            finite = np.isfinite(err_deg)
+            if np.any(finite):
+                t_f = np.array(t_s[finite], dtype=float)
+                e_f = np.array(err_deg[finite], dtype=float)
+                # Burns are often impulsive/sparse, so error samples may be isolated.
+                # Always draw markers so the trace is visible even without contiguous segments.
+                ax.plot(t_f, e_f, linewidth=1.2, marker="o", markersize=2.5)
+            else:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No valid burn/alignment samples in this run",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                )
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Angle Error (deg)")
+            ax.set_title(f"Attitude vs Thrust Vector Error ({oid})")
+            ax.grid(True, alpha=0.3)
+            p = outdir / f"{oid}_thrust_alignment_error.png"
+            if mode in ("save", "both"):
+                fig.savefig(p, dpi=int(cfg.outputs.plots.get("dpi", 150)))
+                out[f"{oid}_thrust_alignment_error"] = str(p)
+            if mode in ("interactive", "both"):
+                plt.show(block=False)
+            else:
+                plt.close(fig)
 
     if "knowledge_timeline" in figure_ids:
         import matplotlib.pyplot as plt
@@ -774,6 +966,29 @@ def _animate_outputs(
             )
             if mode in ("save", "both"):
                 out[f"{oid}_ground_track"] = str(p)
+
+    if "ric_curv_prism_multi" in types:
+        p = outdir / "ric_curv_prism_multi.mp4"
+        target_object_id = str(anim_cfg.get("target_object_id", "target"))
+        prism_obj_ids = anim_cfg.get("ric_curv_prism_object_ids")
+        if not isinstance(prism_obj_ids, list):
+            prism_obj_ids = None
+        dims_map_raw = anim_cfg.get("ric_curv_prism_dims_m", {})
+        dims_map = dict(dims_map_raw) if isinstance(dims_map_raw, dict) else {}
+        animate_multi_rectangular_prism_ric_curv(
+            t_s=t_s,
+            truth_hist_by_object=truth_hist,
+            target_object_id=target_object_id,
+            object_ids=prism_obj_ids,
+            prism_dims_m_by_object=dims_map,
+            mode=mode,
+            out_path=str(p),
+            fps=fps,
+            speed_multiple=speed_multiple,
+            frame_stride=frame_stride,
+        )
+        if mode in ("save", "both"):
+            out["ric_curv_prism_multi"] = str(p)
 
     return out
 
@@ -995,6 +1210,8 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
                         cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
                     if "torque_body_nm" in mission_out:
                         cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
+                    if "command_mode_flags" in mission_out and isinstance(mission_out["command_mode_flags"], dict):
+                        cmd.mode_flags.update(dict(mission_out["command_mode_flags"]))
                     cmd.mode_flags["mode"] = "mission_integrated"
                     if "mission_mode" in mission_out:
                         cmd.mode_flags["mission_mode"] = mission_out["mission_mode"]
@@ -1078,6 +1295,16 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
         outdir=outdir,
     )
 
+    thrust_stats: dict[str, dict[str, float | int]] = {}
+    for oid, u in thrust_out.items():
+        mag = np.linalg.norm(np.nan_to_num(u, nan=0.0), axis=1)
+        burn_mask = mag > 1e-15
+        thrust_stats[oid] = {
+            "burn_samples": int(np.sum(burn_mask)),
+            "max_accel_km_s2": float(np.max(mag)) if mag.size else 0.0,
+            "total_dv_m_s": float(np.sum(mag) * float(dt) * 1e3),
+        }
+
     summary = {
         "scenario_name": cfg.scenario_name,
         "objects": sorted(list(agents.keys())),
@@ -1088,6 +1315,7 @@ def _run_single_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
         "termination_reason": termination_reason,
         "termination_time_s": termination_time_s,
         "termination_object_id": termination_object_id,
+        "thrust_stats": thrust_stats,
         "plot_outputs": plot_outputs,
         "animation_outputs": animation_outputs,
     }

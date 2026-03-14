@@ -217,6 +217,7 @@ simulator:
   dynamics:
     orbit:
       model: "two_body"
+      orbit_substep_s: null   # optional; smaller substep for orbit integration
       j2: false
       j3: false
       j4: false
@@ -228,6 +229,7 @@ simulator:
         order: 8
     attitude:
       enabled: true
+      attitude_substep_s: null   # optional; smaller substep for attitude integration
       disturbance_torques:
         gravity_gradient: true
         magnetic: true

@@ -234,6 +234,17 @@ def _trajectory_in_frame(
     return out
 
 
+def _first_last_finite_indices(r: np.ndarray) -> tuple[int | None, int | None]:
+    arr = np.array(r, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return None, None
+    mask = np.all(np.isfinite(arr), axis=1)
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        return None, None
+    return int(idx[0]), int(idx[-1])
+
+
 def plot_trajectory_frame(
     t_s: np.ndarray,
     truth_hist: np.ndarray,
@@ -254,11 +265,15 @@ def plot_trajectory_frame(
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection="3d")
     ax.plot(r[:, 0], r[:, 1], r[:, 2], linewidth=1.4)
+    i0, i1 = _first_last_finite_indices(r)
+    if i0 is not None:
+        ax.scatter([r[i0, 0]], [r[i0, 1]], [r[i0, 2]], color="green", s=28, zorder=5)
+    if i1 is not None:
+        ax.scatter([r[i1, 0]], [r[i1, 1]], [r[i1, 2]], color="red", s=28, zorder=5)
     ax.set_title(f"Trajectory ({frame.upper()})")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
-    ax.set_box_aspect((1, 1, 1))
     fig.tight_layout()
     _show_save_close(fig, mode=mode, out_path=out_path)
 
@@ -286,12 +301,111 @@ def plot_multi_trajectory_frame(
             reference_truth_hist=reference_truth_hist,
         )
         ax.plot(r[:, 0], r[:, 1], r[:, 2], linewidth=1.4, label=oid)
+        i0, i1 = _first_last_finite_indices(r)
+        if i0 is not None:
+            ax.scatter([r[i0, 0]], [r[i0, 1]], [r[i0, 2]], color="green", s=24, zorder=5)
+        if i1 is not None:
+            ax.scatter([r[i1, 0]], [r[i1, 1]], [r[i1, 2]], color="red", s=24, zorder=5)
     ax.set_title(f"Trajectories ({frame.upper()})")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
-    ax.set_box_aspect((1, 1, 1))
     ax.legend(loc="best")
+    fig.tight_layout()
+    _show_save_close(fig, mode=mode, out_path=out_path)
+
+
+def _ric_2d_plane_axes(plane: str) -> tuple[int, int, str, str]:
+    p = str(plane).strip().lower()
+    if p == "ri":
+        return 1, 0, "I", "R"
+    if p == "ic":
+        return 1, 2, "I", "C"
+    if p == "rc":
+        return 2, 0, "C", "R"
+    raise ValueError("plane must be one of: 'ri', 'ic', 'rc'.")
+
+
+def plot_ric_2d_projections(
+    t_s: np.ndarray,
+    truth_hist: np.ndarray,
+    *,
+    frame: Literal["ric_rect", "ric_curv"] = "ric_rect",
+    reference_truth_hist: np.ndarray,
+    planes: list[str] | None = None,
+    mode: PlotMode = "interactive",
+    out_path: str | None = None,
+) -> None:
+    if frame not in ("ric_rect", "ric_curv"):
+        raise ValueError("frame must be 'ric_rect' or 'ric_curv'.")
+    r = _trajectory_in_frame(
+        t_s=t_s,
+        truth_hist=truth_hist,
+        frame=frame,
+        reference_truth_hist=reference_truth_hist,
+    )
+    p_list = planes if planes is not None and len(planes) > 0 else ["ri", "ic", "rc"]
+    fig, axes = plt.subplots(1, len(p_list), figsize=(5.0 * len(p_list), 4.5))
+    if len(p_list) == 1:
+        axes = [axes]
+    for ax, p in zip(axes, p_list):
+        ix, iy, xlbl, ylbl = _ric_2d_plane_axes(p)
+        ax.plot(r[:, ix], r[:, iy], linewidth=1.4)
+        i0, i1 = _first_last_finite_indices(r[:, [ix, iy]])
+        if i0 is not None:
+            ax.scatter([r[i0, ix]], [r[i0, iy]], color="green", s=24, zorder=5)
+        if i1 is not None:
+            ax.scatter([r[i1, ix]], [r[i1, iy]], color="red", s=24, zorder=5)
+        ax.set_xlabel(xlbl)
+        ax.set_ylabel(ylbl)
+        ax.set_title(f"{xlbl}-{ylbl}")
+        ax.grid(True, alpha=0.3)
+    fig.suptitle(f"RIC 2D Projections ({'Rect' if frame == 'ric_rect' else 'Curvilinear'})")
+    fig.tight_layout()
+    _show_save_close(fig, mode=mode, out_path=out_path)
+
+
+def plot_multi_ric_2d_projections(
+    t_s: np.ndarray,
+    truth_hist_by_object: dict[str, np.ndarray],
+    *,
+    frame: Literal["ric_rect", "ric_curv"] = "ric_rect",
+    reference_truth_hist: np.ndarray,
+    planes: list[str] | None = None,
+    mode: PlotMode = "interactive",
+    out_path: str | None = None,
+) -> None:
+    if frame not in ("ric_rect", "ric_curv"):
+        raise ValueError("frame must be 'ric_rect' or 'ric_curv'.")
+    p_list = planes if planes is not None and len(planes) > 0 else ["ri", "ic", "rc"]
+    fig, axes = plt.subplots(1, len(p_list), figsize=(5.0 * len(p_list), 4.5))
+    if len(p_list) == 1:
+        axes = [axes]
+    for oid, hist in truth_hist_by_object.items():
+        if hist.size == 0 or not np.any(np.isfinite(hist[:, 0])):
+            continue
+        r = _trajectory_in_frame(
+            t_s=t_s,
+            truth_hist=hist,
+            frame=frame,
+            reference_truth_hist=reference_truth_hist,
+        )
+        for ax, p in zip(axes, p_list):
+            ix, iy, _, _ = _ric_2d_plane_axes(p)
+            ax.plot(r[:, ix], r[:, iy], linewidth=1.2, label=oid)
+            i0, i1 = _first_last_finite_indices(r[:, [ix, iy]])
+            if i0 is not None:
+                ax.scatter([r[i0, ix]], [r[i0, iy]], color="green", s=18, zorder=5)
+            if i1 is not None:
+                ax.scatter([r[i1, ix]], [r[i1, iy]], color="red", s=18, zorder=5)
+    for ax, p in zip(axes, p_list):
+        _, _, xlbl, ylbl = _ric_2d_plane_axes(p)
+        ax.set_xlabel(xlbl)
+        ax.set_ylabel(ylbl)
+        ax.set_title(f"{xlbl}-{ylbl}")
+        ax.grid(True, alpha=0.3)
+    axes[0].legend(loc="best")
+    fig.suptitle(f"RIC 2D Projections Multi ({'Rect' if frame == 'ric_rect' else 'Curvilinear'})")
     fig.tight_layout()
     _show_save_close(fig, mode=mode, out_path=out_path)
 
@@ -696,6 +810,213 @@ def animate_multi_ground_track(
         except Exception as exc:
             print(f"Warning: failed to save animation ({exc}).")
         del ani
+    plt.close(fig)
+
+
+def animate_multi_rectangular_prism_ric_curv(
+    t_s: np.ndarray,
+    truth_hist_by_object: dict[str, np.ndarray],
+    *,
+    target_object_id: str = "target",
+    object_ids: list[str] | None = None,
+    prism_dims_m_by_object: dict[str, list[float] | tuple[float, float, float]] | None = None,
+    mode: PlotMode = "interactive",
+    out_path: str | None = None,
+    fps: float = 30.0,
+    speed_multiple: float = 10.0,
+    frame_stride: int = 1,
+) -> None:
+    """Animate multiple spacecraft as rectangular prisms in target-centered curvilinear RIC.
+
+    Display axes are arranged as (I, C, R), so radial is the vertical axis.
+    """
+    target_hist = truth_hist_by_object.get(target_object_id)
+    if target_hist is None:
+        return
+    tgt = np.array(target_hist, dtype=float)
+    if tgt.ndim != 2 or tgt.shape[0] == 0 or tgt.shape[1] < 10:
+        return
+
+    all_ids = sorted(list(truth_hist_by_object.keys()))
+    if object_ids is None:
+        if "target" in all_ids and "chaser" in all_ids:
+            obj_ids = ["target", "chaser"]
+        else:
+            obj_ids = all_ids
+    else:
+        obj_ids = [oid for oid in object_ids if oid in truth_hist_by_object]
+    if not obj_ids:
+        return
+    if target_object_id not in obj_ids:
+        obj_ids = [target_object_id, *obj_ids]
+
+    dims_map = dict(prism_dims_m_by_object or {})
+    default_dims_m = np.array([4.0, 2.0, 2.0], dtype=float)
+    perm_icr_from_ric = np.array(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+
+    n_frames = int(min([t_s.size] + [np.array(truth_hist_by_object[oid], dtype=float).shape[0] for oid in obj_ids] + [tgt.shape[0]]))
+    if n_frames <= 0:
+        return
+    t_loc = np.array(t_s[:n_frames], dtype=float)
+
+    pos_by_obj: dict[str, np.ndarray] = {}
+    c_by_obj: dict[str, np.ndarray] = {}
+    verts_body_km_by_obj: dict[str, np.ndarray] = {}
+
+    for oid in obj_ids:
+        hist = np.array(truth_hist_by_object[oid], dtype=float)
+        arr = hist[:n_frames, :]
+        pos_by_obj[oid] = np.full((n_frames, 3), np.nan, dtype=float)
+        c_by_obj[oid] = np.full((n_frames, 3, 3), np.nan, dtype=float)
+        dims = np.array(dims_map.get(oid, default_dims_m), dtype=float).reshape(-1)
+        if dims.size != 3:
+            dims = default_dims_m.copy()
+        lx_km, ly_km, lz_km = (dims * 1e-3).tolist()
+        verts_body_km_by_obj[oid] = np.array(
+            [
+                [-0.5 * lx_km, -0.5 * ly_km, -0.5 * lz_km],
+                [-0.5 * lx_km, -0.5 * ly_km, +0.5 * lz_km],
+                [-0.5 * lx_km, +0.5 * ly_km, -0.5 * lz_km],
+                [-0.5 * lx_km, +0.5 * ly_km, +0.5 * lz_km],
+                [+0.5 * lx_km, -0.5 * ly_km, -0.5 * lz_km],
+                [+0.5 * lx_km, -0.5 * ly_km, +0.5 * lz_km],
+                [+0.5 * lx_km, +0.5 * ly_km, -0.5 * lz_km],
+                [+0.5 * lx_km, +0.5 * ly_km, +0.5 * lz_km],
+            ],
+            dtype=float,
+        )
+
+        for k in range(n_frames):
+            r_t = tgt[k, 0:3]
+            v_t = tgt[k, 3:6]
+            if not (np.all(np.isfinite(r_t)) and np.all(np.isfinite(v_t))):
+                continue
+            c_ir = ric_dcm_ir_from_rv(r_t, v_t)
+
+            r = arr[k, 0:3]
+            q_bn = arr[k, 6:10]
+            if not (np.all(np.isfinite(r)) and np.all(np.isfinite(q_bn))):
+                continue
+
+            dr_rect = c_ir.T @ (r - r_t)
+            x_curv = ric_rect_to_curv(
+                np.hstack((dr_rect, np.zeros(3, dtype=float))),
+                r0_km=float(np.linalg.norm(r_t)),
+            )
+            ric_curv_pos = x_curv[:3]  # [R, I, C] in km-equivalent curvilinear coordinates
+            pos_by_obj[oid][k, :] = np.array([ric_curv_pos[1], ric_curv_pos[2], ric_curv_pos[0]], dtype=float)
+
+            c_bn = quaternion_to_dcm_bn(q_bn)
+            c_rb = c_ir.T @ c_bn.T  # body -> RIC
+            c_by_obj[oid][k, :, :] = perm_icr_from_ric @ c_rb  # body -> display (I,C,R)
+
+    # Global limits over all objects and all frames.
+    all_pos = np.vstack([v for v in pos_by_obj.values() if v.size > 0])
+    finite = np.isfinite(all_pos)
+    if not np.any(finite):
+        return
+    lim = float(max(np.nanmax(np.abs(all_pos)), 1.0))
+
+    faces = [
+        [0, 1, 3, 2],
+        [4, 5, 7, 6],
+        [0, 1, 5, 4],
+        [2, 3, 7, 6],
+        [0, 2, 6, 4],
+        [1, 3, 7, 5],
+    ]
+
+    fig = plt.figure(figsize=(9, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_zlim(-lim, lim)
+    ax.set_box_aspect((1, 1, 1))
+    ax.set_xlabel("I (km)")
+    ax.set_ylabel("C (km)")
+    ax.set_zlabel("R (km)")
+    ax.set_title("Target-Centered Curvilinear RIC Prism Animation")
+
+    cmap = plt.get_cmap("tab10")
+    poly_by_obj: dict[str, Poly3DCollection] = {}
+    trail_by_obj: dict[str, Any] = {}
+    dot_by_obj: dict[str, Any] = {}
+    for i, oid in enumerate(obj_ids):
+        color = cmap(i % 10)
+        poly = Poly3DCollection([], alpha=0.35, facecolor=color, edgecolor="k", linewidth=0.7)
+        ax.add_collection3d(poly)
+        poly_by_obj[oid] = poly
+        trail, = ax.plot([], [], [], linewidth=1.2, color=color, label=oid)
+        dot, = ax.plot([], [], [], marker="o", markersize=4, color=color)
+        trail_by_obj[oid] = trail
+        dot_by_obj[oid] = dot
+    ax.legend(loc="best")
+
+    frame_ids = np.arange(0, n_frames, max(int(frame_stride), 1), dtype=int)
+    if frame_ids.size == 0 or frame_ids[-1] != (n_frames - 1):
+        frame_ids = np.append(frame_ids, n_frames - 1)
+
+    def _frame_verts(oid: str, i_frame: int) -> list[np.ndarray] | None:
+        p = pos_by_obj[oid][i_frame, :]
+        c_bd = c_by_obj[oid][i_frame, :, :]
+        if not (np.all(np.isfinite(p)) and np.all(np.isfinite(c_bd))):
+            return None
+        verts = (c_bd @ verts_body_km_by_obj[oid].T).T + p
+        return [verts[idx, :] for idx in faces]
+
+    def update(i: int):
+        k = int(frame_ids[i])
+        artists: list[Any] = []
+        for oid in obj_ids:
+            poly = poly_by_obj[oid]
+            fv = _frame_verts(oid, k)
+            if fv is None:
+                poly.set_verts([])
+            else:
+                poly.set_verts(fv)
+            artists.append(poly)
+
+            tr = trail_by_obj[oid]
+            dd = dot_by_obj[oid]
+            p = pos_by_obj[oid][: k + 1, :]
+            mask = np.all(np.isfinite(p), axis=1)
+            if np.any(mask):
+                p_ok = p[mask, :]
+                tr.set_data(p_ok[:, 0], p_ok[:, 1])
+                tr.set_3d_properties(p_ok[:, 2])
+                dd.set_data([p_ok[-1, 0]], [p_ok[-1, 1]])
+                dd.set_3d_properties([p_ok[-1, 2]])
+            else:
+                tr.set_data([], [])
+                tr.set_3d_properties([])
+                dd.set_data([], [])
+                dd.set_3d_properties([])
+            artists.extend([tr, dd])
+        ax.set_title(f"Target-Centered Curvilinear RIC Prism Animation (t={t_loc[k]:.1f}s)")
+        return artists
+
+    dt = float(np.median(np.diff(t_loc))) if t_loc.size > 1 else 1.0
+    interval_ms = 1000.0 * dt / max(speed_multiple, 1e-6)
+    ani = animation.FuncAnimation(fig, update, frames=int(frame_ids.size), interval=interval_ms, blit=False)
+
+    if mode in ("save", "both"):
+        if out_path is None:
+            raise ValueError("out_path is required when mode is 'save' or 'both'.")
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ani.save(str(p), fps=max(float(fps), 1.0))
+        except Exception as exc:
+            print(f"Warning: failed to save animation ({exc}).")
+    if mode in ("interactive", "both"):
+        plt.show()
     plt.close(fig)
 
 

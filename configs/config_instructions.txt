@@ -94,6 +94,18 @@ Mission Module Pointers
     thruster_direction_body: [x,y,z]
     alignment_tolerance_rad: <float>
     min_burn_accel_km_s2: <float>
+- Predictive integrated command mission module (plan at future time, slew early, fire at gate):
+  module: "sim.mission.modules"
+  class_name: "PredictiveIntegratedCommandMissionModule"
+  params:
+    target_id: "<object_id>"
+    use_knowledge_for_targeting: true|false
+    lead_time_s: <float>
+    predict_dt_s: <float>
+    alignment_tolerance_rad: <float>
+    thruster_direction_body: [x,y,z]
+    min_burn_accel_km_s2: <float>
+    mu_km3_s2: <float>
 - Rocket mission module:
   module: "sim.mission.modules"
   class_name: "RocketMissionModule"
@@ -150,6 +162,10 @@ Simulator Section
 - dt_s: primary simulation step
 - initial_jd_utc: optional epoch start (null if unused)
 - dynamics: orbit/attitude/rocket model switches
+  - optional substep controls for satellite propagation:
+    - simulator.dynamics.orbit.orbit_substep_s
+    - simulator.dynamics.attitude.attitude_substep_s
+    - when set, these run orbit/attitude integration at finer internal timesteps than simulator.dt_s.
 - environment: ephemeris/atmosphere/etc settings
 - plugin_validation:
   - strict: true/false
@@ -175,10 +191,14 @@ Outputs Section
   - trajectory_ecef
   - trajectory_ric_rect
   - trajectory_ric_curv
+  - trajectory_ric_rect_2d
+  - trajectory_ric_curv_2d
   - trajectory_eci_multi
   - trajectory_ecef_multi
   - trajectory_ric_rect_multi
   - trajectory_ric_curv_multi
+  - trajectory_ric_rect_2d_multi
+  - trajectory_ric_curv_2d_multi
   - attitude
   - quaternion_eci
   - quaternion_ric
@@ -188,6 +208,12 @@ Outputs Section
   - knowledge_timeline
   - control_thrust
   - control_thrust_multi
+  - control_thrust_ric
+  - control_thrust_ric_multi
+  Optional key: ric_2d_planes (list of "ri" | "ic" | "rc")
+    - ri: R-I projection with R on y-axis
+    - ic: I-C projection with C on y-axis
+    - rc: R-C projection with R on y-axis
 - animations: animation options.
   Example keys: enabled, types, fps, speed_multiple, draw_earth_map.
   Supported types currently:

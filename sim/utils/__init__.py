@@ -5,6 +5,7 @@ from sim.utils.io import write_json
 from sim.utils.plotting_capabilities import (
     animate_ground_track,
     animate_multi_ground_track,
+    animate_multi_rectangular_prism_ric_curv,
     animate_rectangular_prism_attitude,
     animate_trajectory_frame,
     plot_angular_rates,
@@ -14,9 +15,11 @@ from sim.utils.plotting_capabilities import (
     plot_control_commands,
     plot_ground_track,
     plot_multi_control_commands,
+    plot_multi_ric_2d_projections,
     plot_multi_trajectory_frame,
     plot_orbit_eci,
     plot_quaternion_components,
+    plot_ric_2d_projections,
     plot_trajectory_frame,
 )
 from sim.utils.quaternion import (
@@ -46,9 +49,12 @@ __all__ = [
     "plot_body_rates",
     "plot_trajectory_frame",
     "plot_multi_trajectory_frame",
+    "plot_ric_2d_projections",
+    "plot_multi_ric_2d_projections",
     "plot_control_commands",
     "plot_multi_control_commands",
     "animate_rectangular_prism_attitude",
+    "animate_multi_rectangular_prism_ric_curv",
     "animate_trajectory_frame",
     "animate_ground_track",
     "animate_multi_ground_track",

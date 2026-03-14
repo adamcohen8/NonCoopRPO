@@ -28,6 +28,13 @@ def plot_orbit_eci(truth_hist: np.ndarray, mode: PlotMode = "interactive", out_p
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection="3d")
     ax.plot(r[:, 0], r[:, 1], r[:, 2], linewidth=1.5)
+    mask = np.all(np.isfinite(r), axis=1)
+    idx = np.where(mask)[0]
+    if idx.size > 0:
+        i0 = int(idx[0])
+        i1 = int(idx[-1])
+        ax.scatter([r[i0, 0]], [r[i0, 1]], [r[i0, 2]], color="green", s=30, zorder=5)
+        ax.scatter([r[i1, 0]], [r[i1, 1]], [r[i1, 2]], color="red", s=30, zorder=5)
     ax.set_xlabel("x (km)")
     ax.set_ylabel("y (km)")
     ax.set_zlabel("z (km)")
@@ -179,6 +186,11 @@ def plot_ground_track(
         gl.xlabel_style = {"size": 8}
         gl.ylabel_style = {"size": 8}
         ax.plot(lon_p, lat_p, linewidth=1.4, transform=ccrs.PlateCarree(), zorder=3)
+        if lon_deg.size > 0 and lat_deg.size > 0:
+            if np.isfinite(lon_deg[0]) and np.isfinite(lat_deg[0]):
+                ax.scatter([lon_deg[0]], [lat_deg[0]], color="green", s=28, transform=ccrs.PlateCarree(), zorder=4)
+            if np.isfinite(lon_deg[-1]) and np.isfinite(lat_deg[-1]):
+                ax.scatter([lon_deg[-1]], [lat_deg[-1]], color="red", s=28, transform=ccrs.PlateCarree(), zorder=4)
         ax.set_title(title)
         fig.tight_layout()
         try:
@@ -202,6 +214,11 @@ def plot_ground_track(
     if draw_earth_map:
         _draw_stylized_earth_map(ax)
     ax.plot(lon_p, lat_p, linewidth=1.4)
+    if lon_deg.size > 0 and lat_deg.size > 0:
+        if np.isfinite(lon_deg[0]) and np.isfinite(lat_deg[0]):
+            ax.scatter([lon_deg[0]], [lat_deg[0]], color="green", s=28, zorder=4)
+        if np.isfinite(lon_deg[-1]) and np.isfinite(lat_deg[-1]):
+            ax.scatter([lon_deg[-1]], [lat_deg[-1]], color="red", s=28, zorder=4)
     ax.set_xlim(-180.0, 180.0)
     ax.set_ylim(-90.0, 90.0)
     ax.set_xlabel("Longitude (deg)")

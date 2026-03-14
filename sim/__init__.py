@@ -16,6 +16,7 @@ from sim.control import (
     IntegratedManeuverDecision,
     HCWLQRController,
     HCWCurvInputRectOutputController,
+    RelativeOrbitMPCController,
     PredictiveBurnConfig,
     PredictiveBurnScheduler,
     OrbitalAttitudeManeuverCoordinator,
@@ -125,7 +126,14 @@ from sim.estimation import (
     OrbitUKFEstimator,
 )
 from sim.metrics import EngagementMetrics, ScoreSummary, compute_engagement_metrics, compute_scores
-from sim.mission import EndStateManeuverMissionModule, IntegratedCommandMissionModule, RocketMissionModule, SatelliteMissionModule
+from sim.mission import (
+    DefensiveRICAxisBurnMissionModule,
+    EndStateManeuverMissionModule,
+    IntegratedCommandMissionModule,
+    PredictiveIntegratedCommandMissionModule,
+    RocketMissionModule,
+    SatelliteMissionModule,
+)
 from sim.optimization import (
     AttitudeTuneCase,
     ControllerAlgorithm,
@@ -186,6 +194,7 @@ from sim.master_simulator import run_master_simulation
 from sim.utils import (
     animate_ground_track,
     animate_multi_ground_track,
+    animate_multi_rectangular_prism_ric_curv,
     animate_rectangular_prism_attitude,
     animate_trajectory_frame,
     ground_track_from_eci_history,
@@ -193,8 +202,10 @@ from sim.utils import (
     plot_control_commands,
     plot_ground_track,
     plot_multi_control_commands,
+    plot_multi_ric_2d_projections,
     plot_multi_trajectory_frame,
     plot_quaternion_components,
+    plot_ric_2d_projections,
     plot_trajectory_frame,
     split_ground_track_dateline,
 )
@@ -219,6 +230,7 @@ __all__ = [
     "IntegratedManeuverDecision",
     "HCWLQRController",
     "HCWCurvInputRectOutputController",
+    "RelativeOrbitMPCController",
     "PredictiveBurnConfig",
     "PredictiveBurnScheduler",
     "OrbitalAttitudeManeuverCoordinator",
@@ -328,9 +340,11 @@ __all__ = [
     "EngagementMetrics",
     "compute_engagement_metrics",
     "SatelliteMissionModule",
+    "DefensiveRICAxisBurnMissionModule",
     "RocketMissionModule",
     "EndStateManeuverMissionModule",
     "IntegratedCommandMissionModule",
+    "PredictiveIntegratedCommandMissionModule",
     "ParameterBound",
     "OptimizationResult",
     "PSOConfig",
@@ -364,9 +378,12 @@ __all__ = [
     "plot_body_rates",
     "plot_trajectory_frame",
     "plot_multi_trajectory_frame",
+    "plot_ric_2d_projections",
+    "plot_multi_ric_2d_projections",
     "plot_control_commands",
     "plot_multi_control_commands",
     "animate_rectangular_prism_attitude",
+    "animate_multi_rectangular_prism_ric_curv",
     "animate_trajectory_frame",
     "animate_ground_track",
     "animate_multi_ground_track",
