@@ -54,6 +54,77 @@ def _estimate_needed_delta_v_m_s(current_truth: StateTruth, target_truth: StateT
     return float(np.linalg.norm(rel_v_km_s) * 1e3)
 
 
+def _resolve_angle_tolerance_rad(rad_value: float, deg_value: float | None) -> float:
+    if deg_value is not None:
+        return float(max(np.deg2rad(float(deg_value)), 0.0))
+    return float(max(rad_value, 0.0))
+
+
+@dataclass
+class AttitudeDetumbleGateMissionModule:
+    """
+    Mission-side attitude mode gate:
+    - Use detumble mode when |w_body| exceeds enter threshold.
+    - Return to nominal mode when |w_body| falls below exit threshold.
+    Requires attitude controller to implement `set_mode("detumble"|"nominal")`.
+    """
+
+    enter_rate_rad_s: float = 0.03
+    exit_rate_rad_s: float = 0.015
+    prefer_attitude_belief_rate: bool = True
+    detumble_mode_name: str = "detumble"
+    nominal_mode_name: str = "nominal"
+    _detumble_latched: bool = False
+
+    def __post_init__(self) -> None:
+        self.enter_rate_rad_s = float(max(self.enter_rate_rad_s, 0.0))
+        self.exit_rate_rad_s = float(max(self.exit_rate_rad_s, 0.0))
+        if self.exit_rate_rad_s > self.enter_rate_rad_s:
+            self.exit_rate_rad_s = self.enter_rate_rad_s
+
+    def _rate_norm_rad_s(self, truth: StateTruth, att_belief: StateBelief | None) -> float:
+        if self.prefer_attitude_belief_rate and att_belief is not None and att_belief.state.size >= 13:
+            w = np.array(att_belief.state[10:13], dtype=float)
+            if np.all(np.isfinite(w)):
+                return float(np.linalg.norm(w))
+        w_t = np.array(truth.angular_rate_body_rad_s, dtype=float)
+        return float(np.linalg.norm(w_t))
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        attitude_controller: Any | None = None,
+        att_belief: StateBelief | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        w_norm = self._rate_norm_rad_s(truth=truth, att_belief=att_belief)
+        if self._detumble_latched:
+            if w_norm <= self.exit_rate_rad_s:
+                self._detumble_latched = False
+        else:
+            if w_norm >= self.enter_rate_rad_s:
+                self._detumble_latched = True
+
+        desired_mode = self.detumble_mode_name if self._detumble_latched else self.nominal_mode_name
+        controller_accepts_mode = bool(attitude_controller is not None and hasattr(attitude_controller, "set_mode"))
+        if controller_accepts_mode:
+            try:
+                attitude_controller.set_mode(desired_mode)
+            except Exception:
+                controller_accepts_mode = False
+
+        return {
+            "attitude_gate": {
+                "mode": str(desired_mode),
+                "rate_norm_rad_s": float(w_norm),
+                "enter_rate_rad_s": float(self.enter_rate_rad_s),
+                "exit_rate_rad_s": float(self.exit_rate_rad_s),
+                "controller_accepts_mode": bool(controller_accepts_mode),
+            }
+        }
+
+
 @dataclass
 class SatelliteMissionModule:
     orbital_mode: str = "coast"  # coast|pursuit_knowledge|evade_knowledge|pursuit_blind|evade_blind
@@ -196,7 +267,11 @@ class DefensiveRICAxisBurnMissionModule:
     require_finite_knowledge: bool = True
     thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
     alignment_tolerance_rad: float = np.deg2rad(5.0)
+    alignment_tolerance_deg: float | None = None
     min_burn_accel_km_s2: float = 1e-12
+
+    def __post_init__(self) -> None:
+        self.alignment_tolerance_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
 
     @staticmethod
     def _axis_unit_ric(axis_mode: str) -> np.ndarray:
@@ -395,8 +470,12 @@ class EndStateManeuverMissionModule:
     thruster_position_body_m: np.ndarray | None = None
     thruster_direction_body: np.ndarray | None = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
     alignment_tolerance_rad: float = np.deg2rad(5.0)
+    alignment_tolerance_deg: float | None = None
     terminate_on_velocity_tolerance_km_s: float = 1e-5
     _coordinator: OrbitalAttitudeManeuverCoordinator = field(default_factory=OrbitalAttitudeManeuverCoordinator, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.alignment_tolerance_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
 
     def _resolve_desired_state(
         self,
@@ -504,7 +583,11 @@ class IntegratedCommandMissionModule:
     require_attitude_alignment: bool = True
     thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
     alignment_tolerance_rad: float = np.deg2rad(5.0)
+    alignment_tolerance_deg: float | None = None
     min_burn_accel_km_s2: float = 1e-12
+
+    def __post_init__(self) -> None:
+        self.alignment_tolerance_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
 
     def _resolve_desired_state(
         self,
@@ -661,14 +744,21 @@ class PredictiveIntegratedCommandMissionModule:
     lead_time_s: float = 30.0
     predict_dt_s: float = 1.0
     alignment_tolerance_rad: float = np.deg2rad(5.0)
+    alignment_tolerance_deg: float | None = None
     thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
     min_burn_accel_km_s2: float = 1e-12
     mu_km3_s2: float = 398600.4418
     orbit_controller_budget_ms: float = 2.0
     attitude_controller_budget_ms: float = 2.0
+    skip_orbit_planning_in_detumble_mode: bool = True
+    attitude_mode_attr: str = "mode"
+    detumble_mode_tokens: tuple[str, ...] = ("detumble",)
     _countdown_s: float = field(default=-1.0, init=False, repr=False)
     _planned_accel_eci_km_s2: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float), init=False, repr=False)
     _planned_attitude_quat_bn: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0, 0.0], dtype=float), init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.alignment_tolerance_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
 
     def _target_state(self, own_knowledge: dict[str, StateBelief], world_truth: dict[str, StateTruth]) -> tuple[np.ndarray, np.ndarray] | None:
         if self.use_knowledge_for_targeting:
@@ -736,6 +826,24 @@ class PredictiveIntegratedCommandMissionModule:
         ang = float(np.arccos(cosang))
         return ang <= float(max(self.alignment_tolerance_rad, 0.0)), ang
 
+    def _attitude_controller_in_detumble_mode(self, attitude_controller: Any | None) -> tuple[bool, str]:
+        if attitude_controller is None:
+            return False, ""
+        attr = str(self.attitude_mode_attr).strip()
+        if not attr:
+            return False, ""
+        try:
+            mode_obj = getattr(attitude_controller, attr, "")
+        except Exception:
+            mode_obj = ""
+        mode_str = str(mode_obj).strip().lower()
+        if not mode_str:
+            return False, ""
+        tokens = [str(t).strip().lower() for t in tuple(self.detumble_mode_tokens or ()) if str(t).strip()]
+        if any(tok in mode_str for tok in tokens):
+            return True, mode_str
+        return False, mode_str
+
     def update(
         self,
         *,
@@ -751,9 +859,16 @@ class PredictiveIntegratedCommandMissionModule:
         **kwargs: Any,
     ) -> dict[str, Any]:
         out: dict[str, Any] = {}
+        in_detumble_mode, mode_str = self._attitude_controller_in_detumble_mode(attitude_controller)
+        planning_blocked_by_detumble = bool(self.skip_orbit_planning_in_detumble_mode and in_detumble_mode)
         target_state = self._target_state(own_knowledge=own_knowledge, world_truth=world_truth)
 
-        if self._countdown_s < 0.0:
+        if planning_blocked_by_detumble:
+            # Cancel pending planned burn while detumbling.
+            self._countdown_s = -1.0
+            self._planned_accel_eci_km_s2 = np.zeros(3, dtype=float)
+            self._planned_attitude_quat_bn = np.array(truth.attitude_quat_bn, dtype=float)
+        elif self._countdown_s < 0.0:
             b_pred = self._predict_orb_belief_for_controller(
                 orbit_controller=orbit_controller,
                 self_truth=truth,
@@ -798,7 +913,9 @@ class PredictiveIntegratedCommandMissionModule:
 
         fire = False
         align_ok, align_angle = self._alignment(truth=truth, accel_eci_km_s2=self._planned_accel_eci_km_s2)
-        if self._countdown_s <= float(max(dt_s, 1e-9)):
+        if planning_blocked_by_detumble:
+            fire = False
+        elif self._countdown_s <= float(max(dt_s, 1e-9)):
             if align_ok and float(np.linalg.norm(self._planned_accel_eci_km_s2)) > float(max(self.min_burn_accel_km_s2, 0.0)):
                 fire = True
             self._countdown_s = -1.0
@@ -818,5 +935,7 @@ class PredictiveIntegratedCommandMissionModule:
             "alignment_angle_rad": float(align_angle),
             "orbit_controller_budget_ms": float(self.orbit_controller_budget_ms),
             "attitude_controller_budget_ms": float(self.attitude_controller_budget_ms),
+            "planning_blocked_by_detumble": bool(planning_blocked_by_detumble),
+            "attitude_controller_mode": str(mode_str),
         }
         return out

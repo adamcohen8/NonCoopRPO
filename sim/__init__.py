@@ -11,6 +11,7 @@ from sim.actuators import (
 from sim.control import (
     AttitudeAgnosticImpulsiveManeuverer,
     DeltaVManeuver,
+    DetumbleThenSlewController,
     ECIDetumblePDController,
     PoseCommandGenerator,
     IntegratedManeuverCommand,
@@ -129,6 +130,7 @@ from sim.estimation import (
 )
 from sim.metrics import EngagementMetrics, ScoreSummary, compute_engagement_metrics, compute_scores
 from sim.mission import (
+    AttitudeDetumbleGateMissionModule,
     DefensiveRICAxisBurnMissionModule,
     EndStateManeuverMissionModule,
     IntegratedCommandMissionModule,
@@ -267,6 +269,7 @@ __all__ = [
     "load_simulation_yaml",
     "validate_scenario_plugins",
     "PoseCommandGenerator",
+    "DetumbleThenSlewController",
     "ECIDetumblePDController",
     "QuaternionPDController",
     "ReactionWheelPDController",
@@ -343,6 +346,7 @@ __all__ = [
     "compute_scores",
     "EngagementMetrics",
     "compute_engagement_metrics",
+    "AttitudeDetumbleGateMissionModule",
     "SatelliteMissionModule",
     "DefensiveRICAxisBurnMissionModule",
     "RocketMissionModule",

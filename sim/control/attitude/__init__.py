@@ -7,6 +7,7 @@ from sim.control.attitude.pose_commands import PoseCommandGenerator
 from sim.control.attitude.snap import SnapAttitudeController
 from sim.control.attitude.snap_hold import SnapAndHoldRICAttitudeController
 from sim.control.attitude.surrogate_snap import SurrogateSnapECIController, SurrogateSnapRICController
+from sim.control.attitude.switching import DetumbleThenSlewController
 from sim.control.attitude.zero_torque import ZeroTorqueController
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "RICFramePDController",
     "RICFramePIDController",
     "PoseCommandGenerator",
+    "DetumbleThenSlewController",
 ]

@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from presets import BASIC_REACTION_WHEEL_TRIAD, BASIC_SATELLITE, build_sim_object_from_presets
 from sim.actuators.attitude import ReactionWheelLimits
 from sim.control.attitude import RICDetumblePDController, ReactionWheelPDController
-from sim.core.models import StateBelief
+from sim.core.models import Command, StateBelief
 from sim.utils.quaternion import dcm_to_quaternion_bn
 
 
@@ -41,6 +41,7 @@ def run_demo(
     dt_s: float = 1.0,
     duration_s: float = 1800.0,
     attitude_dt_s: float = 0.01,
+    control_dt_s: float = 0.1,
     wheel_scale: float = 80.0,
     kp: np.ndarray | None = None,
     kd: np.ndarray | None = None,
@@ -53,7 +54,7 @@ def run_demo(
     w0 = np.array([0.07, 0.05, -0.06], dtype=float) if w0_body_rad_s is None else np.array(w0_body_rad_s, dtype=float).reshape(3)
 
     kp_vec = np.array([0.0, 0.0, 0.0], dtype=float) if kp is None else np.array(kp, dtype=float).reshape(3)
-    kd_vec = np.array([8.0, 8.0, 8.0], dtype=float) if kd is None else np.array(kd, dtype=float).reshape(3)
+    kd_vec = np.array([12.0, 12.0, 12.0], dtype=float) if kd is None else np.array(kd, dtype=float).reshape(3)
 
     sat = build_sim_object_from_presets(
         object_id="sat_pd_ric_detumble_demo",
@@ -103,25 +104,29 @@ def run_demo(
         h_rw_norm[0] = float(np.linalg.norm(h_rw[0, :]))
 
     for k in range(steps):
-        t_now = sat.truth.t_s
-        meas = sat.sensor.measure(sat.truth, env={}, t_s=t_now + dt_s)
-        sat.belief = sat.estimator.update(sat.belief, meas, t_s=t_now + dt_s)
+        t_target = sat.truth.t_s + dt_s
+        applied = Command.zero()
+        while sat.truth.t_s < t_target - 1e-12:
+            h = min(float(max(control_dt_s, 1e-4)), float(t_target - sat.truth.t_s))
+            t_now = sat.truth.t_s
+            meas = sat.sensor.measure(sat.truth, env={}, t_s=t_now + h)
+            sat.belief = sat.estimator.update(sat.belief, meas, t_s=t_now + h)
 
-        belief_att = StateBelief(
-            state=np.hstack(
-                (
-                    sat.truth.position_eci_km,
-                    sat.truth.velocity_eci_km_s,
-                    sat.truth.attitude_quat_bn,
-                    sat.truth.angular_rate_body_rad_s,
-                )
-            ),
-            covariance=np.eye(13),
-            last_update_t_s=t_now,
-        )
-        cmd = ctrl.act(belief_att, t_s=t_now, budget_ms=1.0)
-        applied = sat.actuator.apply(cmd, sat.limits, dt_s)
-        sat.truth = sat.dynamics.step(sat.truth, applied, env={}, dt_s=dt_s)
+            belief_att = StateBelief(
+                state=np.hstack(
+                    (
+                        sat.truth.position_eci_km,
+                        sat.truth.velocity_eci_km_s,
+                        sat.truth.attitude_quat_bn,
+                        sat.truth.angular_rate_body_rad_s,
+                    )
+                ),
+                covariance=np.eye(13),
+                last_update_t_s=t_now,
+            )
+            cmd = ctrl.act(belief_att, t_s=t_now, budget_ms=1.0)
+            applied = sat.actuator.apply(cmd, sat.limits, h)
+            sat.truth = sat.dynamics.step(sat.truth, applied, env={}, dt_s=h)
 
         t[k + 1] = sat.truth.t_s
         q_hist[k + 1, :] = sat.truth.attitude_quat_bn
@@ -215,9 +220,10 @@ if __name__ == "__main__":
     parser.add_argument("--dt", type=float, default=1.0)
     parser.add_argument("--duration", type=float, default=1800.0)
     parser.add_argument("--attitude-dt", type=float, default=0.01)
+    parser.add_argument("--control-dt", type=float, default=0.1, help="Control update period inside each outer dt step (s).")
     parser.add_argument("--wheel-scale", type=float, default=80.0)
     parser.add_argument("--kp", type=float, default=0.0, help="Scalar Kp for all 3 PD axes.")
-    parser.add_argument("--kd", type=float, default=8.0, help="Scalar Kd for all 3 PD axes.")
+    parser.add_argument("--kd", type=float, default=12.0, help="Scalar Kd for all 3 PD axes.")
     parser.add_argument("--w0-x", type=float, default=0.07, help="Initial body rate wx (rad/s).")
     parser.add_argument("--w0-y", type=float, default=0.05, help="Initial body rate wy (rad/s).")
     parser.add_argument("--w0-z", type=float, default=-0.06, help="Initial body rate wz (rad/s).")
@@ -228,6 +234,7 @@ if __name__ == "__main__":
         dt_s=float(args.dt),
         duration_s=float(args.duration),
         attitude_dt_s=float(args.attitude_dt),
+        control_dt_s=float(args.control_dt),
         wheel_scale=float(args.wheel_scale),
         kp=np.array([float(args.kp)] * 3),
         kd=np.array([float(args.kd)] * 3),

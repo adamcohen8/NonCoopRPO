@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib
+from typing import Any
 
 import numpy as np
 
@@ -11,12 +13,33 @@ from sim.utils.frames import ric_dcm_ir_from_rv
 from sim.utils.quaternion import dcm_to_quaternion_bn, quaternion_to_dcm_bn
 
 
+def _construct_pd(spec: Any) -> ReactionWheelPDController:
+    if isinstance(spec, ReactionWheelPDController):
+        return spec
+    if isinstance(spec, dict):
+        module = spec.get("module")
+        class_name = spec.get("class_name")
+        params = dict(spec.get("params", {}) or {})
+        if not module or not class_name:
+            raise ValueError("pd spec dict must include 'module' and 'class_name'.")
+        mod = importlib.import_module(str(module))
+        cls = getattr(mod, str(class_name))
+        obj = cls(**params)
+        if not isinstance(obj, ReactionWheelPDController):
+            raise TypeError("pd spec must construct a ReactionWheelPDController.")
+        return obj
+    raise TypeError("pd must be a ReactionWheelPDController or a compatible constructor dict spec.")
+
+
 @dataclass
 class ECIDetumblePDController(Controller):
-    pd: ReactionWheelPDController
+    pd: Any
     rate_only: bool = True
     lock_reference_on_first_call: bool = True
     _q_ref_bn: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        self.pd = _construct_pd(self.pd)
 
     def reset_reference(self) -> None:
         self._q_ref_bn = None
@@ -57,11 +80,14 @@ class ECIDetumblePDController(Controller):
 
 @dataclass
 class RICDetumblePDController(Controller):
-    pd: ReactionWheelPDController
+    pd: Any
     state_rv_slice: tuple[int, int] = (0, 6)
     rate_only: bool = True
     lock_reference_on_first_call: bool = True
     _c_br_ref: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        self.pd = _construct_pd(self.pd)
 
     def reset_reference(self) -> None:
         self._c_br_ref = None

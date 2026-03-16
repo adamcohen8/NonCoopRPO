@@ -9,6 +9,7 @@ from typing import Any, Callable
 import numpy as np
 
 from presets.rockets import BASIC_1ST_STAGE, BASIC_SSTO_ROCKET, BASIC_TWO_STAGE_STACK, RocketStackPreset
+from presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z
 from sim.config import SimulationScenarioConfig, load_simulation_yaml, scenario_config_from_dict, validate_scenario_plugins
 from sim.control.attitude.zero_torque import ZeroTorqueController
 from sim.control.orbit.zero_controller import ZeroController
@@ -279,6 +280,17 @@ def _default_truth_from_agent(agent_cfg: Any, t_s: float = 0.0) -> StateTruth:
     )
 
 
+def _resolve_satellite_isp_s(specs: dict[str, Any]) -> float:
+    if "isp_s" in specs:
+        return float(specs.get("isp_s", 0.0))
+    if "thruster_isp_s" in specs:
+        return float(specs.get("thruster_isp_s", 0.0))
+    thr = str(specs.get("thruster", "")).strip().upper()
+    if thr in ("BASIC_CHEMICAL_BOTTOM_Z", "BASIC_CHEMICAL_Z_BOTTOM"):
+        return float(BASIC_CHEMICAL_BOTTOM_Z.isp_s)
+    return 0.0
+
+
 def _resolve_chaser_relative_ric_init(initial_state: dict[str, Any]) -> tuple[np.ndarray, str] | None:
     s0 = dict(initial_state or {})
     rel_block = s0.get("relative_to_target_ric")
@@ -371,6 +383,7 @@ class AgentRuntime:
     deploy_dv_body_m_s: np.ndarray | None
     mission_modules: list[Any]
     waiting_for_launch: bool
+    orbital_isp_s: float | None = None
 
 
 @dataclass
@@ -400,6 +413,7 @@ def _create_satellite_runtime(
     rng: np.random.Generator,
 ) -> AgentRuntime:
     truth = _default_truth_from_agent(agent_cfg, t_s=0.0)
+    specs = dict(agent_cfg.specs or {})
     belief = StateBelief(state=np.hstack((truth.position_eci_km, truth.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=0.0)
     noise = dict((agent_cfg.knowledge or {}).get("sensor_error", {}) or {})
     pos_sigma = float(np.array(noise.get("pos_sigma_km", [0.001])).reshape(-1)[0])
@@ -441,6 +455,7 @@ def _create_satellite_runtime(
     bridge = _module_obj(agent_cfg.bridge) if (agent_cfg.bridge is not None and agent_cfg.bridge.enabled) else None
     missions = [_module_obj(p) for p in list(agent_cfg.mission_objectives or [])]
     missions = [m for m in missions if m is not None]
+    sat_isp_s = _resolve_satellite_isp_s(specs)
     return AgentRuntime(
         object_id=object_id,
         kind="satellite",
@@ -463,6 +478,7 @@ def _create_satellite_runtime(
         deploy_dv_body_m_s=np.array((agent_cfg.initial_state or {}).get("deploy_dv_body_m_s", [0.0, 0.0, 0.0]), dtype=float),
         mission_modules=missions,
         waiting_for_launch=False,
+        orbital_isp_s=(None if sat_isp_s <= 0.0 else float(sat_isp_s)),
     )
 
 
@@ -586,6 +602,7 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         deploy_dv_body_m_s=None,
         mission_modules=missions,
         waiting_for_launch=False,
+        orbital_isp_s=None,
     )
 
 
@@ -1031,6 +1048,57 @@ def _plot_outputs(
             fig.savefig(p, dpi=int(cfg.outputs.plots.get("dpi", 150)))
             out["rocket_fuel_remaining"] = str(p)
         if mode == "save":
+            plt.close(fig)
+
+    if "satellite_delta_v_remaining" in figure_ids:
+        import matplotlib.pyplot as plt
+
+        g0_m_s2 = 9.80665
+        section_by_id = {"chaser": cfg.chaser, "target": cfg.target}
+        fig, ax = plt.subplots(figsize=(10, 5))
+        plotted = False
+        for oid in ("chaser", "target"):
+            hist = truth_hist.get(oid)
+            sec = section_by_id.get(oid)
+            if hist is None or sec is None or hist.shape[0] == 0:
+                continue
+            specs = dict(getattr(sec, "specs", {}) or {})
+            dry_mass_kg = float(specs.get("dry_mass_kg", np.nan))
+            fuel_mass_kg = float(specs.get("fuel_mass_kg", np.nan))
+            if not (np.isfinite(dry_mass_kg) and np.isfinite(fuel_mass_kg)):
+                continue
+            if dry_mass_kg <= 0.0 or fuel_mass_kg < 0.0:
+                continue
+            m0 = dry_mass_kg + fuel_mass_kg
+            if m0 <= dry_mass_kg:
+                continue
+            isp_s = _resolve_satellite_isp_s(specs)
+            if isp_s <= 0.0:
+                continue
+            dv0_m_s = float(isp_s * g0_m_s2 * np.log(m0 / dry_mass_kg))
+            if dv0_m_s <= 0.0:
+                continue
+            m_hist = np.clip(np.array(hist[:, 13], dtype=float), dry_mass_kg, m0)
+            dv_rem_m_s = isp_s * g0_m_s2 * np.log(m_hist / dry_mass_kg)
+            pct = np.clip(100.0 * dv_rem_m_s / dv0_m_s, 0.0, 100.0)
+            ax.plot(t_s[: pct.size], pct, label=f"{oid}")
+            plotted = True
+
+        if plotted:
+            ax.set_ylim(-1.0, 101.0)
+            ax.set_xlabel("time (s)")
+            ax.set_ylabel("Delta-V Remaining (%)")
+            ax.set_title("Satellite Delta-V Remaining")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best")
+            fig.tight_layout()
+            p = outdir / "satellite_delta_v_remaining.png"
+            if mode in ("save", "both"):
+                fig.savefig(p, dpi=int(cfg.outputs.plots.get("dpi", 150)))
+                out["satellite_delta_v_remaining"] = str(p)
+            if mode == "save":
+                plt.close(fig)
+        else:
             plt.close(fig)
 
     thrust_hist_ric: dict[str, np.ndarray] = {}
@@ -1625,7 +1693,11 @@ def _run_single_config(
                         if (not use_integrated_cmd) and a.orbit_controller is not None and orb_belief is not None
                         else Command.zero()
                     )
-                    c_att = a.attitude_controller.act(att_belief, t_eval, 2.0) if a.attitude_controller is not None and att_belief is not None else Command.zero()
+                    c_att = (
+                        a.attitude_controller.act(att_belief, t_eval, 2.0)
+                        if (not use_integrated_cmd) and a.attitude_controller is not None and att_belief is not None
+                        else Command.zero()
+                    )
                     if use_integrated_cmd:
                         cmd = Command.zero()
                         if "thrust_eci_km_s2" in mission_out:
@@ -1648,7 +1720,23 @@ def _run_single_config(
                         "world_truth": world_truth_inner,
                         "atmosphere_model": cfg.simulator.dynamics.get("rocket", {}).get("atmosphere_model", "ussa1976"),
                     }
-                    tr_inner = a.dynamics.step(state=tr_inner, command=cmd, env=env_inner, dt_s=h)
+                    cmd_step = Command(
+                        thrust_eci_km_s2=np.array(cmd.thrust_eci_km_s2, dtype=float),
+                        torque_body_nm=np.array(cmd.torque_body_nm, dtype=float),
+                        mode_flags=dict(cmd.mode_flags or {}),
+                    )
+                    isp_s = a.orbital_isp_s
+                    if (
+                        isp_s is not None
+                        and float(isp_s) > 0.0
+                        and "delta_mass_kg" not in cmd_step.mode_flags
+                    ):
+                        g0_m_s2 = 9.80665
+                        a_mag_m_s2 = float(np.linalg.norm(cmd_step.thrust_eci_km_s2) * 1e3)
+                        thrust_n = float(max(tr_inner.mass_kg, 0.0) * a_mag_m_s2)
+                        mdot_kg_s = 0.0 if thrust_n <= 0.0 else float(thrust_n / (float(isp_s) * g0_m_s2))
+                        cmd_step.mode_flags["delta_mass_kg"] = float(max(mdot_kg_s, 0.0) * h)
+                    tr_inner = a.dynamics.step(state=tr_inner, command=cmd_step, env=env_inner, dt_s=h)
                     t_inner = t_eval
 
                 a.truth = tr_inner

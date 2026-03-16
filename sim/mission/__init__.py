@@ -1,4 +1,5 @@
 from sim.mission.modules import (
+    AttitudeDetumbleGateMissionModule,
     DefensiveRICAxisBurnMissionModule,
     EndStateManeuverMissionModule,
     IntegratedCommandMissionModule,
@@ -8,6 +9,7 @@ from sim.mission.modules import (
 )
 
 __all__ = [
+    "AttitudeDetumbleGateMissionModule",
     "SatelliteMissionModule",
     "DefensiveRICAxisBurnMissionModule",
     "RocketMissionModule",
