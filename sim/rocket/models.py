@@ -37,6 +37,7 @@ class RocketSimConfig:
     atmosphere_env: dict = field(default_factory=dict)
     inertia_kg_m2: np.ndarray = field(default_factory=lambda: np.diag([8.0e5, 8.0e5, 2.0e4]))
     attitude_substep_s: float = 0.02
+    attitude_mode: str = "dynamic"  # dynamic | cheater
 
     def __post_init__(self) -> None:
         if self.dt_s <= 0.0:
@@ -53,6 +54,9 @@ class RocketSimConfig:
             raise ValueError("attitude_substep_s must be positive.")
         if self.earth_impact_radius_km <= 0.0:
             raise ValueError("earth_impact_radius_km must be positive.")
+        mode = str(self.attitude_mode).strip().lower()
+        if mode not in ("dynamic", "cheater"):
+            raise ValueError("attitude_mode must be 'dynamic' or 'cheater'.")
 
 
 @dataclass(frozen=True)

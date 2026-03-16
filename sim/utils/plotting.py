@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Polygon, Rectangle
 
+from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
 from sim.utils.frames import dcm_to_euler_321, ric_dcm_ir_from_rv
 from sim.utils.ground_track import split_ground_track_dateline
 from sim.utils.quaternion import quaternion_to_dcm_bn
@@ -23,10 +24,21 @@ except Exception:
 PlotMode = Literal["interactive", "save", "both"]
 
 
+def _draw_earth_sphere_3d(ax: plt.Axes, radius_km: float = EARTH_RADIUS_KM) -> None:
+    u = np.linspace(0.0, 2.0 * np.pi, 48)
+    v = np.linspace(0.0, np.pi, 24)
+    x = radius_km * np.outer(np.cos(u), np.sin(v))
+    y = radius_km * np.outer(np.sin(u), np.sin(v))
+    z = radius_km * np.outer(np.ones_like(u), np.cos(v))
+    ax.plot_surface(x, y, z, rstride=1, cstride=1, color="#6EA8D9", alpha=0.18, linewidth=0.0, zorder=0)
+    ax.plot_wireframe(x, y, z, rstride=6, cstride=6, color="#5D86AA", alpha=0.15, linewidth=0.4, zorder=0)
+
+
 def plot_orbit_eci(truth_hist: np.ndarray, mode: PlotMode = "interactive", out_path: str | None = None) -> None:
     r = truth_hist[:, :3]
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection="3d")
+    _draw_earth_sphere_3d(ax)
     ax.plot(r[:, 0], r[:, 1], r[:, 2], linewidth=1.5)
     mask = np.all(np.isfinite(r), axis=1)
     idx = np.where(mask)[0]

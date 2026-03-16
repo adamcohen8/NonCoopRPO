@@ -242,9 +242,44 @@ simulator:
     rocket:
       enabled: true
       atmosphere_model: "ussa1976"
+      attitude_mode: "dynamic"  # dynamic | cheater
+      target_altitude_km: 500.0
+      target_altitude_tolerance_km: 25.0
+      target_eccentricity_max: 0.02
+      insertion_hold_time_s: 30.0
       aero_model_enabled: true
+      use_stagewise_aero_geometry: true
+      area_ref_m2: null
+      cd: 0.35
+      cr: 1.2
       max_q_limiter_enabled: true
       max_q_pa: 45000.0
+      min_throttle: 0.0
+      orbit_insertion_cutoff_enabled: false
+      cutoff_min_alt_km: 90.0
+      cutoff_min_periapsis_alt_km: 140.0
+      cutoff_apoapsis_margin_km: 10.0
+      cutoff_energy_margin_km2_s2: 0.01
+      cutoff_ecc_relax_factor: 3.0
+      cutoff_hard_escape_enabled: true
+      cutoff_near_escape_speed_margin_frac: 0.03
+      aero:
+        reference_area_m2: 10.0
+        reference_length_m: 30.0
+        cp_offset_body_m: [0.0, 0.0, 0.0]
+        cd_base: 0.20
+        cd_alpha2: 0.10
+        cd_supersonic: 0.28
+        transonic_peak_cd: 0.22
+        transonic_mach: 1.0
+        transonic_width: 0.22
+        cl_alpha_per_rad: 0.15
+        cy_beta_per_rad: 0.15
+        cm_alpha_per_rad: -0.02
+        cn_beta_per_rad: -0.02
+        cl_roll_per_rad: -0.01
+        alpha_limit_deg: 20.0
+        beta_limit_deg: 20.0
   environment:
     ephemeris_mode: "analytic_simple"
     use_spice: false

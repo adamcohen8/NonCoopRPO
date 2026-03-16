@@ -422,22 +422,30 @@ class RocketAscentSimulator:
             ctx=ctx,
         )
 
-        torque_cmd = np.zeros(3) if cmd.torque_body_nm_cmd is None else np.array(cmd.torque_body_nm_cmd, dtype=float)
-        torque_cmd = torque_cmd + torque_aero_body_nm
-        att_h = max(min(self.sim_cfg.attitude_substep_s, dt_s), 1e-4)
-        rem = dt_s
-        qn = s.attitude_quat_bn.copy()
-        wn = s.angular_rate_body_rad_s.copy()
-        while rem > 1e-12:
-            h = min(att_h, rem)
-            qn, wn = propagate_attitude_exponential_map(
-                quat_bn=qn,
-                omega_body_rad_s=wn,
-                inertia_kg_m2=self.sim_cfg.inertia_kg_m2,
-                torque_body_nm=torque_cmd,
-                dt_s=h,
-            )
-            rem -= h
+        mode = str(self.sim_cfg.attitude_mode).strip().lower()
+        if mode == "cheater":
+            if cmd.attitude_quat_bn_cmd is not None:
+                qn = normalize_quaternion(np.array(cmd.attitude_quat_bn_cmd, dtype=float))
+            else:
+                qn = s.attitude_quat_bn.copy()
+            wn = np.zeros(3, dtype=float)
+        else:
+            torque_cmd = np.zeros(3) if cmd.torque_body_nm_cmd is None else np.array(cmd.torque_body_nm_cmd, dtype=float)
+            torque_cmd = torque_cmd + torque_aero_body_nm
+            att_h = max(min(self.sim_cfg.attitude_substep_s, dt_s), 1e-4)
+            rem = dt_s
+            qn = s.attitude_quat_bn.copy()
+            wn = s.angular_rate_body_rad_s.copy()
+            while rem > 1e-12:
+                h = min(att_h, rem)
+                qn, wn = propagate_attitude_exponential_map(
+                    quat_bn=qn,
+                    omega_body_rad_s=wn,
+                    inertia_kg_m2=self.sim_cfg.inertia_kg_m2,
+                    torque_body_nm=torque_cmd,
+                    dt_s=h,
+                )
+                rem -= h
 
         s.position_eci_km = x_next[:3]
         s.velocity_eci_km_s = x_next[3:]

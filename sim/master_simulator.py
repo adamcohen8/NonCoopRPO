@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from presets.rockets import BASIC_TWO_STAGE_STACK
+from presets.rockets import BASIC_1ST_STAGE, BASIC_SSTO_ROCKET, BASIC_TWO_STAGE_STACK, RocketStackPreset
 from sim.config import SimulationScenarioConfig, load_simulation_yaml, scenario_config_from_dict, validate_scenario_plugins
 from sim.control.attitude.zero_torque import ZeroTorqueController
 from sim.control.orbit.zero_controller import ZeroController
@@ -27,6 +27,8 @@ from sim.knowledge.object_tracking import (
     TrackedObjectConfig,
 )
 from sim.rocket import OpenLoopPitchProgramGuidance, RocketAscentSimulator, RocketSimConfig, RocketState, RocketVehicleConfig
+from sim.rocket.aero import RocketAeroConfig
+from sim.rocket.guidance import MaxQThrottleLimiterGuidance, OrbitInsertionCutoffGuidance
 from sim.sensors.noisy_own_state import NoisyOwnStateSensor
 from sim.utils.io import write_json
 from sim.utils.plotting import plot_attitude_tumble, plot_orbit_eci
@@ -192,6 +194,34 @@ def _coe_to_rv_eci(
     r_eci = q_pf_to_eci @ r_pf
     v_eci = q_pf_to_eci @ v_pf
     return r_eci, v_eci
+
+
+def _orbital_elements_basic(r_km: np.ndarray, v_km_s: np.ndarray, mu_km3_s2: float = EARTH_MU_KM3_S2) -> tuple[float, float]:
+    r = float(np.linalg.norm(r_km))
+    v2 = float(np.dot(v_km_s, v_km_s))
+    if r <= 0.0:
+        return np.inf, np.inf
+    eps = 0.5 * v2 - mu_km3_s2 / r
+    a = np.inf if abs(eps) < 1e-14 else float(-mu_km3_s2 / (2.0 * eps))
+    h = np.cross(r_km, v_km_s)
+    e_vec = np.cross(v_km_s, h) / mu_km3_s2 - r_km / r
+    e = float(np.linalg.norm(e_vec))
+    return a, e
+
+
+def _resolve_rocket_stack(specs: dict[str, Any]) -> RocketStackPreset:
+    preset = str(specs.get("preset_stack", "BASIC_TWO_STAGE_STACK")).strip().upper()
+    ssto_stack = RocketStackPreset(name="Basic SSTO Stack", stages=(BASIC_SSTO_ROCKET,))
+    by_name: dict[str, RocketStackPreset] = {
+        "BASIC_TWO_STAGE_STACK": BASIC_TWO_STAGE_STACK,
+        "BASIC_SSTO_STACK": ssto_stack,
+        "BASIC_SSTO_ROCKET": ssto_stack,
+        "BASIC_1ST_STAGE_STACK": RocketStackPreset(name="Basic 1st Stage Stack", stages=(BASIC_1ST_STAGE,)),
+    }
+    if preset not in by_name:
+        valid = ", ".join(sorted(by_name.keys()))
+        raise ValueError(f"Unknown rocket.specs.preset_stack '{preset}'. Valid options: {valid}")
+    return by_name[preset]
 
 
 def _rv_from_initial_state(s0: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
@@ -439,23 +469,94 @@ def _create_satellite_runtime(
 def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
     rc = cfg.rocket
     r_init = dict(rc.initial_state or {})
+    r_specs = dict(rc.specs or {})
+    orbit_dyn = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
+    att_dyn = dict(cfg.simulator.dynamics.get("attitude", {}) or {})
+    rocket_dyn = dict(cfg.simulator.dynamics.get("rocket", {}) or {})
+    aero_dyn = dict(rocket_dyn.get("aero", {}) or {})
+    atmosphere_env = dict(cfg.simulator.environment.get("atmosphere_env", {}) or {})
+    aero_cfg = RocketAeroConfig(
+        enabled=bool(rocket_dyn.get("aero_model_enabled", True)),
+        reference_area_m2=float(aero_dyn.get("reference_area_m2", 10.0)),
+        reference_length_m=float(aero_dyn.get("reference_length_m", 30.0)),
+        cp_offset_body_m=np.array(aero_dyn.get("cp_offset_body_m", [0.0, 0.0, 0.0]), dtype=float),
+        cd_base=float(aero_dyn.get("cd_base", 0.20)),
+        cd_alpha2=float(aero_dyn.get("cd_alpha2", 0.10)),
+        cd_supersonic=float(aero_dyn.get("cd_supersonic", 0.28)),
+        transonic_peak_cd=float(aero_dyn.get("transonic_peak_cd", 0.22)),
+        transonic_mach=float(aero_dyn.get("transonic_mach", 1.0)),
+        transonic_width=float(aero_dyn.get("transonic_width", 0.22)),
+        cl_alpha_per_rad=float(aero_dyn.get("cl_alpha_per_rad", 0.15)),
+        cy_beta_per_rad=float(aero_dyn.get("cy_beta_per_rad", 0.15)),
+        cm_alpha_per_rad=float(aero_dyn.get("cm_alpha_per_rad", -0.02)),
+        cn_beta_per_rad=float(aero_dyn.get("cn_beta_per_rad", -0.02)),
+        cl_roll_per_rad=float(aero_dyn.get("cl_roll_per_rad", -0.01)),
+        alpha_limit_deg=float(aero_dyn.get("alpha_limit_deg", 20.0)),
+        beta_limit_deg=float(aero_dyn.get("beta_limit_deg", 20.0)),
+    )
     sim_cfg = RocketSimConfig(
         dt_s=float(cfg.simulator.dt_s),
         max_time_s=float(cfg.simulator.duration_s),
+        target_altitude_km=float(rocket_dyn.get("target_altitude_km", 400.0)),
+        target_altitude_tolerance_km=float(rocket_dyn.get("target_altitude_tolerance_km", 25.0)),
+        target_eccentricity_max=float(rocket_dyn.get("target_eccentricity_max", 0.02)),
+        insertion_hold_time_s=float(rocket_dyn.get("insertion_hold_time_s", 30.0)),
         launch_lat_deg=float(r_init.get("launch_lat_deg", 0.0)),
         launch_lon_deg=float(r_init.get("launch_lon_deg", 0.0)),
         launch_alt_km=float(r_init.get("launch_alt_km", 0.0)),
         launch_azimuth_deg=float(r_init.get("launch_azimuth_deg", 90.0)),
-        atmosphere_model=str(cfg.simulator.dynamics.get("rocket", {}).get("atmosphere_model", "ussa1976")),
+        atmosphere_model=str(rocket_dyn.get("atmosphere_model", "ussa1976")),
+        enable_drag=bool(orbit_dyn.get("drag", True)),
+        enable_srp=bool(orbit_dyn.get("srp", False)),
+        enable_j2=bool(orbit_dyn.get("j2", True)),
+        enable_j3=bool(orbit_dyn.get("j3", False)),
+        enable_j4=bool(orbit_dyn.get("j4", False)),
         terminate_on_earth_impact=bool(cfg.simulator.termination.get("earth_impact_enabled", True)),
         earth_impact_radius_km=float(cfg.simulator.termination.get("earth_radius_km", 6378.137)),
+        area_ref_m2=(None if rocket_dyn.get("area_ref_m2") is None else float(rocket_dyn.get("area_ref_m2"))),
+        use_stagewise_aero_geometry=bool(rocket_dyn.get("use_stagewise_aero_geometry", True)),
+        cd=float(rocket_dyn.get("cd", 0.35)),
+        cr=float(rocket_dyn.get("cr", 1.2)),
+        aero=aero_cfg,
+        atmosphere_env=atmosphere_env,
+        inertia_kg_m2=np.array(
+            (r_specs.get("mass_properties", {}) or {}).get(
+                "inertia_kg_m2",
+                [[8.0e5, 0.0, 0.0], [0.0, 8.0e5, 0.0], [0.0, 0.0, 2.0e4]],
+            ),
+            dtype=float,
+        ),
+        attitude_substep_s=float(
+            rocket_dyn.get(
+                "attitude_substep_s",
+                att_dyn.get("attitude_substep_s", 0.02),
+            )
+        ),
+        attitude_mode=str(rocket_dyn.get("attitude_mode", "dynamic")),
     )
     vehicle_cfg = RocketVehicleConfig(
-        stack=BASIC_TWO_STAGE_STACK,
-        payload_mass_kg=float(rc.specs.get("payload_mass_kg", 150.0)),
-        thrust_axis_body=np.array(rc.specs.get("thrust_axis_body", [1.0, 0.0, 0.0]), dtype=float),
+        stack=_resolve_rocket_stack(dict(rc.specs or {})),
+        payload_mass_kg=float(r_specs.get("payload_mass_kg", 150.0)),
+        thrust_axis_body=np.array(r_specs.get("thrust_axis_body", [1.0, 0.0, 0.0]), dtype=float),
     )
     guidance = _module_obj(rc.guidance) or OpenLoopPitchProgramGuidance()
+    if bool(rocket_dyn.get("orbit_insertion_cutoff_enabled", False)):
+        guidance = OrbitInsertionCutoffGuidance(
+            base_guidance=guidance,
+            min_cutoff_alt_km=float(rocket_dyn.get("cutoff_min_alt_km", 80.0)),
+            min_periapsis_alt_km=float(rocket_dyn.get("cutoff_min_periapsis_alt_km", 120.0)),
+            apoapsis_margin_km=float(rocket_dyn.get("cutoff_apoapsis_margin_km", 5.0)),
+            energy_margin_km2_s2=float(rocket_dyn.get("cutoff_energy_margin_km2_s2", 0.0)),
+            ecc_relax_factor=float(rocket_dyn.get("cutoff_ecc_relax_factor", 2.0)),
+            hard_escape_cutoff=bool(rocket_dyn.get("cutoff_hard_escape_enabled", True)),
+            near_escape_speed_margin_frac=float(rocket_dyn.get("cutoff_near_escape_speed_margin_frac", 0.03)),
+        )
+    if bool(rocket_dyn.get("max_q_limiter_enabled", False)):
+        guidance = MaxQThrottleLimiterGuidance(
+            base_guidance=guidance,
+            max_q_pa=float(rocket_dyn.get("max_q_pa", 45000.0)),
+            min_throttle=float(rocket_dyn.get("min_throttle", 0.0)),
+        )
     rsim = RocketAscentSimulator(sim_cfg=sim_cfg, vehicle_cfg=vehicle_cfg, guidance=guidance)
     rs = rsim.initial_state()
     rt = _rocket_state_to_truth(rs)
@@ -598,6 +699,7 @@ def _plot_outputs(
     truth_hist: dict[str, np.ndarray],
     thrust_hist: dict[str, np.ndarray],
     knowledge_hist: dict[str, dict[str, np.ndarray]],
+    rocket_metrics: dict[str, np.ndarray] | None,
     outdir: Path,
 ) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -803,6 +905,133 @@ def _plot_outputs(
             )
             if mode in ("save", "both"):
                 out[f"{oid}_traj_ric_curv_2d"] = str(p)
+
+    if "rocket_ascent_diagnostics" in figure_ids and "rocket" in truth_hist:
+        import matplotlib.pyplot as plt
+
+        x = truth_hist["rocket"]
+        r = x[:, 0:3]
+        v = x[:, 3:6]
+        m = x[:, 13]
+        alt_km = np.linalg.norm(r, axis=1) - EARTH_RADIUS_KM
+        speed_km_s = np.linalg.norm(v, axis=1)
+        q_dyn = np.zeros_like(t_s)
+        mach = np.zeros_like(t_s)
+        stage = np.zeros_like(t_s)
+        throttle = np.zeros_like(t_s)
+        if rocket_metrics is not None:
+            if "q_dyn_pa" in rocket_metrics:
+                q_dyn = np.array(rocket_metrics["q_dyn_pa"], dtype=float).reshape(-1)[: t_s.size]
+            if "mach" in rocket_metrics:
+                mach = np.array(rocket_metrics["mach"], dtype=float).reshape(-1)[: t_s.size]
+            if "stage_index" in rocket_metrics:
+                stage = np.array(rocket_metrics["stage_index"], dtype=float).reshape(-1)[: t_s.size]
+            if "throttle_cmd" in rocket_metrics:
+                throttle = np.array(rocket_metrics["throttle_cmd"], dtype=float).reshape(-1)[: t_s.size]
+        a_cmd = np.linalg.norm(np.nan_to_num(thrust_hist.get("rocket", np.zeros((t_s.size, 3))), nan=0.0), axis=1)
+
+        fig, ax = plt.subplots(4, 1, figsize=(11, 11), sharex=True)
+
+        ax0r = ax[0].twinx()
+        l00 = ax[0].plot(t_s, alt_km, label="altitude (km)", color="tab:blue")
+        l01 = ax0r.plot(t_s, speed_km_s, label="speed (km/s)", color="tab:orange")
+        ax[0].set_ylabel("altitude (km)")
+        ax0r.set_ylabel("speed (km/s)")
+        ax[0].set_title("Rocket Ascent: Altitude and Speed")
+        ax[0].grid(True, alpha=0.3)
+        ax[0].legend(l00 + l01, [ln.get_label() for ln in (l00 + l01)], loc="best")
+
+        ax1r = ax[1].twinx()
+        l10 = ax[1].plot(t_s, q_dyn, label="q_dyn (Pa)", color="tab:green")
+        l11 = ax1r.plot(t_s, mach, label="Mach", color="tab:red")
+        ax[1].set_ylabel("dynamic pressure (Pa)")
+        ax1r.set_ylabel("Mach")
+        ax[1].set_title("Dynamic Pressure and Mach")
+        ax[1].grid(True, alpha=0.3)
+        ax[1].legend(l10 + l11, [ln.get_label() for ln in (l10 + l11)], loc="best")
+
+        ax2r = ax[2].twinx()
+        l20 = ax[2].plot(t_s, m, label="mass (kg)", color="tab:purple")
+        l21 = ax2r.step(t_s, stage, where="post", label="stage index", color="tab:brown")
+        ax[2].set_ylabel("mass (kg)")
+        ax2r.set_ylabel("stage index")
+        ax[2].set_title("Mass and Stage")
+        ax[2].grid(True, alpha=0.3)
+        ax[2].legend(l20 + l21, [ln.get_label() for ln in (l20 + l21)], loc="best")
+
+        ax3r = ax[3].twinx()
+        l30 = ax[3].plot(t_s, throttle, label="throttle", color="tab:cyan")
+        l31 = ax3r.plot(t_s, a_cmd, label="|a_cmd| (km/s^2)", color="tab:gray")
+        ax[3].set_ylabel("throttle")
+        ax3r.set_ylabel("|a_cmd| (km/s^2)")
+        ax[3].set_xlabel("time (s)")
+        ax[3].set_title("Throttle and Commanded Acceleration")
+        ax[3].grid(True, alpha=0.3)
+        ax[3].legend(l30 + l31, [ln.get_label() for ln in (l30 + l31)], loc="best")
+        fig.tight_layout()
+        p = outdir / "rocket_ascent_diagnostics.png"
+        if mode in ("save", "both"):
+            fig.savefig(p, dpi=int(cfg.outputs.plots.get("dpi", 150)))
+            out["rocket_ascent_diagnostics"] = str(p)
+        if mode == "save":
+            plt.close(fig)
+
+    if "rocket_orbital_elements" in figure_ids and "rocket" in truth_hist:
+        import matplotlib.pyplot as plt
+
+        x = truth_hist["rocket"]
+        a_km = np.full(t_s.size, np.nan, dtype=float)
+        e = np.full(t_s.size, np.nan, dtype=float)
+        for k in range(min(t_s.size, x.shape[0])):
+            a_km[k], e[k] = _orbital_elements_basic(x[k, 0:3], x[k, 3:6], EARTH_MU_KM3_S2)
+
+        fig, ax = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+        ax[0].plot(t_s, a_km)
+        ax[0].set_ylabel("a (km)")
+        ax[0].set_title("Rocket Orbital Elements")
+        ax[0].grid(True, alpha=0.3)
+
+        ax[1].plot(t_s, e)
+        ax[1].set_ylabel("e")
+        ax[1].set_xlabel("time (s)")
+        ax[1].grid(True, alpha=0.3)
+        fig.tight_layout()
+        p = outdir / "rocket_orbital_elements.png"
+        if mode in ("save", "both"):
+            fig.savefig(p, dpi=int(cfg.outputs.plots.get("dpi", 150)))
+            out["rocket_orbital_elements"] = str(p)
+        if mode == "save":
+            plt.close(fig)
+
+    if "rocket_fuel_remaining" in figure_ids and "rocket" in truth_hist:
+        import matplotlib.pyplot as plt
+
+        x = truth_hist["rocket"]
+        m = np.array(x[:, 13], dtype=float).reshape(-1)
+        stack = _resolve_rocket_stack(dict(cfg.rocket.specs or {}))
+        payload_kg = float((cfg.rocket.specs or {}).get("payload_mass_kg", 150.0))
+        dry_total_kg = float(sum(float(s.dry_mass_kg) for s in stack.stages) + payload_kg)
+        prop0_kg = float(sum(float(s.propellant_mass_kg) for s in stack.stages))
+        if prop0_kg > 0.0:
+            fuel_rem_kg = np.clip(m - dry_total_kg, 0.0, prop0_kg)
+            fuel_pct = 100.0 * fuel_rem_kg / prop0_kg
+        else:
+            fuel_pct = np.zeros_like(m)
+
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        ax.plot(t_s, fuel_pct, linewidth=1.6)
+        ax.set_ylim(-1.0, 101.0)
+        ax.set_ylabel("Fuel Remaining (%)")
+        ax.set_xlabel("time (s)")
+        ax.set_title("Rocket Fuel Remaining")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        p = outdir / "rocket_fuel_remaining.png"
+        if mode in ("save", "both"):
+            fig.savefig(p, dpi=int(cfg.outputs.plots.get("dpi", 150)))
+            out["rocket_fuel_remaining"] = str(p)
+        if mode == "save":
+            plt.close(fig)
 
     thrust_hist_ric: dict[str, np.ndarray] = {}
     if ("control_thrust_ric" in figure_ids) or ("control_thrust_ric_multi" in figure_ids):
@@ -1070,6 +1299,63 @@ def _animate_outputs(
     return out
 
 
+def _fmt_float(x: float, digits: int = 3) -> str:
+    return f"{float(x):.{digits}f}"
+
+
+def _format_single_run_summary(summary: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append("")
+    lines.append("=" * 72)
+    lines.append("MASTER SIMULATION SUMMARY")
+    lines.append("=" * 72)
+    lines.append(f"Scenario   : {summary.get('scenario_name', 'unknown')}")
+    lines.append(f"Objects    : {', '.join(summary.get('objects', []))}")
+    lines.append(f"Samples    : {summary.get('samples', 0)}")
+    lines.append(
+        f"Timing     : dt={_fmt_float(float(summary.get('dt_s', 0.0)), 3)} s, "
+        f"duration={_fmt_float(float(summary.get('duration_s', 0.0)), 1)} s"
+    )
+    lines.append("-" * 72)
+    if bool(summary.get("terminated_early", False)):
+        lines.append(
+            "Termination: EARLY "
+            f"(reason={summary.get('termination_reason')}, "
+            f"t={summary.get('termination_time_s')}, "
+            f"object={summary.get('termination_object_id')})"
+        )
+    else:
+        lines.append("Termination: nominal (full duration reached)")
+    if "rocket_insertion_achieved" in summary:
+        ins_ok = bool(summary.get("rocket_insertion_achieved", False))
+        ins_t = summary.get("rocket_insertion_time_s")
+        if ins_ok:
+            lines.append(f"Insertion  : achieved at t={ins_t}")
+        else:
+            lines.append("Insertion  : not achieved")
+
+    thrust_stats = dict(summary.get("thrust_stats", {}) or {})
+    if thrust_stats:
+        lines.append("-" * 72)
+        lines.append("Thrust Stats")
+        lines.append(f"{'Object':<14}{'Burn Samples':>14}{'Max Accel (km/s^2)':>24}{'Total dV (m/s)':>18}")
+        for oid in sorted(thrust_stats.keys()):
+            s = dict(thrust_stats.get(oid, {}) or {})
+            lines.append(
+                f"{oid:<14}"
+                f"{int(s.get('burn_samples', 0)):>14d}"
+                f"{float(s.get('max_accel_km_s2', 0.0)):>24.3e}"
+                f"{float(s.get('total_dv_m_s', 0.0)):>18.3f}"
+            )
+
+    plot_outputs = dict(summary.get("plot_outputs", {}) or {})
+    anim_outputs = dict(summary.get("animation_outputs", {}) or {})
+    lines.append("-" * 72)
+    lines.append(f"Artifacts  : plots={len(plot_outputs)}  animations={len(anim_outputs)}")
+    lines.append("=" * 72)
+    return "\n".join(lines)
+
+
 def _run_single_config(
     cfg: SimulationScenarioConfig,
     step_callback: Callable[[int, int], None] | None = None,
@@ -1116,6 +1402,9 @@ def _run_single_config(
     thrust_hist = {aid: np.full((n, 3), np.nan) for aid in agents.keys()}
     torque_hist = {aid: np.full((n, 3), np.nan) for aid in agents.keys()}
     throttle_hist = {"rocket": np.full(n, np.nan)} if rocket is not None else {}
+    rocket_stage_hist = np.full(n, np.nan) if rocket is not None else None
+    rocket_q_dyn_hist = np.full(n, np.nan) if rocket is not None else None
+    rocket_mach_hist = np.full(n, np.nan) if rocket is not None else None
     knowledge_hist: dict[str, dict[str, np.ndarray]] = {}
     bridge_hist: dict[str, list[dict[str, Any]]] = {aid: [] for aid in agents.keys()}
     for aid, a in agents.items():
@@ -1129,6 +1418,9 @@ def _run_single_config(
     termination_time_s = None
     termination_object_id = None
     final_index = n - 1
+    rocket_inserted = False
+    rocket_insertion_time_s: float | None = None
+    rocket_insertion_hold_s = 0.0
 
     # Initial logging
     for aid, a in agents.items():
@@ -1138,6 +1430,12 @@ def _run_single_config(
         truth_hist[aid][0, :] = _state_truth_to_array(tr)
         if a.belief is not None:
             belief_hist[aid][0, :] = a.belief.state[:6]
+        if aid == "rocket" and a.rocket_state is not None and rocket_stage_hist is not None:
+            rocket_stage_hist[0] = float(a.rocket_state.active_stage_index)
+            if rocket_q_dyn_hist is not None:
+                rocket_q_dyn_hist[0] = float(getattr(a.rocket_state, "_last_step_q_dyn_pa", 0.0))
+            if rocket_mach_hist is not None:
+                rocket_mach_hist[0] = float(getattr(a.rocket_state, "_last_step_mach", 0.0))
 
     total_steps = max(n - 1, 0)
     if step_callback is not None:
@@ -1201,6 +1499,12 @@ def _run_single_config(
                     throttle_hist["rocket"][k] = 0.0
                     thrust_hist[aid][k + 1, :] = np.zeros(3, dtype=float)
                     torque_hist[aid][k + 1, :] = np.zeros(3, dtype=float)
+                    if rocket_stage_hist is not None:
+                        rocket_stage_hist[k + 1] = float(a.rocket_state.active_stage_index)
+                    if rocket_q_dyn_hist is not None:
+                        rocket_q_dyn_hist[k + 1] = 0.0
+                    if rocket_mach_hist is not None:
+                        rocket_mach_hist[k + 1] = 0.0
                 else:
                     cmd = a.rocket_guidance.command(a.rocket_state, a.rocket_sim.sim_cfg, a.rocket_sim.vehicle_cfg)
                     if "guidance_throttle" in mission_out:
@@ -1223,6 +1527,12 @@ def _run_single_config(
                     accel = (thrust_n / max(a.rocket_state.mass_kg, 1e-9)) * axis_eci / 1e3
                     thrust_hist[aid][k + 1, :] = accel
                     torque_hist[aid][k + 1, :] = np.array(a.rocket_state.angular_rate_body_rad_s, dtype=float) * 0.0
+                    if rocket_stage_hist is not None:
+                        rocket_stage_hist[k + 1] = float(a.rocket_state.active_stage_index)
+                    if rocket_q_dyn_hist is not None:
+                        rocket_q_dyn_hist[k + 1] = float(getattr(a.rocket_state, "_last_step_q_dyn_pa", 0.0))
+                    if rocket_mach_hist is not None:
+                        rocket_mach_hist[k + 1] = float(getattr(a.rocket_state, "_last_step_mach", 0.0))
             else:
                 orbit_cfg = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
                 att_cfg = dict(cfg.simulator.dynamics.get("attitude", {}) or {})
@@ -1389,6 +1699,29 @@ def _run_single_config(
             if terminated_early:
                 break
 
+        if rocket is not None and rocket.active and (not rocket.waiting_for_launch) and rocket.rocket_state is not None and rocket.rocket_sim is not None:
+            rs = rocket.rocket_state
+            sim_cfg = rocket.rocket_sim.sim_cfg
+            near_alt = abs((np.linalg.norm(rs.position_eci_km) - EARTH_RADIUS_KM) - float(sim_cfg.target_altitude_km)) <= float(sim_cfg.target_altitude_tolerance_km)
+            _, ecc_now = _orbital_elements_basic(np.array(rs.position_eci_km, dtype=float), np.array(rs.velocity_eci_km_s, dtype=float))
+            low_e = float(ecc_now) <= float(sim_cfg.target_eccentricity_max)
+            stages_done = int(rs.active_stage_index) >= len(rocket.rocket_sim.vehicle_cfg.stack.stages)
+            if near_alt and low_e and stages_done:
+                rocket_insertion_hold_s += float(dt)
+                if (not rocket_inserted) and rocket_insertion_hold_s >= float(sim_cfg.insertion_hold_time_s):
+                    rocket_inserted = True
+                    rocket_insertion_time_s = float(t_next)
+            else:
+                rocket_insertion_hold_s = 0.0
+
+            if rocket_inserted and str(cfg.simulator.scenario_type).strip().lower() == "rocket_ascent":
+                terminated_early = True
+                termination_reason = "rocket_orbit_insertion"
+                termination_time_s = float(rocket_insertion_time_s if rocket_insertion_time_s is not None else t_next)
+                termination_object_id = "rocket"
+                final_index = k + 1
+                break
+
     n_used = final_index + 1
     t_out = t_s[:n_used].copy()
     truth_out = {k: v[:n_used, :].copy() for k, v in truth_hist.items()}
@@ -1396,6 +1729,16 @@ def _run_single_config(
     thrust_out = {k: v[:n_used, :].copy() for k, v in thrust_hist.items()}
     torque_out = {k: v[:n_used, :].copy() for k, v in torque_hist.items()}
     knowledge_out = {obs: {tgt: arr[:n_used, :].copy() for tgt, arr in by_tgt.items()} for obs, by_tgt in knowledge_hist.items()}
+    rocket_metrics_out: dict[str, np.ndarray] = {}
+    if rocket is not None:
+        if rocket_stage_hist is not None:
+            rocket_metrics_out["stage_index"] = rocket_stage_hist[:n_used].copy()
+        if rocket_q_dyn_hist is not None:
+            rocket_metrics_out["q_dyn_pa"] = rocket_q_dyn_hist[:n_used].copy()
+        if rocket_mach_hist is not None:
+            rocket_metrics_out["mach"] = rocket_mach_hist[:n_used].copy()
+        if "rocket" in throttle_hist:
+            rocket_metrics_out["throttle_cmd"] = throttle_hist["rocket"][:n_used].copy()
 
     plot_outputs = _plot_outputs(
         cfg=cfg,
@@ -1403,6 +1746,7 @@ def _run_single_config(
         truth_hist=truth_out,
         thrust_hist=thrust_out,
         knowledge_hist=knowledge_out,
+        rocket_metrics=rocket_metrics_out if rocket_metrics_out else None,
         outdir=outdir,
     )
     if cfg.outputs.mode in ("interactive", "both") and bool(cfg.outputs.plots.get("enabled", True)):
@@ -1436,6 +1780,8 @@ def _run_single_config(
         "termination_reason": termination_reason,
         "termination_time_s": termination_time_s,
         "termination_object_id": termination_object_id,
+        "rocket_insertion_achieved": bool(rocket_inserted),
+        "rocket_insertion_time_s": rocket_insertion_time_s,
         "thrust_stats": thrust_stats,
         "plot_outputs": plot_outputs,
         "animation_outputs": animation_outputs,
@@ -1451,16 +1797,14 @@ def _run_single_config(
         "knowledge_by_observer": {o: {t: a.tolist() for t, a in bt.items()} for o, bt in knowledge_out.items()},
         "bridge_events_by_object": bridge_hist,
         "rocket_throttle_cmd": throttle_hist.get("rocket", np.array([])).tolist() if throttle_hist else [],
+        "rocket_metrics": {k: v.tolist() for k, v in rocket_metrics_out.items()},
     }
     if bool(cfg.outputs.stats.get("save_json", True)):
         write_json(str(outdir / "master_run_summary.json"), summary)
     if bool(cfg.outputs.stats.get("save_full_log", True)):
         write_json(str(outdir / "master_run_log.json"), payload)
     if bool(cfg.outputs.stats.get("print_summary", True)):
-        print("Master simulation summary:")
-        for k, v in summary.items():
-            if k != "plot_outputs":
-                print(f"  {k}: {v}")
+        print(_format_single_run_summary(summary))
     return payload
 
 

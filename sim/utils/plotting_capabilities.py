@@ -9,6 +9,7 @@ from matplotlib import animation
 from matplotlib.patches import Polygon, Rectangle
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
 from sim.dynamics.orbit.frames import eci_to_ecef
 from sim.dynamics.orbit.epoch import julian_date_to_datetime
 from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
@@ -245,6 +246,16 @@ def _first_last_finite_indices(r: np.ndarray) -> tuple[int | None, int | None]:
     return int(idx[0]), int(idx[-1])
 
 
+def _draw_earth_sphere_3d(ax: Any, radius_km: float = EARTH_RADIUS_KM) -> None:
+    u = np.linspace(0.0, 2.0 * np.pi, 48)
+    v = np.linspace(0.0, np.pi, 24)
+    x = radius_km * np.outer(np.cos(u), np.sin(v))
+    y = radius_km * np.outer(np.sin(u), np.sin(v))
+    z = radius_km * np.outer(np.ones_like(u), np.cos(v))
+    ax.plot_surface(x, y, z, rstride=1, cstride=1, color="#6EA8D9", alpha=0.18, linewidth=0.0, zorder=0)
+    ax.plot_wireframe(x, y, z, rstride=6, cstride=6, color="#5D86AA", alpha=0.15, linewidth=0.4, zorder=0)
+
+
 def plot_trajectory_frame(
     t_s: np.ndarray,
     truth_hist: np.ndarray,
@@ -271,6 +282,8 @@ def plot_trajectory_frame(
     else:
         ix, iy, iz = 0, 1, 2
         xlbl, ylbl, zlbl = "x", "y", "z"
+        if frame in ("eci", "ecef"):
+            _draw_earth_sphere_3d(ax)
     ax.plot(r[:, ix], r[:, iy], r[:, iz], linewidth=1.4)
     i0, i1 = _first_last_finite_indices(r)
     if i0 is not None:
@@ -304,6 +317,8 @@ def plot_multi_trajectory_frame(
     else:
         ix, iy, iz = 0, 1, 2
         xlbl, ylbl, zlbl = "x", "y", "z"
+        if frame in ("eci", "ecef"):
+            _draw_earth_sphere_3d(ax)
     for oid, hist in truth_hist_by_object.items():
         if hist.size == 0 or not np.any(np.isfinite(hist[:, 0])):
             continue
