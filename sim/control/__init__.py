@@ -1,5 +1,7 @@
 from sim.control.attitude import (
     PoseCommandGenerator,
+    ECIDetumblePDController,
+    RICDetumblePDController,
     QuaternionPDController,
     ReactionWheelPDController,
     ReactionWheelPIDController,
@@ -61,6 +63,8 @@ __all__ = [
     "StochasticPolicyController",
     "ZeroTorqueController",
     "PoseCommandGenerator",
+    "ECIDetumblePDController",
+    "RICDetumblePDController",
     "SnapAttitudeController",
     "SnapAndHoldRICAttitudeController",
     "SurrogateSnapECIController",

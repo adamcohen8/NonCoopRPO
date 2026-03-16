@@ -1,4 +1,5 @@
 from sim.control.attitude.baseline import QuaternionPDController, ReactionWheelPDController, ReactionWheelPIDController, SmallAngleLQRController
+from sim.control.attitude.detumble_pd import ECIDetumblePDController, RICDetumblePDController
 from sim.control.attitude.ric_lqr import RICFrameLQRController
 from sim.control.attitude.ric_pd import RICFramePDController
 from sim.control.attitude.ric_pid import RICFramePIDController
@@ -17,6 +18,8 @@ __all__ = [
     "QuaternionPDController",
     "ReactionWheelPDController",
     "ReactionWheelPIDController",
+    "ECIDetumblePDController",
+    "RICDetumblePDController",
     "SmallAngleLQRController",
     "RICFrameLQRController",
     "RICFramePDController",
