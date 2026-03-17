@@ -32,7 +32,7 @@ def _spherical_lat_lon_deg_from_eci(r_eci_km: np.ndarray, t_s: float, env: dict 
 
 def density_exponential(r_eci_km: np.ndarray, t_s: float) -> float:
     alt_km = _altitude_km_from_eci(r_eci_km, t_s)
-    if alt_km > 180.0:
+    if alt_km > 1000.0:
         return 0.0
     rho0 = 1.225
     h = 8.5

@@ -2,6 +2,7 @@ import unittest
 
 from sim.config import (
     build_default_ops_orbit_propagator,
+    default_env_for_profile,
     default_disturbance_config_for_profile,
     get_simulation_profile,
     profile_choices,
@@ -39,6 +40,12 @@ class SimulationProfilesTests(unittest.TestCase):
         p = get_simulation_profile("high_fidelity")
         self.assertEqual(p.orbit_integrator, "adaptive")
         self.assertEqual(p.kernel_integrator, "adaptive")
+
+    def test_default_env_does_not_pin_static_sun_moon_positions(self):
+        env = default_env_for_profile("ops")
+        self.assertNotIn("sun_pos_eci_km", env)
+        self.assertNotIn("moon_pos_eci_km", env)
+        self.assertIn("jd_utc_start", env)
 
 
 if __name__ == "__main__":

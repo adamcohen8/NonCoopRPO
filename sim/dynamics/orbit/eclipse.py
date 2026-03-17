@@ -3,15 +3,18 @@ from __future__ import annotations
 import numpy as np
 
 from sim.dynamics.orbit.environment import EARTH_RADIUS_KM, SUN_RADIUS_KM
-from sim.dynamics.orbit.epoch import AU_KM, resolved_jd_utc, sun_position_eci_km_simple
+from sim.dynamics.orbit.epoch import AU_KM, resolve_sun_moon_positions
 
 
 def _resolve_sun_position_eci_km(env: dict, t_s: float) -> np.ndarray:
     if "sun_pos_eci_km" in env:
         return np.array(env["sun_pos_eci_km"], dtype=float)
-    jd = resolved_jd_utc(env=env, t_s=t_s)
-    if jd is not None:
-        return sun_position_eci_km_simple(jd)
+    try:
+        sun, _ = resolve_sun_moon_positions(env, t_s)
+        if np.linalg.norm(sun) > 0.0:
+            return np.array(sun, dtype=float)
+    except RuntimeError:
+        pass
     sun_dir = np.array(env.get("sun_dir_eci", np.array([1.0, 0.0, 0.0], dtype=float)), dtype=float)
     n = float(np.linalg.norm(sun_dir))
     if n <= 0.0:

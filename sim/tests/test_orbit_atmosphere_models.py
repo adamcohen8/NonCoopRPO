@@ -3,8 +3,9 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from sim.dynamics.orbit.accelerations import accel_drag
+from sim.dynamics.orbit.accelerations import accel_drag, accel_srp
 from sim.dynamics.orbit.atmosphere import density_exponential, density_from_model, density_ussa1976
+from sim.dynamics.orbit.epoch import AU_KM
 from sim.dynamics.orbit.environment import EARTH_ROT_RATE_RAD_S
 
 
@@ -21,6 +22,11 @@ class TestOrbitAtmosphereModels(unittest.TestCase):
         rho_ussa = density_from_model("ussa1976", r, 0.0, env={})
         self.assertGreaterEqual(rho_exp, 0.0)
         self.assertGreaterEqual(rho_ussa, 0.0)
+
+    def test_density_exponential_remains_positive_above_180_km(self):
+        r_200km = np.array([6378.137 + 200.0, 0.0, 0.0], dtype=float)
+        rho = density_exponential(r_200km, t_s=0.0)
+        self.assertGreater(rho, 0.0)
 
     def test_density_nrlmsise00_callable_hook(self):
         calls = []
@@ -73,6 +79,28 @@ class TestOrbitAtmosphereModels(unittest.TestCase):
             env={"density_kg_m3": density_exponential(r, 0.0)},
         )
         self.assertTrue(np.linalg.norm(a) < 1e-14)
+
+    def test_srp_scales_with_sun_spacecraft_distance(self):
+        r = np.array([6878.137, 0.0, 0.0], dtype=float)
+        a_1au = accel_srp(
+            r_eci_km=r,
+            mass_kg=100.0,
+            area_m2=1.0,
+            cr=1.0,
+            t_s=0.0,
+            env={"sun_pos_eci_km": np.array([AU_KM, 0.0, 0.0]), "srp_shadow_model": "none"},
+        )
+        a_half_au = accel_srp(
+            r_eci_km=r,
+            mass_kg=100.0,
+            area_m2=1.0,
+            cr=1.0,
+            t_s=0.0,
+            env={"sun_pos_eci_km": np.array([0.5 * AU_KM, 0.0, 0.0]), "srp_shadow_model": "none"},
+        )
+        ratio = float(np.linalg.norm(a_half_au) / max(np.linalg.norm(a_1au), 1e-18))
+        self.assertGreater(ratio, 3.95)
+        self.assertLess(ratio, 4.05)
 
 
 if __name__ == "__main__":

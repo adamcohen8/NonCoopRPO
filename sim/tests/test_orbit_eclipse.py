@@ -42,6 +42,22 @@ class OrbitEclipseTests(unittest.TestCase):
         self.assertAlmostEqual(srp_shadow_factor(r_sc_eci_km=r1, t_s=0.0, env=env), 0.0)
         self.assertAlmostEqual(srp_shadow_factor(r_sc_eci_km=r2, t_s=0.0, env=env), 1.0)
 
+    def test_shadow_uses_ephemeris_mode_callable_when_sun_not_explicit(self):
+        def eph_cb(jd_utc: float, env: dict):
+            return {
+                "sun_pos_eci_km": np.array([-AU_KM, 0.0, 0.0], dtype=float),
+                "moon_pos_eci_km": np.array([384400.0, 0.0, 0.0], dtype=float),
+            }
+
+        env = {
+            "ephemeris_mode": "external",
+            "ephemeris_callable": eph_cb,
+            "jd_utc_start": 2451545.0,
+        }
+        r = np.array([6878.137, 0.0, 0.0])
+        f = srp_shadow_factor(r_sc_eci_km=r, t_s=0.0, env=env)
+        self.assertLess(f, 1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

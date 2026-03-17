@@ -6,6 +6,7 @@ import numpy as np
 
 from sim.dynamics.orbit.atmosphere import density_exponential
 from sim.dynamics.orbit.eclipse import srp_shadow_factor
+from sim.dynamics.orbit.epoch import AU_KM
 from sim.dynamics.orbit.environment import EARTH_J2, EARTH_J3, EARTH_J4, EARTH_RADIUS_KM, EARTH_ROT_RATE_RAD_S, SOLAR_PRESSURE_N_M2
 
 
@@ -146,6 +147,14 @@ def accel_srp(
     if area_eff_m2 <= 0.0:
         return np.zeros(3)
     sun_dir_eci = np.array(env.get("sun_dir_eci", np.array([1.0, 0.0, 0.0])), dtype=float)
+    distance_scale = 1.0
+    if "sun_pos_eci_km" in env:
+        sun_pos_eci_km = np.array(env["sun_pos_eci_km"], dtype=float).reshape(3)
+        rho_sc_to_sun = sun_pos_eci_km - np.array(r_eci_km, dtype=float).reshape(3)
+        rho_norm = float(np.linalg.norm(rho_sc_to_sun))
+        if rho_norm > 0.0:
+            sun_dir_eci = rho_sc_to_sun / rho_norm
+            distance_scale = float((AU_KM / rho_norm) ** 2)
     n = np.linalg.norm(sun_dir_eci)
     if n == 0.0:
         return np.zeros(3)
@@ -153,7 +162,7 @@ def accel_srp(
     shadow = srp_shadow_factor(r_sc_eci_km=r_eci_km, t_s=t_s, env=env)
     if shadow <= 0.0:
         return np.zeros(3)
-    force_n = SOLAR_PRESSURE_N_M2 * cr * area_eff_m2
+    force_n = SOLAR_PRESSURE_N_M2 * distance_scale * cr * area_eff_m2
     a_m_s2 = force_n / mass_kg
     return -(a_m_s2 / 1e3) * shadow * sun_dir_eci
 

@@ -1858,7 +1858,6 @@ def _run_single_config(
                     env_inner = {
                         **dict(cfg.simulator.environment or {}),
                         "world_truth": world_truth_inner,
-                        "atmosphere_model": cfg.simulator.dynamics.get("rocket", {}).get("atmosphere_model", "ussa1976"),
                     }
                     cmd_step = Command(
                         thrust_eci_km_s2=np.array(cmd.thrust_eci_km_s2, dtype=float),

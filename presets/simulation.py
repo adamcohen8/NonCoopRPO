@@ -176,14 +176,22 @@ def build_sim_object_from_presets(
     ctrl = ZeroController(simulated_runtime_ms=0.0) if controller is None else controller
 
     orbital_act = OrbitalActuator(lag_tau_s=0.0)
-    rw_torque = np.zeros(3)
-    rw_momentum = np.zeros(3)
-    for wheel in rw_assembly.wheels:
-        axis = np.abs(np.array(wheel.axis_body, dtype=float))
-        rw_torque += axis * wheel.max_torque_nm
-        rw_momentum += axis * wheel.max_momentum_nms
+    rw_axes = np.column_stack([np.array(wheel.axis_body, dtype=float).reshape(3) for wheel in rw_assembly.wheels])
+    rw_torque = np.array([float(wheel.max_torque_nm) for wheel in rw_assembly.wheels], dtype=float)
+    rw_momentum = np.array([float(wheel.max_momentum_nms) for wheel in rw_assembly.wheels], dtype=float)
+    rw_inertia = np.full(rw_torque.size, 5e-4, dtype=float)
+    rw_speed = np.divide(rw_momentum, rw_inertia, out=np.full_like(rw_momentum, np.inf), where=rw_inertia > 0.0)
     attitude_act = AttitudeActuator(
-        reaction_wheels=ReactionWheelLimits(max_torque_nm=rw_torque, max_momentum_nms=rw_momentum)
+        reaction_wheels=ReactionWheelLimits(
+            max_torque_nm=rw_torque,
+            max_momentum_nms=rw_momentum,
+            wheel_axes_body=rw_axes,
+            wheel_inertia_kg_m2=rw_inertia,
+            max_speed_rad_s=rw_speed,
+            torque_time_constant_s=0.02,
+            viscous_friction_nms=0.0,
+            coulomb_friction_nm=0.0,
+        )
     )
     actuator = CombinedActuator(orbital=orbital_act, attitude=attitude_act)
 

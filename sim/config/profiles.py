@@ -116,9 +116,6 @@ def default_env_for_profile(profile_name: str) -> dict:
         "atmosphere_model": profile.atmosphere_model,
         "jd_utc_start": jd_now,
         "ephemeris_mode": "analytic_enhanced",
-        "sun_dir_eci": np.array([1.0, 0.0, 0.0], dtype=float),
-        "sun_pos_eci_km": np.array([149597870.7, 0.0, 0.0], dtype=float),
-        "moon_pos_eci_km": np.array([384400.0, 0.0, 0.0], dtype=float),
     }
 
 
