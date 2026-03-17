@@ -1049,6 +1049,139 @@ def animate_multi_rectangular_prism_ric_curv(
     plt.close(fig)
 
 
+def animate_side_by_side_rectangular_prism_ric_attitude(
+    t_s: np.ndarray,
+    truth_hist_by_object: dict[str, np.ndarray],
+    *,
+    left_object_id: str = "target",
+    right_object_id: str = "chaser",
+    prism_dims_m_by_object: dict[str, list[float] | tuple[float, float, float]] | None = None,
+    mode: PlotMode = "interactive",
+    out_path: str | None = None,
+    fps: float = 30.0,
+    speed_multiple: float = 10.0,
+    frame_stride: int = 1,
+) -> None:
+    left_hist = np.array(truth_hist_by_object.get(left_object_id, np.empty((0, 14))), dtype=float)
+    right_hist = np.array(truth_hist_by_object.get(right_object_id, np.empty((0, 14))), dtype=float)
+    if left_hist.ndim != 2 or right_hist.ndim != 2:
+        return
+    n_frames = int(min(t_s.size, left_hist.shape[0], right_hist.shape[0]))
+    if n_frames <= 0:
+        return
+    t_loc = np.array(t_s[:n_frames], dtype=float)
+    left_hist = left_hist[:n_frames, :]
+    right_hist = right_hist[:n_frames, :]
+
+    dims_map = dict(prism_dims_m_by_object or {})
+    default_dims_m = np.array([4.0, 2.0, 2.0], dtype=float)
+    faces = [
+        [0, 1, 3, 2],
+        [4, 5, 7, 6],
+        [0, 1, 5, 4],
+        [2, 3, 7, 6],
+        [0, 2, 6, 4],
+        [1, 3, 7, 5],
+    ]
+
+    def _dims_km(oid: str) -> np.ndarray:
+        dims = np.array(dims_map.get(oid, default_dims_m), dtype=float).reshape(-1)
+        if dims.size != 3:
+            dims = default_dims_m.copy()
+        return dims * 1e-3
+
+    def _verts_body_km(oid: str) -> np.ndarray:
+        lx_km, ly_km, lz_km = _dims_km(oid).tolist()
+        return np.array(
+            [
+                [-0.5 * lx_km, -0.5 * ly_km, -0.5 * lz_km],
+                [-0.5 * lx_km, -0.5 * ly_km, +0.5 * lz_km],
+                [-0.5 * lx_km, +0.5 * ly_km, -0.5 * lz_km],
+                [-0.5 * lx_km, +0.5 * ly_km, +0.5 * lz_km],
+                [+0.5 * lx_km, -0.5 * ly_km, -0.5 * lz_km],
+                [+0.5 * lx_km, -0.5 * ly_km, +0.5 * lz_km],
+                [+0.5 * lx_km, +0.5 * ly_km, -0.5 * lz_km],
+                [+0.5 * lx_km, +0.5 * ly_km, +0.5 * lz_km],
+            ],
+            dtype=float,
+        )
+
+    left_verts_body = _verts_body_km(left_object_id)
+    right_verts_body = _verts_body_km(right_object_id)
+    lim_km = float(max(np.max(np.abs(left_verts_body)), np.max(np.abs(right_verts_body)), 1e-3)) * 2.2
+
+    def _body_to_ric_dcm(hist: np.ndarray) -> np.ndarray:
+        c_arr = np.full((n_frames, 3, 3), np.nan, dtype=float)
+        for k in range(n_frames):
+            r = hist[k, 0:3]
+            v = hist[k, 3:6]
+            q_bn = hist[k, 6:10]
+            if not (np.all(np.isfinite(r)) and np.all(np.isfinite(v)) and np.all(np.isfinite(q_bn))):
+                continue
+            c_bn = quaternion_to_dcm_bn(q_bn)
+            c_ir = ric_dcm_ir_from_rv(r, v)
+            c_arr[k, :, :] = c_ir.T @ c_bn.T  # body -> local RIC
+        return c_arr
+
+    c_left = _body_to_ric_dcm(left_hist)
+    c_right = _body_to_ric_dcm(right_hist)
+
+    fig = plt.figure(figsize=(12, 6))
+    ax_left = fig.add_subplot(1, 2, 1, projection="3d")
+    ax_right = fig.add_subplot(1, 2, 2, projection="3d")
+    for ax, title in ((ax_left, left_object_id), (ax_right, right_object_id)):
+        ax.set_xlim(-lim_km, lim_km)
+        ax.set_ylim(-lim_km, lim_km)
+        ax.set_zlim(-lim_km, lim_km)
+        ax.set_box_aspect((1, 1, 1))
+        ax.set_xlabel("I (km)")
+        ax.set_ylabel("R (km)")
+        ax.set_zlabel("C (km)")
+        ax.set_title(f"{title} Body in Local RIC")
+
+    poly_left = Poly3DCollection([], alpha=0.4, facecolor="#4C9F70", edgecolor="k", linewidth=0.7)
+    poly_right = Poly3DCollection([], alpha=0.4, facecolor="#2E86C1", edgecolor="k", linewidth=0.7)
+    ax_left.add_collection3d(poly_left)
+    ax_right.add_collection3d(poly_right)
+
+    frame_ids = np.arange(0, n_frames, max(int(frame_stride), 1), dtype=int)
+    if frame_ids.size == 0 or frame_ids[-1] != (n_frames - 1):
+        frame_ids = np.append(frame_ids, n_frames - 1)
+
+    def _frame_verts(c_arr: np.ndarray, verts_body: np.ndarray, i_frame: int) -> list[np.ndarray] | None:
+        c_rb = c_arr[i_frame, :, :]
+        if not np.all(np.isfinite(c_rb)):
+            return None
+        verts = (c_rb @ verts_body.T).T
+        return [verts[idx, :] for idx in faces]
+
+    def update(i: int):
+        k = int(frame_ids[i])
+        lv = _frame_verts(c_left, left_verts_body, k)
+        rv = _frame_verts(c_right, right_verts_body, k)
+        poly_left.set_verts([] if lv is None else lv)
+        poly_right.set_verts([] if rv is None else rv)
+        fig.suptitle(f"Side-by-Side Local RIC Attitude Animation (t={t_loc[k]:.1f}s)")
+        return [poly_left, poly_right]
+
+    dt = float(np.median(np.diff(t_loc))) if t_loc.size > 1 else 1.0
+    interval_ms = 1000.0 * dt / max(speed_multiple, 1e-6)
+    ani = animation.FuncAnimation(fig, update, frames=int(frame_ids.size), interval=interval_ms, blit=False)
+
+    if mode in ("save", "both"):
+        if out_path is None:
+            raise ValueError("out_path is required when mode is 'save' or 'both'.")
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ani.save(str(p), fps=max(float(fps), 1.0))
+        except Exception as exc:
+            print(f"Warning: failed to save animation ({exc}).")
+    if mode in ("interactive", "both"):
+        plt.show()
+    plt.close(fig)
+
+
 # Legacy plotting API re-export wrappers to keep one plotting surface.
 def plot_orbit_eci(*args, **kwargs):
     return plot_orbit_eci_legacy(*args, **kwargs)

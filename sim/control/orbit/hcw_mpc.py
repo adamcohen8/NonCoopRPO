@@ -48,6 +48,7 @@ class HCWRelativeOrbitMPCController(Controller):
     line_search_min_alpha: float = 1e-3
     min_cost_improvement: float = 1e-6
     trust_region_step_km_s2: float = 1e-5
+    debug_store_iteration_history: bool = False
 
     _u_guess_ric: np.ndarray = field(init=False, repr=False)
     _u_prev_ric: np.ndarray = field(init=False, repr=False)
@@ -272,11 +273,13 @@ class HCWRelativeOrbitMPCController(Controller):
         reason = "max_iterations_reached"
         timed_out = False
         trust_step = float(self.trust_region_step_km_s2)
+        keep_hist = bool(self.debug_store_iteration_history)
 
         j = self._cost(x_rel0=x_rel0, u_seq=u, h_steps=h_steps)
         eval_count += 1
-        cost_hist.append(float(j))
-        first_u_hist.append(np.array(u[0], dtype=float).tolist())
+        if keep_hist:
+            cost_hist.append(float(j))
+            first_u_hist.append(np.array(u[0], dtype=float).tolist())
 
         for it in range(self.max_iterations):
             if perf_counter() >= deadline_s:
@@ -337,9 +340,10 @@ class HCWRelativeOrbitMPCController(Controller):
                 if jc < (j - self.min_cost_improvement):
                     u = cand
                     j = jc
-                    cost_hist.append(float(j))
-                    first_u_hist.append(np.array(u[0], dtype=float).tolist())
-                    accepted_alpha_hist.append(float(alpha))
+                    if keep_hist:
+                        cost_hist.append(float(j))
+                        first_u_hist.append(np.array(u[0], dtype=float).tolist())
+                        accepted_alpha_hist.append(float(alpha))
                     improved = True
                     break
                 alpha *= self.line_search_shrink
@@ -353,18 +357,20 @@ class HCWRelativeOrbitMPCController(Controller):
                     continue
                 break
 
-        return u, {
+        out: dict[str, float | int | str | list[float] | list[list[float]]] = {
             "iterations": int(iters),
             "cost": float(j),
             "cost_evals": int(eval_count),
             "termination_reason": reason,
             "deadline_hit": bool(timed_out),
             "final_trust_step_km_s2": float(trust_step),
-            "grad_norm_history": grad_norm_hist,
-            "accepted_alpha_history": accepted_alpha_hist,
-            "cost_history": cost_hist,
-            "first_u_ric_history": first_u_hist,
         }
+        if keep_hist:
+            out["grad_norm_history"] = grad_norm_hist
+            out["accepted_alpha_history"] = accepted_alpha_hist
+            out["cost_history"] = cost_hist
+            out["first_u_ric_history"] = first_u_hist
+        return u, out
 
     def _cost(self, *, x_rel0: np.ndarray, u_seq: np.ndarray, h_steps: int) -> float:
         x = np.array(x_rel0, dtype=float).reshape(6)
@@ -396,7 +402,15 @@ class HCWRelativeOrbitMPCController(Controller):
 
     def _project_sequence(self, u_seq: np.ndarray, *, h_steps: int) -> np.ndarray:
         u = np.array(u_seq, dtype=float).reshape(h_steps, 3)
-        return np.vstack([self._project_accel(u[k]) for k in range(h_steps)])
+        if self.max_accel_km_s2 == 0.0:
+            return np.zeros_like(u)
+        if self.max_accel_km_s2 < 0.0:
+            return u
+        norms = np.linalg.norm(u, axis=1, keepdims=True)
+        scale = np.ones_like(norms)
+        mask = norms > self.max_accel_km_s2
+        scale[mask] = self.max_accel_km_s2 / np.maximum(norms[mask], 1e-16)
+        return u * scale
 
     def _shift_sequence(self, u_seq: np.ndarray) -> np.ndarray:
         h_steps = int(np.array(u_seq, dtype=float).reshape(-1, 3).shape[0])

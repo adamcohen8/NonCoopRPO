@@ -151,6 +151,16 @@ python -m pip install -r requirements.txt
 python examples/Full_Framework_Demo.py
 ```
 
+### 2a) Headless automation/CI run
+
+For non-interactive environments, use the automation smoke config:
+
+```bash
+python run_simulation.py --config configs/automation_smoke.yaml
+```
+
+`run_master_simulation` also auto-switches `outputs.mode: interactive` to `save` when `SIM_AUTOMATION=1` or `CI=1`.
+
 ### 2b) Use fidelity profiles
 
 Most modern demos now support a shared profile selector:
@@ -264,6 +274,7 @@ Use this as the base for extending to real cFS message interfaces.
 - SRP eclipse/shadow gating is modeled with configurable shadow mode (`conical`, `cylindrical`, or `none`).
 - Some validation differences are expected from integrator and model-convention differences.
 - In this environment, use the project venv to avoid NumPy/Matplotlib ABI conflicts.
+- Master simulation summaries now include `attitude_guardrail_stats` so numerical clamp/sanitize events are visible in run outputs.
 
 ## Roadmap Context
 

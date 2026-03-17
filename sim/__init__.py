@@ -1,3 +1,5 @@
+import importlib
+
 from sim.actuators import (
     ActuatorLimits,
     AttitudeActuator,
@@ -159,17 +161,6 @@ from sim.knowledge import (
     ObjectKnowledgeBase,
     TrackedObjectConfig,
 )
-from sim.scenarios import (
-    ASATPhasedScenarioConfig,
-    AgentStrategyConfig,
-    KnowledgeGateConfig,
-    MonteCarloConfig,
-    run_asat_phased_engagement,
-    run_free_tumble_one_orbit,
-    run_free_tumble_one_orbit_ric,
-    run_full_stack_demo,
-    run_monte_carlo,
-)
 from sim.rocket import (
     GuidanceCommand,
     HoldAttitudeGuidance,
@@ -195,24 +186,7 @@ from sim.sensors import (
     SensorNoiseConfig,
 )
 from sim.master_simulator import run_master_simulation
-from sim.utils import (
-    animate_ground_track,
-    animate_multi_ground_track,
-    animate_multi_rectangular_prism_ric_curv,
-    animate_rectangular_prism_attitude,
-    animate_trajectory_frame,
-    ground_track_from_eci_history,
-    plot_body_rates,
-    plot_control_commands,
-    plot_ground_track,
-    plot_multi_control_commands,
-    plot_multi_ric_2d_projections,
-    plot_multi_trajectory_frame,
-    plot_quaternion_components,
-    plot_ric_2d_projections,
-    plot_trajectory_frame,
-    split_ground_track_dateline,
-)
+from sim.utils.ground_track import ground_track_from_eci_history, split_ground_track_dateline
 
 __all__ = [
     "ActuatorLimits",
@@ -417,3 +391,40 @@ __all__ = [
     "MaxQThrottleLimiterGuidance",
     "HoldAttitudeGuidance",
 ]
+
+_LAZY_IMPORTS = {
+    "ASATPhasedScenarioConfig": ("sim.scenarios", "ASATPhasedScenarioConfig"),
+    "AgentStrategyConfig": ("sim.scenarios", "AgentStrategyConfig"),
+    "KnowledgeGateConfig": ("sim.scenarios", "KnowledgeGateConfig"),
+    "MonteCarloConfig": ("sim.scenarios", "MonteCarloConfig"),
+    "run_asat_phased_engagement": ("sim.scenarios", "run_asat_phased_engagement"),
+    "run_free_tumble_one_orbit": ("sim.scenarios", "run_free_tumble_one_orbit"),
+    "run_free_tumble_one_orbit_ric": ("sim.scenarios", "run_free_tumble_one_orbit_ric"),
+    "run_full_stack_demo": ("sim.scenarios", "run_full_stack_demo"),
+    "run_monte_carlo": ("sim.scenarios", "run_monte_carlo"),
+    "plot_ground_track": ("sim.utils", "plot_ground_track"),
+    "plot_quaternion_components": ("sim.utils", "plot_quaternion_components"),
+    "plot_body_rates": ("sim.utils", "plot_body_rates"),
+    "plot_trajectory_frame": ("sim.utils", "plot_trajectory_frame"),
+    "plot_multi_trajectory_frame": ("sim.utils", "plot_multi_trajectory_frame"),
+    "plot_ric_2d_projections": ("sim.utils", "plot_ric_2d_projections"),
+    "plot_multi_ric_2d_projections": ("sim.utils", "plot_multi_ric_2d_projections"),
+    "plot_control_commands": ("sim.utils", "plot_control_commands"),
+    "plot_multi_control_commands": ("sim.utils", "plot_multi_control_commands"),
+    "animate_rectangular_prism_attitude": ("sim.utils", "animate_rectangular_prism_attitude"),
+    "animate_multi_rectangular_prism_ric_curv": ("sim.utils", "animate_multi_rectangular_prism_ric_curv"),
+    "animate_trajectory_frame": ("sim.utils", "animate_trajectory_frame"),
+    "animate_ground_track": ("sim.utils", "animate_ground_track"),
+    "animate_multi_ground_track": ("sim.utils", "animate_multi_ground_track"),
+}
+
+
+def __getattr__(name: str):
+    target = _LAZY_IMPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module 'sim' has no attribute '{name}'")
+    module_name, attr_name = target
+    module = importlib.import_module(module_name)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value

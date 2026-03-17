@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 import importlib
+import logging
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +17,7 @@ from sim.control.attitude.zero_torque import ZeroTorqueController
 from sim.control.orbit.zero_controller import ZeroController
 from sim.core.models import Command, Measurement, StateBelief, StateTruth
 from sim.dynamics.attitude.disturbances import DisturbanceTorqueConfig, DisturbanceTorqueModel
+from sim.dynamics.attitude.rigid_body import get_attitude_guardrail_stats, reset_attitude_guardrail_stats
 from sim.dynamics.model import OrbitalAttitudeDynamics
 from sim.dynamics.orbit.accelerations import OrbitContext
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
@@ -32,23 +35,46 @@ from sim.rocket.aero import RocketAeroConfig
 from sim.rocket.guidance import MaxQThrottleLimiterGuidance, OrbitInsertionCutoffGuidance
 from sim.sensors.noisy_own_state import NoisyOwnStateSensor
 from sim.utils.io import write_json
-from sim.utils.plotting import plot_attitude_tumble, plot_orbit_eci
-from sim.utils.plotting_capabilities import (
-    animate_ground_track,
-    animate_multi_ground_track,
-    animate_multi_rectangular_prism_ric_curv,
-    plot_body_rates,
-    plot_control_commands,
-    plot_multi_control_commands,
-    plot_multi_ric_2d_projections,
-    plot_multi_trajectory_frame,
-    plot_quaternion_components,
-    plot_ric_2d_projections,
-    plot_trajectory_frame,
-)
 from sim.utils.ground_track import ground_track_from_eci_history
 from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
 from sim.utils.quaternion import quaternion_to_dcm_bn
+
+logger = logging.getLogger(__name__)
+
+
+def _load_plotting_functions() -> dict[str, Any]:
+    from sim.utils.plotting import plot_attitude_tumble, plot_orbit_eci
+    from sim.utils.plotting_capabilities import (
+        animate_ground_track,
+        animate_multi_ground_track,
+        animate_multi_rectangular_prism_ric_curv,
+        animate_side_by_side_rectangular_prism_ric_attitude,
+        plot_body_rates,
+        plot_control_commands,
+        plot_multi_control_commands,
+        plot_multi_ric_2d_projections,
+        plot_multi_trajectory_frame,
+        plot_quaternion_components,
+        plot_ric_2d_projections,
+        plot_trajectory_frame,
+    )
+
+    return {
+        "plot_orbit_eci": plot_orbit_eci,
+        "plot_attitude_tumble": plot_attitude_tumble,
+        "plot_body_rates": plot_body_rates,
+        "plot_control_commands": plot_control_commands,
+        "plot_multi_control_commands": plot_multi_control_commands,
+        "plot_multi_ric_2d_projections": plot_multi_ric_2d_projections,
+        "plot_multi_trajectory_frame": plot_multi_trajectory_frame,
+        "plot_quaternion_components": plot_quaternion_components,
+        "plot_ric_2d_projections": plot_ric_2d_projections,
+        "plot_trajectory_frame": plot_trajectory_frame,
+        "animate_ground_track": animate_ground_track,
+        "animate_multi_ground_track": animate_multi_ground_track,
+        "animate_multi_rectangular_prism_ric_curv": animate_multi_rectangular_prism_ric_curv,
+        "animate_side_by_side_rectangular_prism_ric_attitude": animate_side_by_side_rectangular_prism_ric_attitude,
+    }
 
 
 def _state_truth_to_array(truth: StateTruth) -> np.ndarray:
@@ -85,6 +111,21 @@ def _rocket_state_to_truth(s: RocketState) -> StateTruth:
     )
 
 
+def _quat_error_angle_deg(q_des: np.ndarray, q_cur: np.ndarray) -> float:
+    qd = np.array(q_des, dtype=float).reshape(-1)
+    qc = np.array(q_cur, dtype=float).reshape(-1)
+    if qd.size != 4 or qc.size != 4:
+        return float("nan")
+    nd = float(np.linalg.norm(qd))
+    nc = float(np.linalg.norm(qc))
+    if nd <= 0.0 or nc <= 0.0:
+        return float("nan")
+    qd /= nd
+    qc /= nc
+    dot = float(np.clip(np.dot(qd, qc), -1.0, 1.0))
+    return float(np.degrees(2.0 * np.arccos(abs(dot))))
+
+
 def _module_obj(pointer) -> Any | None:
     if pointer is None:
         return None
@@ -99,7 +140,8 @@ def _module_obj(pointer) -> Any | None:
             fn = getattr(mod, pointer.function)
             return fn
         return mod
-    except Exception:
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        logger.warning("Failed to construct plugin pointer %r: %s", pointer, exc)
         return None
 
 
@@ -291,6 +333,15 @@ def _resolve_satellite_isp_s(specs: dict[str, Any]) -> float:
     return 0.0
 
 
+def _resolve_satellite_inertia_kg_m2(specs: dict[str, Any]) -> np.ndarray:
+    mp = dict(specs.get("mass_properties", {}) or {})
+    if "inertia_kg_m2" in mp:
+        I = np.array(mp.get("inertia_kg_m2"), dtype=float)
+        if I.shape == (3, 3) and np.all(np.isfinite(I)):
+            return I
+    return np.diag([120.0, 100.0, 80.0])
+
+
 def _resolve_chaser_relative_ric_init(initial_state: dict[str, Any]) -> tuple[np.ndarray, str] | None:
     s0 = dict(initial_state or {})
     rel_block = s0.get("relative_to_target_ric")
@@ -414,6 +465,7 @@ def _create_satellite_runtime(
 ) -> AgentRuntime:
     truth = _default_truth_from_agent(agent_cfg, t_s=0.0)
     specs = dict(agent_cfg.specs or {})
+    inertia_kg_m2 = _resolve_satellite_inertia_kg_m2(specs)
     belief = StateBelief(state=np.hstack((truth.position_eci_km, truth.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=0.0)
     noise = dict((agent_cfg.knowledge or {}).get("sensor_error", {}) or {})
     pos_sigma = float(np.array(noise.get("pos_sigma_km", [0.001])).reshape(-1)[0])
@@ -436,7 +488,7 @@ def _create_satellite_runtime(
     att_ctrl = _RateLimitedController(base=att_ctrl_base, period_s=att_ctrl_period_s)
     dmodel = DisturbanceTorqueModel(
         mu_km3_s2=EARTH_MU_KM3_S2,
-        inertia_kg_m2=np.diag([120.0, 100.0, 80.0]),
+        inertia_kg_m2=inertia_kg_m2,
         config=DisturbanceTorqueConfig(
             use_gravity_gradient=bool(dist_cfg.get("gravity_gradient", False)),
             use_magnetic=bool(dist_cfg.get("magnetic", False)),
@@ -446,7 +498,7 @@ def _create_satellite_runtime(
     )
     dyn = OrbitalAttitudeDynamics(
         mu_km3_s2=EARTH_MU_KM3_S2,
-        inertia_kg_m2=np.diag([120.0, 100.0, 80.0]),
+        inertia_kg_m2=inertia_kg_m2,
         disturbance_model=dmodel if bool(att_cfg.get("enabled", True)) else None,
         orbit_substep_s=float(orbit_cfg["orbit_substep_s"]) if orbit_cfg.get("orbit_substep_s") is not None else None,
         attitude_substep_s=float(att_cfg["attitude_substep_s"]) if att_cfg.get("attitude_substep_s") is not None else None,
@@ -715,6 +767,7 @@ def _plot_outputs(
     t_s: np.ndarray,
     truth_hist: dict[str, np.ndarray],
     thrust_hist: dict[str, np.ndarray],
+    desired_attitude_hist: dict[str, np.ndarray] | None,
     knowledge_hist: dict[str, dict[str, np.ndarray]],
     rocket_metrics: dict[str, np.ndarray] | None,
     outdir: Path,
@@ -740,6 +793,17 @@ def _plot_outputs(
     )
     if not figure_ids:
         return out
+    plot_fns = _load_plotting_functions()
+    plot_orbit_eci = plot_fns["plot_orbit_eci"]
+    plot_attitude_tumble = plot_fns["plot_attitude_tumble"]
+    plot_body_rates = plot_fns["plot_body_rates"]
+    plot_control_commands = plot_fns["plot_control_commands"]
+    plot_multi_control_commands = plot_fns["plot_multi_control_commands"]
+    plot_multi_ric_2d_projections = plot_fns["plot_multi_ric_2d_projections"]
+    plot_multi_trajectory_frame = plot_fns["plot_multi_trajectory_frame"]
+    plot_quaternion_components = plot_fns["plot_quaternion_components"]
+    plot_ric_2d_projections = plot_fns["plot_ric_2d_projections"]
+    plot_trajectory_frame = plot_fns["plot_trajectory_frame"]
     for oid, hist in truth_hist.items():
         if not np.any(np.isfinite(hist[:, 0])):
             continue
@@ -781,6 +845,45 @@ def _plot_outputs(
             plt.show(block=False)
         else:
             plt.close(fig)
+
+    if "quaternion_error" in figure_ids and desired_attitude_hist is not None:
+        import matplotlib.pyplot as plt
+
+        for oid, hist in truth_hist.items():
+            q_des_hist = desired_attitude_hist.get(oid) if isinstance(desired_attitude_hist, dict) else None
+            if q_des_hist is None or q_des_hist.shape[0] == 0:
+                continue
+            n_s = min(hist.shape[0], q_des_hist.shape[0], t_s.size)
+            if n_s <= 0:
+                continue
+            qd = np.array(q_des_hist[:n_s, :], dtype=float)
+            qc = np.array(hist[:n_s, 6:10], dtype=float)
+            # Hold last desired quaternion over gaps where no new target was published.
+            for k in range(1, n_s):
+                if not np.all(np.isfinite(qd[k, :])) and np.all(np.isfinite(qd[k - 1, :])):
+                    qd[k, :] = qd[k - 1, :]
+            err_deg = np.full(n_s, np.nan, dtype=float)
+            for k in range(n_s):
+                if not (np.all(np.isfinite(qd[k, :])) and np.all(np.isfinite(qc[k, :]))):
+                    continue
+                err_deg[k] = _quat_error_angle_deg(qd[k, :], qc[k, :])
+            finite = np.isfinite(err_deg)
+            if not np.any(finite):
+                continue
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.plot(t_s[:n_s][finite], err_deg[finite], linewidth=1.4)
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Error Angle (deg)")
+            ax.set_title(f"Quaternion Tracking Error ({oid})")
+            ax.grid(True, alpha=0.3)
+            p = outdir / f"{oid}_quaternion_error.png"
+            if mode in ("save", "both"):
+                fig.savefig(p, dpi=int(cfg.outputs.plots.get("dpi", 150)))
+                out[f"{oid}_quaternion_error"] = str(p)
+            if mode in ("interactive", "both"):
+                plt.show(block=False)
+            else:
+                plt.close(fig)
 
     # Multi-agent shared-figure trajectory plots.
     if "trajectory_eci_multi" in figure_ids:
@@ -1299,6 +1402,11 @@ def _animate_outputs(
     types = list(anim_cfg.get("types", []) or [])
     if not types:
         return out
+    plot_fns = _load_plotting_functions()
+    animate_ground_track = plot_fns["animate_ground_track"]
+    animate_multi_ground_track = plot_fns["animate_multi_ground_track"]
+    animate_multi_rectangular_prism_ric_curv = plot_fns["animate_multi_rectangular_prism_ric_curv"]
+    animate_side_by_side_rectangular_prism_ric_attitude = plot_fns["animate_side_by_side_rectangular_prism_ric_attitude"]
 
     if "ground_track_multi" in types:
         p = outdir / "ground_track_multi.mp4"
@@ -1364,6 +1472,27 @@ def _animate_outputs(
         if mode in ("save", "both"):
             out["ric_curv_prism_multi"] = str(p)
 
+    if "ric_prism_side_by_side" in types:
+        p = outdir / "ric_prism_side_by_side.mp4"
+        left_object_id = str(anim_cfg.get("ric_side_by_side_left_object_id", "target"))
+        right_object_id = str(anim_cfg.get("ric_side_by_side_right_object_id", "chaser"))
+        dims_map_raw = anim_cfg.get("ric_side_by_side_dims_m", {})
+        dims_map = dict(dims_map_raw) if isinstance(dims_map_raw, dict) else {}
+        animate_side_by_side_rectangular_prism_ric_attitude(
+            t_s=t_s,
+            truth_hist_by_object=truth_hist,
+            left_object_id=left_object_id,
+            right_object_id=right_object_id,
+            prism_dims_m_by_object=dims_map,
+            mode=mode,
+            out_path=str(p),
+            fps=fps,
+            speed_multiple=speed_multiple,
+            frame_stride=frame_stride,
+        )
+        if mode in ("save", "both"):
+            out["ric_prism_side_by_side"] = str(p)
+
     return out
 
 
@@ -1418,8 +1547,11 @@ def _format_single_run_summary(summary: dict[str, Any]) -> str:
 
     plot_outputs = dict(summary.get("plot_outputs", {}) or {})
     anim_outputs = dict(summary.get("animation_outputs", {}) or {})
+    guardrails = dict(summary.get("attitude_guardrail_stats", {}) or {})
+    guardrail_hits = int(sum(int(v) for v in guardrails.values())) if guardrails else 0
     lines.append("-" * 72)
     lines.append(f"Artifacts  : plots={len(plot_outputs)}  animations={len(anim_outputs)}")
+    lines.append(f"Guardrails : attitude_events={guardrail_hits}")
     lines.append("=" * 72)
     return "\n".join(lines)
 
@@ -1428,6 +1560,7 @@ def _run_single_config(
     cfg: SimulationScenarioConfig,
     step_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
+    reset_attitude_guardrail_stats()
     dt = float(cfg.simulator.dt_s)
     n = int(np.floor(float(cfg.simulator.duration_s) / dt)) + 1
     t_s = np.arange(n, dtype=float) * dt
@@ -1469,6 +1602,7 @@ def _run_single_config(
     belief_hist = {aid: np.full((n, 6), np.nan) for aid in agents.keys()}
     thrust_hist = {aid: np.full((n, 3), np.nan) for aid in agents.keys()}
     torque_hist = {aid: np.full((n, 3), np.nan) for aid in agents.keys()}
+    desired_attitude_hist = {aid: np.full((n, 4), np.nan) for aid in agents.keys()}
     throttle_hist = {"rocket": np.full(n, np.nan)} if rocket is not None else {}
     rocket_stage_hist = np.full(n, np.nan) if rocket is not None else None
     rocket_q_dyn_hist = np.full(n, np.nan) if rocket is not None else None
@@ -1506,11 +1640,13 @@ def _run_single_config(
                 rocket_mach_hist[0] = float(getattr(a.rocket_state, "_last_step_mach", 0.0))
 
     total_steps = max(n - 1, 0)
-    if step_callback is not None:
+    active_step_callback = step_callback
+    if active_step_callback is not None:
         try:
-            step_callback(0, total_steps)
-        except Exception:
-            pass
+            active_step_callback(0, total_steps)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Disabling step callback after startup error: %s", exc)
+            active_step_callback = None
 
     for k in range(n - 1):
         t = float(t_s[k])
@@ -1671,22 +1807,26 @@ def _run_single_config(
                         if q_des.size == 4 and hasattr(a.attitude_controller, "set_target"):
                             try:
                                 a.attitude_controller.set_target(q_des)
-                            except Exception:
-                                pass
+                            except (TypeError, ValueError, AttributeError) as exc:
+                                logger.warning("Failed to set desired_attitude_quat_bn on %s controller: %s", aid, exc)
+                    if "desired_attitude_quat_bn" in mission_out:
+                        q_des_log = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)
+                        if q_des_log.size == 4 and np.all(np.isfinite(q_des_log)):
+                            desired_attitude_hist[aid][k + 1, :] = q_des_log
                     if "desired_attitude_quat_br" in mission_out and a.attitude_controller is not None:
                         q_des_r = np.array(mission_out["desired_attitude_quat_br"], dtype=float).reshape(-1)
                         if q_des_r.size == 4 and hasattr(a.attitude_controller, "set_target"):
                             try:
                                 a.attitude_controller.set_target(q_des_r)
-                            except Exception:
-                                pass
+                            except (TypeError, ValueError, AttributeError) as exc:
+                                logger.warning("Failed to set desired_attitude_quat_br on %s controller: %s", aid, exc)
                     if "desired_ric_euler_rad" in mission_out and a.attitude_controller is not None and hasattr(a.attitude_controller, "set_desired_ric_state"):
                         e = np.array(mission_out["desired_ric_euler_rad"], dtype=float).reshape(-1)
                         if e.size == 3:
                             try:
                                 a.attitude_controller.set_desired_ric_state(float(e[0]), float(e[1]), float(e[2]))
-                            except Exception:
-                                pass
+                            except (TypeError, ValueError, AttributeError) as exc:
+                                logger.warning("Failed to set desired_ric_euler_rad on %s controller: %s", aid, exc)
                     use_integrated_cmd = bool(mission_out.get("mission_use_integrated_command", False))
                     c_orb = (
                         a.orbit_controller.act(orb_belief, t_eval, 2.0)
@@ -1754,11 +1894,12 @@ def _run_single_config(
                         evt["bridge_error"] = str(ex)
                 bridge_hist[aid].append(evt)
 
-        if step_callback is not None:
+        if active_step_callback is not None:
             try:
-                step_callback(k + 1, total_steps)
-            except Exception:
-                pass
+                active_step_callback(k + 1, total_steps)
+            except (TypeError, ValueError) as exc:
+                logger.warning("Disabling step callback after runtime error: %s", exc)
+                active_step_callback = None
 
         # Log k+1
         for aid, a in agents.items():
@@ -1816,6 +1957,7 @@ def _run_single_config(
     belief_out = {k: v[:n_used, :].copy() for k, v in belief_hist.items()}
     thrust_out = {k: v[:n_used, :].copy() for k, v in thrust_hist.items()}
     torque_out = {k: v[:n_used, :].copy() for k, v in torque_hist.items()}
+    desired_attitude_out = {k: v[:n_used, :].copy() for k, v in desired_attitude_hist.items()}
     knowledge_out = {obs: {tgt: arr[:n_used, :].copy() for tgt, arr in by_tgt.items()} for obs, by_tgt in knowledge_hist.items()}
     rocket_metrics_out: dict[str, np.ndarray] = {}
     if rocket is not None:
@@ -1833,14 +1975,18 @@ def _run_single_config(
         t_s=t_out,
         truth_hist=truth_out,
         thrust_hist=thrust_out,
+        desired_attitude_hist=desired_attitude_out,
         knowledge_hist=knowledge_out,
         rocket_metrics=rocket_metrics_out if rocket_metrics_out else None,
         outdir=outdir,
     )
     if cfg.outputs.mode in ("interactive", "both") and bool(cfg.outputs.plots.get("enabled", True)):
-        import matplotlib.pyplot as plt
+        try:
+            import matplotlib.pyplot as plt
 
-        plt.show()
+            plt.show()
+        except (ImportError, AttributeError) as exc:
+            logger.warning("Skipping interactive plot display because Matplotlib is unavailable: %s", exc)
     animation_outputs = _animate_outputs(
         cfg=cfg,
         t_s=t_out,
@@ -1871,6 +2017,7 @@ def _run_single_config(
         "rocket_insertion_achieved": bool(rocket_inserted),
         "rocket_insertion_time_s": rocket_insertion_time_s,
         "thrust_stats": thrust_stats,
+        "attitude_guardrail_stats": get_attitude_guardrail_stats(),
         "plot_outputs": plot_outputs,
         "animation_outputs": animation_outputs,
     }
@@ -1896,11 +2043,26 @@ def _run_single_config(
     return payload
 
 
+def _is_truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _coerce_noninteractive_for_automation(cfg: SimulationScenarioConfig) -> SimulationScenarioConfig:
+    if not (_is_truthy_env("SIM_AUTOMATION") or _is_truthy_env("CI")):
+        return cfg
+    root = cfg.to_dict()
+    outputs = root.setdefault("outputs", {})
+    mode = str(outputs.get("mode", "interactive")).strip().lower()
+    if mode == "interactive":
+        outputs["mode"] = "save"
+    return scenario_config_from_dict(root)
+
+
 def run_master_simulation(
     config_path: str | Path,
     step_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
-    cfg = load_simulation_yaml(config_path)
+    cfg = _coerce_noninteractive_for_automation(load_simulation_yaml(config_path))
     strict_plugins = bool(cfg.simulator.plugin_validation.get("strict", True))
     if strict_plugins:
         errs = validate_scenario_plugins(cfg)
@@ -1921,6 +2083,7 @@ def run_master_simulation(
     outdir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(int(cfg.monte_carlo.base_seed))
     runs = []
+    closest_approach_km_runs: list[float] = []
     for i in range(int(cfg.monte_carlo.iterations)):
         cdict = deepcopy(root)
         sampled = {}
@@ -1939,18 +2102,116 @@ def run_master_simulation(
             if errs:
                 msg = "Plugin validation failed in Monte Carlo iteration {i}:\n- ".format(i=i) + "\n- ".join(errs)
                 raise ValueError(msg)
-        ro = _run_single_config(ci)
-        entry = {"iteration": i, "sampled_parameters": sampled, "summary": ro["summary"]}
+        ro = _run_single_config(ci, step_callback=step_callback)
+        closest_approach_km = float("nan")
+        try:
+            tb = dict(ro.get("truth_by_object", {}) or {})
+            tgt = np.array(tb.get("target", []), dtype=float)
+            ch = np.array(tb.get("chaser", []), dtype=float)
+            if tgt.ndim == 2 and ch.ndim == 2 and tgt.shape[0] > 0 and ch.shape[0] > 0:
+                n_rel = int(min(tgt.shape[0], ch.shape[0]))
+                dr = ch[:n_rel, :3] - tgt[:n_rel, :3]
+                rng_km = np.linalg.norm(dr, axis=1)
+                finite = rng_km[np.isfinite(rng_km)]
+                if finite.size > 0:
+                    closest_approach_km = float(np.min(finite))
+        except (TypeError, ValueError, KeyError, IndexError):
+            closest_approach_km = float("nan")
+        closest_approach_km_runs.append(closest_approach_km)
+        entry = {
+            "iteration": i,
+            "sampled_parameters": sampled,
+            "summary": ro["summary"],
+            "closest_approach_km": closest_approach_km,
+        }
         runs.append(entry)
         if bool(cfg.outputs.monte_carlo.get("save_iteration_summaries", False)):
             write_json(str(outdir / f"master_monte_carlo_run_{i:04d}.json"), entry)
+
+    durations_s = np.array([float(dict(r.get("summary", {}) or {}).get("duration_s", 0.0)) for r in runs], dtype=float)
+    terminated_early_flags = np.array(
+        [1.0 if bool(dict(r.get("summary", {}) or {}).get("terminated_early", False)) else 0.0 for r in runs],
+        dtype=float,
+    )
+    termination_reason_counts: dict[str, int] = {}
+    dv_by_object: dict[str, list[float]] = {}
+    burn_samples_by_object: dict[str, list[float]] = {}
+    for entry in runs:
+        s = dict(entry.get("summary", {}) or {})
+        term_reason = s.get("termination_reason")
+        if term_reason is not None:
+            key = str(term_reason)
+            termination_reason_counts[key] = int(termination_reason_counts.get(key, 0) + 1)
+        thrust_stats = dict(s.get("thrust_stats", {}) or {})
+        for oid, ts in thrust_stats.items():
+            tsd = dict(ts or {})
+            dv_by_object.setdefault(str(oid), []).append(float(tsd.get("total_dv_m_s", 0.0)))
+            burn_samples_by_object.setdefault(str(oid), []).append(float(tsd.get("burn_samples", 0.0)))
+
+    by_object_stats: dict[str, dict[str, float]] = {}
+    all_obj_ids = sorted(set(dv_by_object.keys()) | set(burn_samples_by_object.keys()))
+    for oid in all_obj_ids:
+        dv_arr = np.array(dv_by_object.get(oid, []), dtype=float)
+        b_arr = np.array(burn_samples_by_object.get(oid, []), dtype=float)
+        by_object_stats[oid] = {
+            "total_dv_m_s_mean": float(np.mean(dv_arr)) if dv_arr.size else 0.0,
+            "total_dv_m_s_min": float(np.min(dv_arr)) if dv_arr.size else 0.0,
+            "total_dv_m_s_max": float(np.max(dv_arr)) if dv_arr.size else 0.0,
+            "burn_samples_mean": float(np.mean(b_arr)) if b_arr.size else 0.0,
+        }
+    ca_arr_full = np.array(closest_approach_km_runs, dtype=float)
+    ca_finite = ca_arr_full[np.isfinite(ca_arr_full)]
+
+    aggregate_stats = {
+        "duration_s_mean": float(np.mean(durations_s)) if durations_s.size else 0.0,
+        "duration_s_min": float(np.min(durations_s)) if durations_s.size else 0.0,
+        "duration_s_max": float(np.max(durations_s)) if durations_s.size else 0.0,
+        "terminated_early_rate": float(np.mean(terminated_early_flags)) if terminated_early_flags.size else 0.0,
+        "closest_approach_km_mean": float(np.mean(ca_finite)) if ca_finite.size else float("nan"),
+        "closest_approach_km_min": float(np.min(ca_finite)) if ca_finite.size else float("nan"),
+        "closest_approach_km_max": float(np.max(ca_finite)) if ca_finite.size else float("nan"),
+        "termination_reason_counts": termination_reason_counts,
+        "by_object": by_object_stats,
+    }
 
     agg = {
         "config_path": str(Path(config_path).resolve()),
         "scenario_name": cfg.scenario_name,
         "monte_carlo": {"enabled": True, "iterations": int(cfg.monte_carlo.iterations), "base_seed": int(cfg.monte_carlo.base_seed)},
+        "aggregate_stats": aggregate_stats,
         "runs": runs,
     }
+
+    save_hist = bool(cfg.outputs.monte_carlo.get("save_histograms", False))
+    show_hist = bool(cfg.outputs.monte_carlo.get("display_histograms", False))
+    if (save_hist or show_hist) and runs:
+        import matplotlib.pyplot as plt
+
+        plot_series: list[tuple[str, np.ndarray]] = [("Duration (s)", durations_s)]
+        if ca_finite.size:
+            plot_series.append(("Closest Approach (km)", ca_finite))
+        for oid in all_obj_ids:
+            dv_arr = np.array(dv_by_object.get(oid, []), dtype=float)
+            if dv_arr.size:
+                plot_series.append((f"{oid} Total dV (m/s)", dv_arr))
+        nplots = len(plot_series)
+        fig, axes = plt.subplots(1, nplots, figsize=(5.0 * nplots, 4.0))
+        if nplots == 1:
+            axes = [axes]
+        for ax, (title, arr) in zip(axes, plot_series):
+            bins = int(max(5, min(30, np.sqrt(max(arr.size, 1)))))
+            ax.hist(arr, bins=bins, alpha=0.85)
+            ax.set_title(title)
+            ax.set_ylabel("count")
+            ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        if save_hist:
+            fig.savefig(str(outdir / "master_monte_carlo_histograms.png"), dpi=int(cfg.outputs.plots.get("dpi", 150)))
+        if show_hist:
+            # Block so the histogram window is actually visible before close.
+            plt.show()
+        plt.close(fig)
+
     if bool(cfg.outputs.monte_carlo.get("save_aggregate_summary", True)):
         write_json(str(outdir / "master_monte_carlo_summary.json"), agg)
     return agg

@@ -9,6 +9,9 @@ tqdm>=4.65
 # YAML config loading
 PyYAML>=6.0
 
+# Test runner
+pytest>=8.0
+
 # Machine learning stack
 torch>=2.1
 lightning>=2.2

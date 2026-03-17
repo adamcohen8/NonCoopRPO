@@ -4,10 +4,13 @@ import numpy as np
 
 
 def normalize_quaternion(q: np.ndarray) -> np.ndarray:
-    n = np.linalg.norm(q)
-    if n == 0.0:
+    x = np.array(q, dtype=float).reshape(-1)
+    if x.size != 4 or not np.all(np.isfinite(x)):
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    n = float(np.linalg.norm(x))
+    if n <= 0.0 or not np.isfinite(n):
         return np.array([1.0, 0.0, 0.0, 0.0])
-    return q / n
+    return x / n
 
 
 def omega_matrix(w_body_rad_s: np.ndarray) -> np.ndarray:
@@ -38,13 +41,20 @@ def quaternion_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
 
 def quaternion_delta_from_body_rate(omega_body_rad_s: np.ndarray, dt_s: float) -> np.ndarray:
     w = np.array(omega_body_rad_s, dtype=float).reshape(3)
+    if not np.all(np.isfinite(w)) or not np.isfinite(float(dt_s)):
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
     w_norm = float(np.linalg.norm(w))
     if w_norm <= 1e-15 or dt_s == 0.0:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
-    half_theta = 0.5 * w_norm * dt_s
+    half_theta = float(0.5 * w_norm * dt_s)
+    if not np.isfinite(half_theta):
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    # Keep trig arguments bounded to avoid invalid/overflow warnings for huge rates.
+    half_theta = float(np.remainder(half_theta, 2.0 * np.pi))
     axis = w / w_norm
     s = float(np.sin(half_theta))
-    return np.array([float(np.cos(half_theta)), axis[0] * s, axis[1] * s, axis[2] * s], dtype=float)
+    c = float(np.cos(half_theta))
+    return normalize_quaternion(np.array([c, axis[0] * s, axis[1] * s, axis[2] * s], dtype=float))
 
 
 def quaternion_to_dcm_bn(q_bn: np.ndarray) -> np.ndarray:

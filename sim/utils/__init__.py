@@ -1,27 +1,9 @@
+import importlib
+
 from sim.utils.frames import dcm_to_euler_321, ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
 from sim.utils.ground_track import ground_track_from_eci_history, split_ground_track_dateline
 from sim.utils.integration import rk4_step
 from sim.utils.io import write_json
-from sim.utils.plotting_capabilities import (
-    animate_ground_track,
-    animate_multi_ground_track,
-    animate_multi_rectangular_prism_ric_curv,
-    animate_rectangular_prism_attitude,
-    animate_trajectory_frame,
-    plot_angular_rates,
-    plot_attitude_ric,
-    plot_attitude_tumble,
-    plot_body_rates,
-    plot_control_commands,
-    plot_ground_track,
-    plot_multi_control_commands,
-    plot_multi_ric_2d_projections,
-    plot_multi_trajectory_frame,
-    plot_orbit_eci,
-    plot_quaternion_components,
-    plot_ric_2d_projections,
-    plot_trajectory_frame,
-)
 from sim.utils.quaternion import (
     dcm_to_quaternion_bn,
     normalize_quaternion,
@@ -55,6 +37,7 @@ __all__ = [
     "plot_multi_control_commands",
     "animate_rectangular_prism_attitude",
     "animate_multi_rectangular_prism_ric_curv",
+    "animate_side_by_side_rectangular_prism_ric_attitude",
     "animate_trajectory_frame",
     "animate_ground_track",
     "animate_multi_ground_track",
@@ -65,3 +48,33 @@ __all__ = [
     "quaternion_to_dcm_bn",
     "dcm_to_quaternion_bn",
 ]
+
+_PLOTTING_EXPORTS = {
+    "plot_orbit_eci",
+    "plot_attitude_tumble",
+    "plot_attitude_ric",
+    "plot_angular_rates",
+    "plot_ground_track",
+    "plot_quaternion_components",
+    "plot_body_rates",
+    "plot_trajectory_frame",
+    "plot_multi_trajectory_frame",
+    "plot_ric_2d_projections",
+    "plot_multi_ric_2d_projections",
+    "plot_control_commands",
+    "plot_multi_control_commands",
+    "animate_rectangular_prism_attitude",
+    "animate_multi_rectangular_prism_ric_curv",
+    "animate_side_by_side_rectangular_prism_ric_attitude",
+    "animate_trajectory_frame",
+    "animate_ground_track",
+    "animate_multi_ground_track",
+}
+
+
+def __getattr__(name: str):
+    if name in _PLOTTING_EXPORTS:
+        _pc = importlib.import_module("sim.utils.plotting_capabilities")
+
+        return getattr(_pc, name)
+    raise AttributeError(f"module 'sim.utils' has no attribute '{name}'")

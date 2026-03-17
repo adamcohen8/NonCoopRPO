@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,8 @@ from sim.dynamics.orbit.two_body import propagate_two_body_rk4
 from sim.rocket.models import RocketState, RocketVehicleConfig
 from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
 from sim.utils.quaternion import dcm_to_quaternion_bn, normalize_quaternion, quaternion_to_dcm_bn
+
+logger = logging.getLogger(__name__)
 
 
 def _unit(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -111,7 +114,8 @@ class AttitudeDetumbleGateMissionModule:
         if controller_accepts_mode:
             try:
                 attitude_controller.set_mode(desired_mode)
-            except Exception:
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Unable to set attitude controller mode '%s': %s", desired_mode, exc)
                 controller_accepts_mode = False
 
         return {
@@ -366,8 +370,8 @@ class DefensiveRICAxisBurnMissionModule:
         if attitude_controller is not None and hasattr(attitude_controller, "set_target"):
             try:
                 attitude_controller.set_target(q_des)
-            except Exception:
-                pass
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set defensive burn attitude target: %s", exc)
 
         att_belief_eff = att_belief
         if att_belief_eff is None and attitude_controller is not None:
@@ -379,6 +383,9 @@ class DefensiveRICAxisBurnMissionModule:
         c_att = attitude_controller.act(att_belief_eff, float(t_s), 2.0) if attitude_controller is not None and att_belief_eff is not None else Command.zero()
 
         align_ok, align_angle = self._alignment(truth=truth, accel_eci_km_s2=np.array(thrust_cmd, dtype=float))
+        if attitude_controller is None:
+            # Permit immediate burns when no attitude loop is present to execute slews.
+            align_ok = True
         fire = bool(align_ok and float(np.linalg.norm(thrust_cmd)) > float(max(self.min_burn_accel_km_s2, 0.0)))
 
         out["mission_use_integrated_command"] = True
@@ -625,14 +632,14 @@ class IntegratedCommandMissionModule:
             try:
                 controller.set_target_state(x)
                 return
-            except Exception:
-                pass
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set orbit target state via set_target_state: %s", exc)
         if hasattr(controller, "target_state"):
             try:
                 controller.target_state = x
                 return
-            except Exception:
-                pass
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set orbit target state via target_state assignment: %s", exc)
 
     @staticmethod
     def _burn_alignment(
@@ -703,8 +710,8 @@ class IntegratedCommandMissionModule:
         if attitude_controller is not None and hasattr(attitude_controller, "set_target"):
             try:
                 attitude_controller.set_target(np.array(required_q, dtype=float))
-            except Exception:
-                pass
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set attitude target in IntegratedCommandMissionModule: %s", exc)
         c_att = Command.zero()
         if attitude_controller is not None and att_belief is not None:
             c_att = attitude_controller.act(att_belief, float(t_s), 2.0)
@@ -750,10 +757,12 @@ class PredictiveIntegratedCommandMissionModule:
     mu_km3_s2: float = 398600.4418
     orbit_controller_budget_ms: float = 2.0
     attitude_controller_budget_ms: float = 2.0
+    planning_period_s: float | None = None
     skip_orbit_planning_in_detumble_mode: bool = True
     attitude_mode_attr: str = "mode"
     detumble_mode_tokens: tuple[str, ...] = ("detumble",)
     _countdown_s: float = field(default=-1.0, init=False, repr=False)
+    _last_plan_t_s: float | None = field(default=None, init=False, repr=False)
     _planned_accel_eci_km_s2: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float), init=False, repr=False)
     _planned_attitude_quat_bn: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0, 0.0], dtype=float), init=False, repr=False)
 
@@ -834,7 +843,7 @@ class PredictiveIntegratedCommandMissionModule:
             return False, ""
         try:
             mode_obj = getattr(attitude_controller, attr, "")
-        except Exception:
+        except AttributeError:
             mode_obj = ""
         mode_str = str(mode_obj).strip().lower()
         if not mode_str:
@@ -843,6 +852,13 @@ class PredictiveIntegratedCommandMissionModule:
         if any(tok in mode_str for tok in tokens):
             return True, mode_str
         return False, mode_str
+
+    def _effective_planning_period_s(self, orbit_controller: Any | None, dt_s: float) -> float:
+        if self.planning_period_s is not None:
+            return float(max(self.planning_period_s, 1e-9))
+        # Default to mission update cadence; explicit planning_period_s can be used
+        # when slower planning is desired.
+        return float(max(dt_s, 1e-9))
 
     def update(
         self,
@@ -861,14 +877,20 @@ class PredictiveIntegratedCommandMissionModule:
         out: dict[str, Any] = {}
         in_detumble_mode, mode_str = self._attitude_controller_in_detumble_mode(attitude_controller)
         planning_blocked_by_detumble = bool(self.skip_orbit_planning_in_detumble_mode and in_detumble_mode)
+        plan_period_s = self._effective_planning_period_s(orbit_controller=orbit_controller, dt_s=float(dt_s))
         target_state = self._target_state(own_knowledge=own_knowledge, world_truth=world_truth)
+        plan_due = bool(
+            self._last_plan_t_s is None
+            or (float(t_s) - float(self._last_plan_t_s)) >= (plan_period_s - 1e-12)
+        )
+        planned_this_step = False
 
         if planning_blocked_by_detumble:
             # Cancel pending planned burn while detumbling.
             self._countdown_s = -1.0
             self._planned_accel_eci_km_s2 = np.zeros(3, dtype=float)
             self._planned_attitude_quat_bn = np.array(truth.attitude_quat_bn, dtype=float)
-        elif self._countdown_s < 0.0:
+        elif self._countdown_s < 0.0 and plan_due:
             b_pred = self._predict_orb_belief_for_controller(
                 orbit_controller=orbit_controller,
                 self_truth=truth,
@@ -890,13 +912,15 @@ class PredictiveIntegratedCommandMissionModule:
             )
             self._planned_attitude_quat_bn = np.array(q_req if q_req is not None else truth.attitude_quat_bn, dtype=float)
             self._countdown_s = float(max(self.lead_time_s, 0.0))
+            self._last_plan_t_s = float(t_s)
+            planned_this_step = True
 
         # Slew/hold phase before gate
         if attitude_controller is not None and hasattr(attitude_controller, "set_target"):
             try:
                 attitude_controller.set_target(np.array(self._planned_attitude_quat_bn, dtype=float))
-            except Exception:
-                pass
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set predictive attitude target: %s", exc)
         att_belief_eff = att_belief
         if att_belief_eff is None and attitude_controller is not None:
             # Ensure integrated attitude logic can still run even if self-knowledge is not configured.
@@ -915,12 +939,22 @@ class PredictiveIntegratedCommandMissionModule:
         align_ok, align_angle = self._alignment(truth=truth, accel_eci_km_s2=self._planned_accel_eci_km_s2)
         if planning_blocked_by_detumble:
             fire = False
-        elif self._countdown_s <= float(max(dt_s, 1e-9)):
-            if align_ok and float(np.linalg.norm(self._planned_accel_eci_km_s2)) > float(max(self.min_burn_accel_km_s2, 0.0)):
-                fire = True
-            self._countdown_s = -1.0
         else:
-            self._countdown_s -= float(max(dt_s, 1e-9))
+            if float(max(self.lead_time_s, 0.0)) <= 0.0:
+                # Zero-lead mode: continuous closed-loop burn eligibility each step.
+                fire = bool(
+                    align_ok
+                    and float(np.linalg.norm(self._planned_accel_eci_km_s2)) > float(max(self.min_burn_accel_km_s2, 0.0))
+                )
+                self._countdown_s = 0.0
+            elif self._countdown_s < 0.0:
+                fire = False
+            elif self._countdown_s <= float(max(dt_s, 1e-9)):
+                if align_ok and float(np.linalg.norm(self._planned_accel_eci_km_s2)) > float(max(self.min_burn_accel_km_s2, 0.0)):
+                    fire = True
+                self._countdown_s = -1.0
+            else:
+                self._countdown_s -= float(max(dt_s, 1e-9))
 
         out["mission_use_integrated_command"] = True
         out["torque_body_nm"] = np.array(c_att.torque_body_nm, dtype=float).reshape(3)
@@ -937,5 +971,8 @@ class PredictiveIntegratedCommandMissionModule:
             "attitude_controller_budget_ms": float(self.attitude_controller_budget_ms),
             "planning_blocked_by_detumble": bool(planning_blocked_by_detumble),
             "attitude_controller_mode": str(mode_str),
+            "plan_due": bool(plan_due),
+            "planned_this_step": bool(planned_this_step),
+            "planning_period_s": float(plan_period_s),
         }
         return out

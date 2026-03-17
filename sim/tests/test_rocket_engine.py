@@ -1,4 +1,5 @@
 import unittest
+import warnings
 
 import numpy as np
 
@@ -41,7 +42,9 @@ class TestRocketAscentEngine(unittest.TestCase):
         )
         vehicle_cfg = RocketVehicleConfig(stack=self._tiny_stack(), payload_mass_kg=20.0)
         sim = RocketAscentSimulator(sim_cfg=sim_cfg, vehicle_cfg=vehicle_cfg, guidance=HoldAttitudeGuidance(throttle=1.0))
-        out = sim.run()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            out = sim.run()
 
         self.assertLess(out.mass_kg[-1], out.mass_kg[0])
         self.assertGreaterEqual(int(np.max(out.active_stage_index)), 1)
