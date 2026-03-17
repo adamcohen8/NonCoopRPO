@@ -334,7 +334,16 @@ outputs:
     save_iteration_summaries: true
     save_aggregate_summary: true
     save_histograms: true
+    save_ops_dashboard: true
     save_raw_runs: false
+    baseline_summary_json: ""
+    success_termination_reasons: ["rocket_orbit_insertion"]
+    require_rocket_insertion: false
+    gates:
+      min_closest_approach_km: 0.25
+      max_duration_s: 5400.0
+      max_total_dv_m_s: 250.0
+      max_guardrail_events: 10
 
 monte_carlo:
   enabled: false

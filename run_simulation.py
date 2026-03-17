@@ -64,6 +64,7 @@ def _print_single_run_summary(out: dict) -> None:
 def _print_monte_carlo_summary(out: dict) -> None:
     runs = list(out.get("runs", []) or [])
     agg_stats = dict(out.get("aggregate_stats", {}) or {})
+    brief = dict(out.get("commander_brief", {}) or {})
     guardrail_event_totals = [
         int(sum(int(v) for v in dict(dict(r.get("summary", {}) or {}).get("attitude_guardrail_stats", {})).values()))
         for r in runs
@@ -80,8 +81,10 @@ def _print_monte_carlo_summary(out: dict) -> None:
         d_mean = float(agg_stats.get("duration_s_mean", 0.0))
         d_max = float(agg_stats.get("duration_s_max", 0.0))
         t_rate = float(agg_stats.get("terminated_early_rate", 0.0))
+        p_success = float(agg_stats.get("pass_rate", brief.get("p_success", 0.0)))
         print(f"Duration   : min={d_min:.1f}s  mean={d_mean:.1f}s  max={d_max:.1f}s")
         print(f"Early Term : {100.0 * t_rate:.1f}%")
+        print(f"P(success) : {100.0 * p_success:.1f}%")
         ca_min = agg_stats.get("closest_approach_km_min")
         ca_mean = agg_stats.get("closest_approach_km_mean")
         ca_max = agg_stats.get("closest_approach_km_max")
@@ -90,6 +93,36 @@ def _print_monte_carlo_summary(out: dict) -> None:
                 print(
                     "Closest App: "
                     f"min={float(ca_min):.3f} km  mean={float(ca_mean):.3f} km  max={float(ca_max):.3f} km"
+                )
+            except (TypeError, ValueError):
+                pass
+        p_keepout = brief.get("p_keepout_violation")
+        if p_keepout is not None:
+            try:
+                p_keepout_f = float(p_keepout)
+                if not math.isnan(p_keepout_f):
+                    print(f"Keepout Risk: {100.0 * p_keepout_f:.1f}%")
+            except (TypeError, ValueError):
+                pass
+        timeline = dict(brief.get("timeline_confidence_bands_s", {}) or {})
+        fuel = dict(brief.get("fuel_confidence_bands_total_dv_m_s", {}) or {})
+        if timeline:
+            try:
+                print(
+                    "Timeline   : "
+                    f"P50={float(timeline.get('p50', float('nan'))):.1f}s  "
+                    f"P90={float(timeline.get('p90', float('nan'))):.1f}s  "
+                    f"P99={float(timeline.get('p99', float('nan'))):.1f}s"
+                )
+            except (TypeError, ValueError):
+                pass
+        if fuel:
+            try:
+                print(
+                    "Total dV   : "
+                    f"P50={float(fuel.get('p50', float('nan'))):.2f}m/s  "
+                    f"P90={float(fuel.get('p90', float('nan'))):.2f}m/s  "
+                    f"P99={float(fuel.get('p99', float('nan'))):.2f}m/s"
                 )
             except (TypeError, ValueError):
                 pass
@@ -107,6 +140,15 @@ def _print_monte_carlo_summary(out: dict) -> None:
                     f"{float(s.get('total_dv_m_s_max', 0.0)):>12.3f}"
                     f"{float(s.get('burn_samples_mean', 0.0)):>14.1f}"
                 )
+        top_fail = list(brief.get("top_failure_modes", []) or [])
+        if top_fail:
+            print("-" * 72)
+            print("Top Failure Modes")
+            for row in top_fail:
+                try:
+                    print(f"{str(row.get('reason', 'unknown')):<40}{int(row.get('count', 0)):>8d}{100.0*float(row.get('rate', 0.0)):>10.1f}%")
+                except (TypeError, ValueError):
+                    continue
     elif runs:
         durations = [float(dict(r.get("summary", {}) or {}).get("duration_s", 0.0)) for r in runs]
         print(f"Duration   : min={min(durations):.1f}s  max={max(durations):.1f}s")
