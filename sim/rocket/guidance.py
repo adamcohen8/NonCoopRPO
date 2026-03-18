@@ -6,6 +6,7 @@ import numpy as np
 
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
 from sim.dynamics.orbit.atmosphere import atmosphere_state_from_model
+from sim.rocket.engine import _geodetic_state_from_eci, _resolve_wind_eci_m_s
 from sim.rocket.models import GuidanceCommand, RocketGuidanceLaw, RocketSimConfig, RocketState, RocketVehicleConfig
 from sim.utils.quaternion import dcm_to_quaternion_bn, quaternion_to_dcm_bn
 
@@ -183,7 +184,12 @@ class ClosedLoopInsertionGuidance(RocketGuidanceLaw):
         r_norm = float(np.linalg.norm(r))
         if r_norm <= 0.0:
             return 0.0
-        alt_km = float(r_norm - EARTH_RADIUS_KM)
+        _, _, alt_geo_km = _geodetic_state_from_eci(
+            state.position_eci_km,
+            state.t_s,
+            jd_utc_start=sim_cfg.atmosphere_env.get("jd_utc_start"),
+        )
+        alt_km = float(alt_geo_km if sim_cfg.use_wgs84_geodesy else r_norm - EARTH_RADIUS_KM)
         u = _unit(np.array(thrust_dir_eci, dtype=float).reshape(3))
         if np.linalg.norm(u) <= 0.0:
             return 0.0
@@ -261,7 +267,12 @@ class ClosedLoopInsertionGuidance(RocketGuidanceLaw):
             t_hat = self._horizontal_azimuth_dir(r_hat, sim_cfg.launch_azimuth_deg)
         t_guided = self._guided_tangential_dir(r_hat, v, t_hat)
 
-        alt_km = float(r_norm - EARTH_RADIUS_KM)
+        _, _, alt_geo_km = _geodetic_state_from_eci(
+            state.position_eci_km,
+            state.t_s,
+            jd_utc_start=sim_cfg.atmosphere_env.get("jd_utc_start"),
+        )
+        alt_km = float(alt_geo_km if sim_cfg.use_wgs84_geodesy else r_norm - EARTH_RADIUS_KM)
         target_alt_km = float(sim_cfg.target_altitude_km)
         target_r_km = EARTH_RADIUS_KM + target_alt_km
         ra_alt, rp_alt, _, ecc = _apo_peri_alt_km(r, v, EARTH_MU_KM3_S2)
@@ -321,6 +332,30 @@ class HoldAttitudeGuidance(RocketGuidanceLaw):
 
 
 @dataclass(frozen=True)
+class TVCSteeringGuidance(RocketGuidanceLaw):
+    """Wrap a guidance law and convert its desired thrust axis into a body-frame TVC command."""
+
+    base_guidance: RocketGuidanceLaw
+    pass_through_attitude: bool = False
+
+    def command(self, state: RocketState, sim_cfg: RocketSimConfig, vehicle_cfg: RocketVehicleConfig) -> GuidanceCommand:
+        cmd = self.base_guidance.command(state, sim_cfg, vehicle_cfg)
+        if cmd.attitude_quat_bn_cmd is None:
+            return cmd
+        thrust_axis_body = _unit(np.array(vehicle_cfg.thrust_axis_body, dtype=float))
+        c_cmd_bn = quaternion_to_dcm_bn(np.array(cmd.attitude_quat_bn_cmd, dtype=float))
+        thrust_axis_eci_cmd = c_cmd_bn.T @ thrust_axis_body
+        c_bn = quaternion_to_dcm_bn(state.attitude_quat_bn)
+        thrust_vector_body_cmd = c_bn @ thrust_axis_eci_cmd
+        return GuidanceCommand(
+            throttle=cmd.throttle,
+            attitude_quat_bn_cmd=cmd.attitude_quat_bn_cmd if self.pass_through_attitude else None,
+            torque_body_nm_cmd=cmd.torque_body_nm_cmd,
+            thrust_vector_body_cmd=thrust_vector_body_cmd,
+        )
+
+
+@dataclass(frozen=True)
 class MaxQThrottleLimiterGuidance(RocketGuidanceLaw):
     """Wrap a base guidance law and limit throttle when dynamic pressure exceeds max_q."""
 
@@ -330,6 +365,8 @@ class MaxQThrottleLimiterGuidance(RocketGuidanceLaw):
 
     def _estimate_dynamic_pressure_pa(self, state: RocketState, sim_cfg: RocketSimConfig) -> float:
         env = {"atmosphere_model": sim_cfg.atmosphere_model, **dict(sim_cfg.atmosphere_env)}
+        if sim_cfg.use_wgs84_geodesy:
+            env["geodetic_model"] = "wgs84"
         atmos = atmosphere_state_from_model(
             model=str(sim_cfg.atmosphere_model).lower(),
             r_eci_km=state.position_eci_km,
@@ -340,7 +377,13 @@ class MaxQThrottleLimiterGuidance(RocketGuidanceLaw):
         c_bn = quaternion_to_dcm_bn(state.attitude_quat_bn)
         omega_earth = np.array([0.0, 0.0, 7.2921159e-5], dtype=float)
         v_atm_eci_km_s = np.cross(omega_earth, state.position_eci_km)
-        v_rel_eci_m_s = (state.velocity_eci_km_s - v_atm_eci_km_s) * 1e3
+        wind_eci_m_s = _resolve_wind_eci_m_s(
+            position_eci_km=state.position_eci_km,
+            t_s=state.t_s,
+            sim_cfg=sim_cfg,
+            state=state,
+        )
+        v_rel_eci_m_s = (state.velocity_eci_km_s - v_atm_eci_km_s) * 1e3 - wind_eci_m_s
         v_rel_body_m_s = c_bn @ v_rel_eci_m_s
         speed = float(np.linalg.norm(v_rel_body_m_s))
         return 0.5 * rho * speed * speed
@@ -361,6 +404,7 @@ class MaxQThrottleLimiterGuidance(RocketGuidanceLaw):
             throttle=thr_limited,
             attitude_quat_bn_cmd=cmd.attitude_quat_bn_cmd,
             torque_body_nm_cmd=cmd.torque_body_nm_cmd,
+            thrust_vector_body_cmd=cmd.thrust_vector_body_cmd,
         )
 
 
@@ -383,7 +427,12 @@ class OrbitInsertionCutoffGuidance(RocketGuidanceLaw):
         r_norm = float(np.linalg.norm(r))
         if r_norm <= 0.0:
             return False, "invalid_radius"
-        alt_km = float(r_norm - EARTH_RADIUS_KM)
+        _, _, alt_geo_km = _geodetic_state_from_eci(
+            state.position_eci_km,
+            state.t_s,
+            jd_utc_start=sim_cfg.atmosphere_env.get("jd_utc_start"),
+        )
+        alt_km = float(alt_geo_km if sim_cfg.use_wgs84_geodesy else r_norm - EARTH_RADIUS_KM)
         v_mag = float(np.linalg.norm(v))
         if alt_km < float(max(self.min_cutoff_alt_km, 0.0)):
             return False, "below_cutoff_altitude"
@@ -430,4 +479,5 @@ class OrbitInsertionCutoffGuidance(RocketGuidanceLaw):
             throttle=0.0,
             attitude_quat_bn_cmd=cmd.attitude_quat_bn_cmd,
             torque_body_nm_cmd=cmd.torque_body_nm_cmd,
+            thrust_vector_body_cmd=cmd.thrust_vector_body_cmd,
         )

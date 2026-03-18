@@ -12,7 +12,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from presets import BASIC_TWO_STAGE_STACK
-from sim.rocket import OpenLoopPitchProgramGuidance, RocketAeroConfig, RocketAscentSimulator, RocketSimConfig, RocketVehicleConfig
+from sim.rocket import (
+    OpenLoopPitchProgramGuidance,
+    RocketAeroConfig,
+    RocketAscentSimulator,
+    RocketSimConfig,
+    RocketVehicleConfig,
+    TVCSteeringGuidance,
+)
 
 
 def run_demo(plot_mode: str = "interactive") -> dict[str, str]:
@@ -32,6 +39,11 @@ def run_demo(plot_mode: str = "interactive") -> dict[str, str]:
         enable_j2=True,
         enable_j3=False,
         enable_j4=False,
+        wind_enu_m_s=np.array([12.0, 0.0, 0.0]),
+        tvc_time_constant_s=0.2,
+        tvc_max_gimbal_deg=5.0,
+        tvc_rate_limit_deg_s=8.0,
+        tvc_pivot_offset_body_m=np.array([-6.0, 0.0, 0.0]),
         aero=RocketAeroConfig(
             enabled=True,
             reference_area_m2=10.0,
@@ -54,12 +66,15 @@ def run_demo(plot_mode: str = "interactive") -> dict[str, str]:
         payload_mass_kg=12000.0,
         thrust_axis_body=np.array([1.0, 0.0, 0.0]),
     )
-    guidance = OpenLoopPitchProgramGuidance(
-        vertical_hold_s=8.0,
-        pitch_start_s=8.0,
-        pitch_end_s=190.0,
-        pitch_final_deg=75.0,
-        max_throttle=1.0,
+    guidance = TVCSteeringGuidance(
+        base_guidance=OpenLoopPitchProgramGuidance(
+            vertical_hold_s=8.0,
+            pitch_start_s=8.0,
+            pitch_end_s=190.0,
+            pitch_final_deg=75.0,
+            max_throttle=1.0,
+        ),
+        pass_through_attitude=True,
     )
 
     sim = RocketAscentSimulator(sim_cfg=sim_cfg, vehicle_cfg=vehicle_cfg, guidance=guidance)
@@ -74,6 +89,10 @@ def run_demo(plot_mode: str = "interactive") -> dict[str, str]:
     sma = out.sma_km
     q_dyn = out.dynamic_pressure_pa
     mach = out.mach
+    lat = out.latitude_deg
+    lon = out.longitude_deg
+    wind_mag = np.linalg.norm(out.wind_body_m_s, axis=1)
+    gimbal_deg = out.tvc_gimbal_deg
     alpha_deg = out.alpha_deg
     beta_deg = out.beta_deg
     cd_hist = out.cd
@@ -118,7 +137,7 @@ def run_demo(plot_mode: str = "interactive") -> dict[str, str]:
     ax[2, 1].set_xlabel("Time (s)")
 
     fig.suptitle(
-        f"Rocket Ascent Demo | Inserted={out.inserted} | t_insert={out.insertion_time_s if out.insertion_time_s is not None else 'n/a'}"
+        f"Rocket Ascent Demo (TVC-Assisted Pitch Program) | Inserted={out.inserted} | t_insert={out.insertion_time_s if out.insertion_time_s is not None else 'n/a'}"
     )
     fig.tight_layout()
     p = outdir / "rocket_launch_profiles.png"
@@ -175,6 +194,48 @@ def run_demo(plot_mode: str = "interactive") -> dict[str, str]:
         plt.show()
     plt.close(fig2)
 
+    fig3, ax3 = plt.subplots(3, 2, figsize=(12, 10), sharex=True)
+    ax3[0, 0].plot(t, lat)
+    ax3[0, 0].set_ylabel("deg")
+    ax3[0, 0].set_title("Latitude")
+    ax3[0, 0].grid(True, alpha=0.3)
+
+    ax3[0, 1].plot(t, lon)
+    ax3[0, 1].set_ylabel("deg")
+    ax3[0, 1].set_title("Longitude")
+    ax3[0, 1].grid(True, alpha=0.3)
+
+    ax3[1, 0].plot(t, wind_mag)
+    ax3[1, 0].set_ylabel("m/s")
+    ax3[1, 0].set_title("|Wind Body|")
+    ax3[1, 0].grid(True, alpha=0.3)
+
+    ax3[1, 1].plot(t, gimbal_deg)
+    ax3[1, 1].set_ylabel("deg")
+    ax3[1, 1].set_title("TVC Gimbal")
+    ax3[1, 1].grid(True, alpha=0.3)
+
+    ax3[2, 0].plot(t, out.throttle_cmd)
+    ax3[2, 0].set_ylabel("Throttle")
+    ax3[2, 0].set_title("Throttle Command")
+    ax3[2, 0].grid(True, alpha=0.3)
+    ax3[2, 0].set_xlabel("Time (s)")
+
+    ax3[2, 1].plot(t, out.thrust_n)
+    ax3[2, 1].set_ylabel("N")
+    ax3[2, 1].set_title("Engine Thrust")
+    ax3[2, 1].grid(True, alpha=0.3)
+    ax3[2, 1].set_xlabel("Time (s)")
+
+    fig3.suptitle("Rocket Guidance and Environment Diagnostics")
+    fig3.tight_layout()
+    p3 = outdir / "rocket_guidance_env_profiles.png"
+    if plot_mode in ("save", "both"):
+        fig3.savefig(p3, dpi=160)
+    if plot_mode in ("interactive", "both"):
+        plt.show()
+    plt.close(fig3)
+
     return {
         "inserted": str(out.inserted),
         "insertion_time_s": "" if out.insertion_time_s is None else f"{out.insertion_time_s:.2f}",
@@ -182,6 +243,7 @@ def run_demo(plot_mode: str = "interactive") -> dict[str, str]:
         "final_eccentricity": f"{ecc[-1]:.5f}",
         "plot": str(p) if plot_mode in ("save", "both") else "",
         "aero_plot": str(p2) if plot_mode in ("save", "both") else "",
+        "guidance_env_plot": str(p3) if plot_mode in ("save", "both") else "",
     }
 
 

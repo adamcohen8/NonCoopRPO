@@ -35,9 +35,16 @@ class RocketSimConfig:
     cr: float = 1.2
     aero: RocketAeroConfig = field(default_factory=RocketAeroConfig)
     atmosphere_env: dict = field(default_factory=dict)
+    use_wgs84_geodesy: bool = True
+    wind_enu_m_s: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    wind_enu_callable: object | None = None
     inertia_kg_m2: np.ndarray = field(default_factory=lambda: np.diag([8.0e5, 8.0e5, 2.0e4]))
     attitude_substep_s: float = 0.02
     attitude_mode: str = "dynamic"  # dynamic | cheater
+    tvc_time_constant_s: float = 0.1
+    tvc_max_gimbal_deg: float = 6.0
+    tvc_rate_limit_deg_s: float = 20.0
+    tvc_pivot_offset_body_m: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     def __post_init__(self) -> None:
         if self.dt_s <= 0.0:
@@ -54,6 +61,16 @@ class RocketSimConfig:
             raise ValueError("attitude_substep_s must be positive.")
         if self.earth_impact_radius_km <= 0.0:
             raise ValueError("earth_impact_radius_km must be positive.")
+        if np.array(self.wind_enu_m_s, dtype=float).reshape(-1).size != 3:
+            raise ValueError("wind_enu_m_s must be length-3.")
+        if self.tvc_time_constant_s <= 0.0:
+            raise ValueError("tvc_time_constant_s must be positive.")
+        if self.tvc_max_gimbal_deg < 0.0:
+            raise ValueError("tvc_max_gimbal_deg must be non-negative.")
+        if self.tvc_rate_limit_deg_s < 0.0:
+            raise ValueError("tvc_rate_limit_deg_s must be non-negative.")
+        if np.array(self.tvc_pivot_offset_body_m, dtype=float).reshape(-1).size != 3:
+            raise ValueError("tvc_pivot_offset_body_m must be length-3.")
         mode = str(self.attitude_mode).strip().lower()
         if mode not in ("dynamic", "cheater"):
             raise ValueError("attitude_mode must be 'dynamic' or 'cheater'.")
@@ -86,6 +103,7 @@ class RocketState:
     active_stage_index: int
     stage_prop_remaining_kg: np.ndarray
     payload_attached: bool = True
+    thrust_vector_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
 
     def copy(self) -> "RocketState":
         return RocketState(
@@ -98,6 +116,7 @@ class RocketState:
             active_stage_index=int(self.active_stage_index),
             stage_prop_remaining_kg=self.stage_prop_remaining_kg.copy(),
             payload_attached=bool(self.payload_attached),
+            thrust_vector_body=self.thrust_vector_body.copy(),
         )
 
 
@@ -106,6 +125,7 @@ class GuidanceCommand:
     throttle: float
     attitude_quat_bn_cmd: np.ndarray | None = None
     torque_body_nm_cmd: np.ndarray | None = None
+    thrust_vector_body_cmd: np.ndarray | None = None
 
 
 class RocketGuidanceLaw(Protocol):
@@ -125,10 +145,14 @@ class RocketSimResult:
     throttle_cmd: np.ndarray
     thrust_n: np.ndarray
     altitude_km: np.ndarray
+    latitude_deg: np.ndarray
+    longitude_deg: np.ndarray
     eccentricity: np.ndarray
     sma_km: np.ndarray
     dynamic_pressure_pa: np.ndarray
     mach: np.ndarray
+    wind_body_m_s: np.ndarray
+    tvc_gimbal_deg: np.ndarray
     alpha_deg: np.ndarray
     beta_deg: np.ndarray
     cd: np.ndarray

@@ -8,6 +8,7 @@ import numpy as np
 from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
 from sim.dynamics.orbit.frames import eci_to_ecef
 from sim.dynamics.orbit.epoch import julian_date_to_datetime
+from sim.utils.geodesy import ecef_to_geodetic_deg_km
 
 AtmosphereModelName = Literal["exponential", "ussa1976", "nrlmsise00", "jb2008"]
 
@@ -15,12 +16,18 @@ AtmosphereModelName = Literal["exponential", "ussa1976", "nrlmsise00", "jb2008"]
 def _altitude_km_from_eci(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) -> float:
     env = {} if env is None else env
     r_ecef_km = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s), jd_utc_start=env.get("jd_utc_start"))
+    if str(env.get("geodetic_model", "")).lower() == "wgs84":
+        _, _, alt_km = ecef_to_geodetic_deg_km(r_ecef_km)
+        return float(max(alt_km, 0.0))
     return float(max(0.0, np.linalg.norm(r_ecef_km) - EARTH_RADIUS_KM))
 
 
 def _spherical_lat_lon_deg_from_eci(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) -> tuple[float, float]:
     env = {} if env is None else env
     r_ecef_km = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s), jd_utc_start=env.get("jd_utc_start"))
+    if str(env.get("geodetic_model", "")).lower() == "wgs84":
+        lat, lon, _ = ecef_to_geodetic_deg_km(r_ecef_km)
+        return float(lat), float(lon)
     r = float(np.linalg.norm(r_ecef_km))
     if r <= 0.0:
         return 0.0, 0.0

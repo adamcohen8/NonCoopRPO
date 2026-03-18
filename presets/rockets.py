@@ -13,6 +13,10 @@ class RocketStagePreset:
     burn_time_s: float
     diameter_m: float
     length_m: float
+    sea_level_thrust_n: float | None = None
+    vacuum_thrust_n: float | None = None
+    sea_level_isp_s: float | None = None
+    vacuum_isp_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,10 @@ BASIC_1ST_STAGE = RocketStagePreset(
     burn_time_s=160.0,
     diameter_m=3.7,
     length_m=42.0,
+    sea_level_thrust_n=6.9e6,
+    vacuum_thrust_n=7.6e6,
+    sea_level_isp_s=282.0,
+    vacuum_isp_s=300.0,
 )
 
 BASIC_2ND_STAGE = RocketStagePreset(
@@ -53,6 +61,10 @@ BASIC_2ND_STAGE = RocketStagePreset(
     burn_time_s=380.0,
     diameter_m=3.7,
     length_m=14.0,
+    sea_level_thrust_n=8.6e5,
+    vacuum_thrust_n=1.0e6,
+    sea_level_isp_s=300.0,
+    vacuum_isp_s=348.0,
 )
 
 BASIC_SSTO_ROCKET = RocketStagePreset(
@@ -64,6 +76,10 @@ BASIC_SSTO_ROCKET = RocketStagePreset(
     burn_time_s=480.0,
     diameter_m=4.1,
     length_m=52.0,
+    sea_level_thrust_n=8.0e6,
+    vacuum_thrust_n=8.8e6,
+    sea_level_isp_s=305.0,
+    vacuum_isp_s=325.0,
 )
 
 BASIC_TWO_STAGE_STACK = RocketStackPreset(

@@ -5,6 +5,7 @@ from sim.rocket.guidance import (
     MaxQThrottleLimiterGuidance,
     OpenLoopPitchProgramGuidance,
     OrbitInsertionCutoffGuidance,
+    TVCSteeringGuidance,
 )
 from sim.rocket.aero import RocketAeroConfig
 from sim.rocket.models import (
@@ -30,4 +31,5 @@ __all__ = [
     "MaxQThrottleLimiterGuidance",
     "OrbitInsertionCutoffGuidance",
     "HoldAttitudeGuidance",
+    "TVCSteeringGuidance",
 ]
