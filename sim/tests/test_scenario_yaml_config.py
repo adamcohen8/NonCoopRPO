@@ -55,6 +55,32 @@ class TestScenarioYamlConfig(unittest.TestCase):
         self.assertGreater(cfg.simulator.dt_s, 0.0)
         self.assertGreater(cfg.simulator.duration_s, 0.0)
 
+    def test_missing_agent_sections_use_role_defaults(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "defaults_test",
+                "simulator": {"duration_s": 10.0, "dt_s": 1.0},
+                "outputs": {"mode": "save", "output_dir": "outputs/defaults_test"},
+                "monte_carlo": {"enabled": False},
+            }
+        )
+        self.assertFalse(cfg.rocket.enabled)
+        self.assertFalse(cfg.chaser.enabled)
+        self.assertTrue(cfg.target.enabled)
+
+    def test_simulator_nested_defaults_are_preserved(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "sim_defaults_test",
+                "simulator": {"duration_s": 10.0, "dt_s": 1.0},
+                "outputs": {"mode": "save", "output_dir": "outputs/sim_defaults_test"},
+                "monte_carlo": {"enabled": False},
+            }
+        )
+        self.assertEqual(cfg.simulator.plugin_validation.get("strict"), True)
+        self.assertEqual(cfg.simulator.termination.get("earth_impact_enabled"), True)
+        self.assertAlmostEqual(float(cfg.simulator.termination.get("earth_radius_km")), 6378.137, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

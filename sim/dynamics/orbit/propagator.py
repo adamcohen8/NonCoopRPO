@@ -102,12 +102,16 @@ def spherical_harmonics_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: Or
     if not terms:
         return np.zeros(3)
     fd_step_km = float(env.get("spherical_harmonics_fd_step_km", 1e-3))
+    jd_utc_start = env.get("jd_utc_start")
+    if jd_utc_start is None and "jd_utc" in env:
+        jd_utc_start = float(env["jd_utc"]) - float(t_s) / 86400.0
     return accel_spherical_harmonics_terms(
         r_eci_km=x_eci[:3],
         t_s=t_s,
         terms=terms,
         mu_km3_s2=ctx.mu_km3_s2,
         fd_step_km=fd_step_km,
+        jd_utc_start=None if jd_utc_start is None else float(jd_utc_start),
     )
 
 

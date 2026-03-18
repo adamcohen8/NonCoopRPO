@@ -14,18 +14,11 @@ if str(REPO_ROOT) not in sys.path:
 from sim.control.orbit import HCWRelativeOrbitMPCController
 from sim.core.models import StateBelief
 from sim.dynamics.orbit.two_body import propagate_two_body_rk4
-from sim.utils.frames import ric_dcm_ir_from_rv, ric_rect_to_curv
+from sim.utils.frames import eci_relative_to_ric_rect, ric_rect_to_curv
 
 
 def _relative_rect_ric(x_chaser_eci: np.ndarray, x_target_eci: np.ndarray) -> np.ndarray:
-    r_t = x_target_eci[:3]
-    v_t = x_target_eci[3:]
-    r_c = x_chaser_eci[:3]
-    v_c = x_chaser_eci[3:]
-    c_ir = ric_dcm_ir_from_rv(r_t, v_t)
-    dr = c_ir.T @ (r_c - r_t)
-    dv = c_ir.T @ (v_c - v_t)
-    return np.hstack((dr, dv))
+    return eci_relative_to_ric_rect(x_chaser_eci, x_target_eci)
 
 
 if __name__ == "__main__":

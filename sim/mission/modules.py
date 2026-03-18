@@ -11,7 +11,7 @@ from sim.control.attitude.pose_commands import PoseCommandGenerator
 from sim.core.models import Command, StateBelief, StateTruth
 from sim.dynamics.orbit.two_body import propagate_two_body_rk4
 from sim.rocket.models import RocketState, RocketVehicleConfig
-from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
+from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_rect_to_curv
 from sim.utils.quaternion import dcm_to_quaternion_bn, normalize_quaternion, quaternion_to_dcm_bn
 
 logger = logging.getLogger(__name__)
@@ -822,10 +822,10 @@ class PredictiveIntegratedCommandMissionModule:
             v_c = x_tgt_p[3:6]
             r_s = x_self_p[:3]
             v_s = x_self_p[3:6]
-            c_ir = ric_dcm_ir_from_rv(r_c, v_c)
-            dr_ric = c_ir.T @ (r_s - r_c)
-            dv_ric = c_ir.T @ (v_s - v_c)
-            x_rect = np.hstack((dr_ric, dv_ric))
+            x_rect = eci_relative_to_ric_rect(
+                x_dep_eci=np.hstack((r_s, v_s)),
+                x_chief_eci=np.hstack((r_c, v_c)),
+            )
             x_curv = ric_rect_to_curv(x_rect, r0_km=float(np.linalg.norm(r_c)))
             x = np.hstack((x_curv, np.hstack((r_c, v_c))))
             return StateBelief(state=x, covariance=np.eye(12) * 1e-4, last_update_t_s=float(self_truth.t_s))

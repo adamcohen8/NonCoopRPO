@@ -8,7 +8,7 @@ import numpy as np
 from sim.core.interfaces import Controller
 from sim.core.models import Command, StateBelief
 from sim.dynamics.orbit.two_body import propagate_two_body_rk4
-from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv
+from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_state_to_eci
 
 
 @dataclass
@@ -139,11 +139,7 @@ class RelativeOrbitMPCController(Controller):
 
         c_ir = ric_dcm_ir_from_rv(r_tgt, v_tgt)
         x_rel_rect = ric_curv_to_rect(x_rel_curv, r0_km=r0)
-        dr_ric = x_rel_rect[:3]
-        dv_ric = x_rel_rect[3:]
-        r_chaser = r_tgt + c_ir @ dr_ric
-        v_chaser = v_tgt + c_ir @ dv_ric
-        x_chaser0 = np.hstack((r_chaser, v_chaser))
+        x_chaser0 = ric_rect_state_to_eci(x_rel_rect, r_tgt, v_tgt)
 
         x_rel_err = self.state_signs * x_rel_rect - self.target_rel_ric_rect
         a_seed_ric = -(self.seed_kp_pos * x_rel_err[:3] + self.seed_kd_vel * x_rel_err[3:])

@@ -12,6 +12,50 @@ def ric_dcm_ir_from_rv(r_eci_km: np.ndarray, v_eci_km_s: np.ndarray) -> np.ndarr
     return np.column_stack((r_hat, i_hat, c_hat))
 
 
+def ric_angular_rate_eci_from_rv(r_eci_km: np.ndarray, v_eci_km_s: np.ndarray) -> np.ndarray:
+    r = np.array(r_eci_km, dtype=float).reshape(3)
+    v = np.array(v_eci_km_s, dtype=float).reshape(3)
+    r2 = float(np.dot(r, r))
+    if r2 <= 1e-12:
+        return np.zeros(3, dtype=float)
+    return np.cross(r, v) / r2
+
+
+def ric_rect_state_to_eci(
+    x_rel_ric_rect: np.ndarray,
+    r_chief_eci_km: np.ndarray,
+    v_chief_eci_km_s: np.ndarray,
+) -> np.ndarray:
+    x_rel = np.array(x_rel_ric_rect, dtype=float).reshape(6)
+    c_ir = ric_dcm_ir_from_rv(r_chief_eci_km, v_chief_eci_km_s)
+    omega_ric_eci = ric_angular_rate_eci_from_rv(r_chief_eci_km, v_chief_eci_km_s)
+    dr_eci = c_ir @ x_rel[:3]
+    dv_eci = c_ir @ x_rel[3:] + np.cross(omega_ric_eci, dr_eci)
+    return np.hstack(
+        (
+            np.array(r_chief_eci_km, dtype=float).reshape(3) + dr_eci,
+            np.array(v_chief_eci_km_s, dtype=float).reshape(3) + dv_eci,
+        )
+    )
+
+
+def eci_relative_to_ric_rect(
+    x_dep_eci: np.ndarray,
+    x_chief_eci: np.ndarray,
+) -> np.ndarray:
+    x_dep = np.array(x_dep_eci, dtype=float).reshape(6)
+    x_chief = np.array(x_chief_eci, dtype=float).reshape(6)
+    r_chief = x_chief[:3]
+    v_chief = x_chief[3:]
+    c_ir = ric_dcm_ir_from_rv(r_chief, v_chief)
+    omega_ric_eci = ric_angular_rate_eci_from_rv(r_chief, v_chief)
+    dr_eci = x_dep[:3] - r_chief
+    dv_eci = x_dep[3:] - v_chief
+    dr_ric = c_ir.T @ dr_eci
+    dv_ric = c_ir.T @ (dv_eci - np.cross(omega_ric_eci, dr_eci))
+    return np.hstack((dr_ric, dv_ric))
+
+
 def dcm_to_euler_321(dcm: np.ndarray) -> np.ndarray:
     psi = np.arctan2(dcm[1, 0], dcm[0, 0])
     theta = -np.arcsin(np.clip(dcm[2, 0], -1.0, 1.0))

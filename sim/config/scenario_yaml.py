@@ -140,8 +140,14 @@ def _parse_agent_section(value: Any, role: str) -> AgentSection:
     objectives = d.get("mission_objectives", []) or []
     if not isinstance(objectives, list):
         raise ValueError(f"Section '{role}.mission_objectives' must be a list.")
+    default_enabled_by_role = {
+        "rocket": False,
+        "chaser": False,
+        "target": True,
+    }
+    default_enabled = bool(default_enabled_by_role.get(role, True))
     return AgentSection(
-        enabled=bool(d.get("enabled", True)),
+        enabled=bool(d.get("enabled", default_enabled)),
         role=str(d.get("role", role)),
         specs=dict(d.get("specs", {}) or {}),
         initial_state=dict(d.get("initial_state", {}) or {}),
@@ -156,6 +162,10 @@ def _parse_agent_section(value: Any, role: str) -> AgentSection:
 
 def _parse_simulator_section(value: Any) -> SimulatorSection:
     d = _as_dict(value, "simulator")
+    plugin_validation = {"strict": True}
+    plugin_validation.update(dict(d.get("plugin_validation", {}) or {}))
+    termination = {"earth_impact_enabled": True, "earth_radius_km": 6378.137}
+    termination.update(dict(d.get("termination", {}) or {}))
     out = SimulatorSection(
         scenario_type=str(d.get("scenario_type", "auto")),
         duration_s=float(d.get("duration_s", 3600.0)),
@@ -163,8 +173,8 @@ def _parse_simulator_section(value: Any) -> SimulatorSection:
         initial_jd_utc=float(d["initial_jd_utc"]) if d.get("initial_jd_utc") is not None else None,
         dynamics=dict(d.get("dynamics", {}) or {}),
         environment=dict(d.get("environment", {}) or {}),
-        plugin_validation=dict(d.get("plugin_validation", {}) or {}),
-        termination=dict(d.get("termination", {}) or {}),
+        plugin_validation=plugin_validation,
+        termination=termination,
     )
     if out.dt_s <= 0.0:
         raise ValueError("simulator.dt_s must be positive.")

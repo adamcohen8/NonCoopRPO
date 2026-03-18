@@ -51,13 +51,13 @@ class OrbitalAttitudeDynamics(DynamicsModel):
             v_atm_eci_km_s = np.cross(omega_earth, state.position_eci_km)
             v_rel_eci_km_s = state.velocity_eci_km_s - v_atm_eci_km_s
             v_rel_body = c_bn @ v_rel_eci_km_s
-            env_local["drag_area_m2"] = geom.projected_area_m2(v_rel_body)
+            env_local["drag_area_m2"] = geom.projected_area_m2(-v_rel_body)
 
             sun_dir_eci = np.array(env_local.get("sun_dir_eci", np.array([1.0, 0.0, 0.0])), dtype=float)
             s_norm = float(np.linalg.norm(sun_dir_eci))
             if s_norm > 0.0:
                 sun_dir_body = c_bn @ (sun_dir_eci / s_norm)
-                env_local["srp_area_m2"] = geom.projected_area_m2(sun_dir_body)
+                env_local["srp_area_m2"] = geom.projected_area_m2(-sun_dir_body)
 
         x_orbit = np.hstack((state.position_eci_km, state.velocity_eci_km_s))
         orbit_ctx = OrbitContext(

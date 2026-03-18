@@ -54,7 +54,7 @@ from sim.rocket.guidance import MaxQThrottleLimiterGuidance, OrbitInsertionCutof
 from sim.sensors.noisy_own_state import NoisyOwnStateSensor
 from sim.utils.io import write_json
 from sim.utils.ground_track import ground_track_from_eci_history
-from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
+from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_rect_state_to_eci, ric_rect_to_curv
 from sim.utils.quaternion import quaternion_to_dcm_bn
 
 logger = logging.getLogger(__name__)
@@ -498,12 +498,9 @@ def _apply_chaser_relative_init_from_target(
         return
 
     x_rel_rect = ric_curv_to_rect(x_rel, r0_km=r0) if frame == "curv" else np.array(x_rel, dtype=float).reshape(6)
-    dr_ric = x_rel_rect[:3]
-    dv_ric = x_rel_rect[3:]
-    c_ir = ric_dcm_ir_from_rv(r_t, v_t)
-
-    chaser.truth.position_eci_km = r_t + c_ir @ dr_ric
-    chaser.truth.velocity_eci_km_s = v_t + c_ir @ dv_ric
+    x_chaser_eci = ric_rect_state_to_eci(x_rel_rect, r_t, v_t)
+    chaser.truth.position_eci_km = x_chaser_eci[:3]
+    chaser.truth.velocity_eci_km_s = x_chaser_eci[3:]
 
 
 def _build_orbit_propagator(cfg: SimulationScenarioConfig) -> OrbitPropagator:
@@ -2186,10 +2183,10 @@ def _run_single_config(
                             v_c = np.array(chief_truth.velocity_eci_km_s, dtype=float)
                             r_s = np.array(tr_inner.position_eci_km, dtype=float)
                             v_s = np.array(tr_inner.velocity_eci_km_s, dtype=float)
-                            c_ir = ric_dcm_ir_from_rv(r_c, v_c)
-                            dr_ric = c_ir.T @ (r_s - r_c)
-                            dv_ric = c_ir.T @ (v_s - v_c)
-                            x_rect = np.hstack((dr_ric, dv_ric))
+                            x_rect = eci_relative_to_ric_rect(
+                                x_dep_eci=np.hstack((r_s, v_s)),
+                                x_chief_eci=np.hstack((r_c, v_c)),
+                            )
                             x_curv = ric_rect_to_curv(x_rect, r0_km=float(np.linalg.norm(r_c)))
                             orb_state = np.hstack((x_curv, np.hstack((r_c, v_c))))
                             orb_belief = StateBelief(

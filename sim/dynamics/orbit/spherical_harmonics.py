@@ -92,6 +92,7 @@ def accel_spherical_harmonics_terms(
     mu_km3_s2: float = EARTH_MU_KM3_S2,
     re_km: float = EARTH_RADIUS_KM,
     fd_step_km: float = 1e-3,
+    jd_utc_start: float | None = None,
 ) -> np.ndarray:
     """
     Acceleration in ECI from arbitrary spherical-harmonic terms (n,m).
@@ -103,7 +104,7 @@ def accel_spherical_harmonics_terms(
     if fd_step_km <= 0.0:
         raise ValueError("fd_step_km must be positive.")
 
-    r_ecef = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s))
+    r_ecef = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s), jd_utc_start=jd_utc_start)
 
     def _u_at(pos_ecef_km: np.ndarray) -> float:
         u = 0.0
@@ -121,7 +122,7 @@ def accel_spherical_harmonics_terms(
         grad_ecef[i] = (up - um) / (2.0 * h)
 
     # Gravity acceleration equals gradient of potential.
-    return ecef_to_eci(grad_ecef, float(t_s))
+    return ecef_to_eci(grad_ecef, float(t_s), jd_utc_start=jd_utc_start)
 
 
 def _fully_normalized_legendre_scale(n: int, m: int) -> float:

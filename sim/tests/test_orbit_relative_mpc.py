@@ -5,10 +5,17 @@ import numpy as np
 from sim.control.orbit import RelativeOrbitMPCController
 from sim.core.models import StateBelief
 from sim.dynamics.orbit.two_body import propagate_two_body_rk4
-from sim.utils.frames import ric_dcm_ir_from_rv, ric_rect_to_curv
+from sim.utils.frames import eci_relative_to_ric_rect, ric_rect_state_to_eci, ric_rect_to_curv
 
 
 class TestRelativeOrbitMPCController(unittest.TestCase):
+    def test_ric_rect_inertial_round_trip_preserves_velocity(self):
+        x_target = np.array([7000.0, 0.0, 0.0, 0.0, 7.546049108166282, 0.0], dtype=float)
+        x_rel_rect = np.array([1.2, -0.8, 0.2, -0.002, 0.0015, 0.0007], dtype=float)
+        x_chaser = ric_rect_state_to_eci(x_rel_rect, x_target[:3], x_target[3:])
+        x_rel_back = eci_relative_to_ric_rect(x_chaser, x_target)
+        self.assertTrue(np.allclose(x_rel_back, x_rel_rect, atol=1e-12))
+
     def test_zero_relative_state_commands_near_zero(self):
         ctrl = RelativeOrbitMPCController(
             max_accel_km_s2=2e-5,
@@ -66,10 +73,7 @@ class TestRelativeOrbitMPCController(unittest.TestCase):
         d0 = None
         d_final = None
         for k in range(30):
-            c_ir = ric_dcm_ir_from_rv(x_target[:3], x_target[3:])
-            dr_ric = c_ir.T @ (x_chaser[:3] - x_target[:3])
-            dv_ric = c_ir.T @ (x_chaser[3:] - x_target[3:])
-            x_rel_rect = np.hstack((dr_ric, dv_ric))
+            x_rel_rect = eci_relative_to_ric_rect(x_chaser, x_target)
             x_rel_curv = ric_rect_to_curv(x_rel_rect, r0_km=float(np.linalg.norm(x_target[:3])))
             belief = StateBelief(
                 state=np.hstack((x_rel_curv, x_target)),

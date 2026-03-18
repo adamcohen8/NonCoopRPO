@@ -50,6 +50,24 @@ class TestOrbitSphericalHarmonics(unittest.TestCase):
         a = spherical_harmonics_plugin(0.0, x, env=env, ctx=_Ctx())
         self.assertGreater(float(np.linalg.norm(a)), 0.0)
 
+    def test_plugin_respects_epoch_for_tesseral_terms(self):
+        x = np.array([7000.0, 0.0, 100.0, 0.0, 7.5, 0.0], dtype=float)
+        env0 = {
+            "spherical_harmonics_terms": [{"n": 2, "m": 2, "c_nm": 1e-6, "s_nm": 0.0}],
+            "jd_utc_start": 2451545.0,
+        }
+        env1 = {
+            "spherical_harmonics_terms": [{"n": 2, "m": 2, "c_nm": 1e-6, "s_nm": 0.0}],
+            "jd_utc_start": 2451545.25,
+        }
+
+        class _Ctx:
+            mu_km3_s2 = EARTH_MU_KM3_S2
+
+        a0 = spherical_harmonics_plugin(0.0, x, env=env0, ctx=_Ctx())
+        a1 = spherical_harmonics_plugin(0.0, x, env=env1, ctx=_Ctx())
+        self.assertFalse(np.allclose(a0, a1))
+
     def test_load_icgem_gfc_terms_normalized_flag(self):
         gfc_txt = "\n".join(
             [

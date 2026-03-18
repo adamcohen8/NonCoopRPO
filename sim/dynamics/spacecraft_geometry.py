@@ -68,8 +68,8 @@ class RectangularPrismGeometry:
         areas = self.face_areas_m2()
         illum = np.maximum(0.0, -(normals @ u))
         mags = pressure_n_m2 * areas * illum
-        # Lumped body force direction opposite incident direction.
-        return mags[:, None] * (-u[None, :])
+        # Lumped absorber-model force follows the incoming momentum flux direction.
+        return mags[:, None] * u[None, :]
 
     def face_torque_sum_body_nm(self, incident_dir_body: np.ndarray, pressure_n_m2: float) -> np.ndarray:
         r_faces = self.face_centers_body_m()
