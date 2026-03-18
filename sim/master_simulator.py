@@ -28,6 +28,7 @@ from sim.dynamics.attitude.disturbances import DisturbanceTorqueConfig, Disturba
 from sim.dynamics.attitude.rigid_body import get_attitude_guardrail_stats, reset_attitude_guardrail_stats
 from sim.dynamics.model import OrbitalAttitudeDynamics
 from sim.dynamics.orbit.accelerations import OrbitContext
+from sim.dynamics.orbit.frames import eci_to_ecef
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
 from sim.dynamics.orbit.propagator import (
     OrbitPropagator,
@@ -48,12 +49,13 @@ from sim.knowledge.object_tracking import (
     ObjectKnowledgeBase,
     TrackedObjectConfig,
 )
-from sim.rocket import OpenLoopPitchProgramGuidance, RocketAscentSimulator, RocketSimConfig, RocketState, RocketVehicleConfig
+from sim.rocket import OpenLoopPitchProgramGuidance, RocketAscentSimulator, RocketSimConfig, RocketState, RocketVehicleConfig, TVCSteeringGuidance
 from sim.rocket.aero import RocketAeroConfig
 from sim.rocket.guidance import MaxQThrottleLimiterGuidance, OrbitInsertionCutoffGuidance
 from sim.sensors.noisy_own_state import NoisyOwnStateSensor
 from sim.utils.io import write_json
 from sim.utils.ground_track import ground_track_from_eci_history
+from sim.utils.geodesy import ecef_to_geodetic_deg_km
 from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_rect_state_to_eci, ric_rect_to_curv
 from sim.utils.quaternion import quaternion_to_dcm_bn
 
@@ -142,6 +144,18 @@ def _quat_error_angle_deg(q_des: np.ndarray, q_cur: np.ndarray) -> float:
     qc /= nc
     dot = float(np.clip(np.dot(qd, qc), -1.0, 1.0))
     return float(np.degrees(2.0 * np.arccos(abs(dot))))
+
+
+def _rocket_altitude_km(r_eci_km: np.ndarray, t_s: float, sim_cfg: RocketSimConfig) -> float:
+    if not bool(getattr(sim_cfg, "use_wgs84_geodesy", False)):
+        return float(np.linalg.norm(r_eci_km) - EARTH_RADIUS_KM)
+    r_ecef = eci_to_ecef(
+        np.array(r_eci_km, dtype=float),
+        float(t_s),
+        jd_utc_start=(dict(getattr(sim_cfg, "atmosphere_env", {}) or {}).get("jd_utc_start")),
+    )
+    _, _, alt_km = ecef_to_geodetic_deg_km(r_ecef)
+    return float(alt_km)
 
 
 def _module_obj(pointer) -> Any | None:
@@ -714,6 +728,8 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         cr=float(rocket_dyn.get("cr", 1.2)),
         aero=aero_cfg,
         atmosphere_env=atmosphere_env,
+        use_wgs84_geodesy=bool(rocket_dyn.get("use_wgs84_geodesy", True)),
+        wind_enu_m_s=np.array(rocket_dyn.get("wind_enu_m_s", [0.0, 0.0, 0.0]), dtype=float),
         inertia_kg_m2=np.array(
             (r_specs.get("mass_properties", {}) or {}).get(
                 "inertia_kg_m2",
@@ -728,6 +744,10 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
             )
         ),
         attitude_mode=str(rocket_dyn.get("attitude_mode", "dynamic")),
+        tvc_time_constant_s=float(rocket_dyn.get("tvc_time_constant_s", 0.1)),
+        tvc_max_gimbal_deg=float(rocket_dyn.get("tvc_max_gimbal_deg", 6.0)),
+        tvc_rate_limit_deg_s=float(rocket_dyn.get("tvc_rate_limit_deg_s", 20.0)),
+        tvc_pivot_offset_body_m=np.array(rocket_dyn.get("tvc_pivot_offset_body_m", [0.0, 0.0, 0.0]), dtype=float),
     )
     vehicle_cfg = RocketVehicleConfig(
         stack=_resolve_rocket_stack(dict(rc.specs or {})),
@@ -735,6 +755,11 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         thrust_axis_body=np.array(r_specs.get("thrust_axis_body", [1.0, 0.0, 0.0]), dtype=float),
     )
     guidance = _module_obj(rc.guidance) or OpenLoopPitchProgramGuidance()
+    if bool(rocket_dyn.get("tvc_steering_enabled", False)):
+        guidance = TVCSteeringGuidance(
+            base_guidance=guidance,
+            pass_through_attitude=bool(rocket_dyn.get("tvc_pass_through_attitude", True)),
+        )
     if bool(rocket_dyn.get("orbit_insertion_cutoff_enabled", False)):
         guidance = OrbitInsertionCutoffGuidance(
             base_guidance=guidance,
@@ -2357,7 +2382,10 @@ def _run_single_config(
                 if a.kind == "rocket" and a.waiting_for_launch:
                     continue
                 tr = a.truth if a.kind == "satellite" else _rocket_state_to_truth(a.rocket_state)
-                if float(np.linalg.norm(tr.position_eci_km)) <= re:
+                impact = float(np.linalg.norm(tr.position_eci_km)) <= re
+                if a.kind == "rocket" and a.rocket_sim is not None:
+                    impact = bool(_rocket_altitude_km(tr.position_eci_km, tr.t_s, a.rocket_sim.sim_cfg) <= 0.0)
+                if impact:
                     terminated_early = True
                     termination_reason = "earth_impact"
                     termination_time_s = t_next
@@ -2370,7 +2398,8 @@ def _run_single_config(
         if rocket is not None and rocket.active and (not rocket.waiting_for_launch) and rocket.rocket_state is not None and rocket.rocket_sim is not None:
             rs = rocket.rocket_state
             sim_cfg = rocket.rocket_sim.sim_cfg
-            near_alt = abs((np.linalg.norm(rs.position_eci_km) - EARTH_RADIUS_KM) - float(sim_cfg.target_altitude_km)) <= float(sim_cfg.target_altitude_tolerance_km)
+            alt_km = _rocket_altitude_km(rs.position_eci_km, rs.t_s, sim_cfg)
+            near_alt = abs(float(alt_km) - float(sim_cfg.target_altitude_km)) <= float(sim_cfg.target_altitude_tolerance_km)
             _, ecc_now = _orbital_elements_basic(np.array(rs.position_eci_km, dtype=float), np.array(rs.velocity_eci_km_s, dtype=float))
             low_e = float(ecc_now) <= float(sim_cfg.target_eccentricity_max)
             stages_done = int(rs.active_stage_index) >= len(rocket.rocket_sim.vehicle_cfg.stack.stages)
