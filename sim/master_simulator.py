@@ -291,6 +291,68 @@ def _closest_approach_from_run_payload(run_output: dict[str, Any]) -> float:
     return closest_approach_km
 
 
+def _relative_range_series_from_run_payload(run_output: dict[str, Any]) -> dict[str, np.ndarray] | None:
+    try:
+        tb = dict(run_output.get("truth_by_object", {}) or {})
+        t_s = np.array(run_output.get("time_s", []), dtype=float).reshape(-1)
+        tgt = np.array(tb.get("target", []), dtype=float)
+        ch = np.array(tb.get("chaser", []), dtype=float)
+        if (
+            t_s.ndim != 1
+            or t_s.size == 0
+            or tgt.ndim != 2
+            or ch.ndim != 2
+            or tgt.shape[0] == 0
+            or ch.shape[0] == 0
+        ):
+            return None
+        n_rel = int(min(t_s.size, tgt.shape[0], ch.shape[0]))
+        dr = ch[:n_rel, :3] - tgt[:n_rel, :3]
+        return {
+            "time_s": np.array(t_s[:n_rel], dtype=float),
+            "range_km": np.array(np.linalg.norm(dr, axis=1), dtype=float),
+        }
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _mc_initial_relative_ric_curv_samples(
+    cfg: SimulationScenarioConfig,
+    run_details: list[dict[str, Any]],
+) -> dict[str, np.ndarray]:
+    rel_block = dict((cfg.chaser.initial_state or {}).get("relative_to_target_ric", {}) or {})
+    frame = str(rel_block.get("frame", "rect")).strip().lower()
+    base_state = np.array(rel_block.get("state", []), dtype=float).reshape(-1)
+    if frame != "curv" or base_state.size != 6 or not run_details:
+        return {}
+
+    paths = {
+        "radial_sep_km": "chaser.initial_state.relative_to_target_ric.state[0]",
+        "in_track_sep_km": "chaser.initial_state.relative_to_target_ric.state[1]",
+        "cross_track_sep_km": "chaser.initial_state.relative_to_target_ric.state[2]",
+        "radial_vel_km_s": "chaser.initial_state.relative_to_target_ric.state[3]",
+        "in_track_vel_km_s": "chaser.initial_state.relative_to_target_ric.state[4]",
+        "cross_track_vel_km_s": "chaser.initial_state.relative_to_target_ric.state[5]",
+    }
+    index_by_name = {
+        "radial_sep_km": 0,
+        "in_track_sep_km": 1,
+        "cross_track_sep_km": 2,
+        "radial_vel_km_s": 3,
+        "in_track_vel_km_s": 4,
+        "cross_track_vel_km_s": 5,
+    }
+    out: dict[str, np.ndarray] = {}
+    for name, path in paths.items():
+        idx = index_by_name[name]
+        vals: list[float] = []
+        for rd in run_details:
+            sampled = dict(rd.get("sampled_parameters", {}) or {})
+            vals.append(float(_safe_float(sampled.get(path), default=float(base_state[idx]))))
+        out[name] = np.array(vals, dtype=float)
+    return out
+
+
 def _run_mc_iteration_from_dict(task: dict[str, Any]) -> dict[str, Any]:
     iteration = int(task.get("iteration", 0))
     cdict = dict(task.get("config_dict", {}) or {})
@@ -346,6 +408,7 @@ def _run_mc_iteration_from_dict(task: dict[str, Any]) -> dict[str, Any]:
         "iteration": iteration,
         "summary": ro["summary"],
         "closest_approach_km": _closest_approach_from_run_payload(ro),
+        "relative_range_series": _relative_range_series_from_run_payload(ro),
     }
 
 
@@ -2655,6 +2718,7 @@ def run_master_simulation(
     duration_runs_s: list[float] = []
     guardrail_event_runs: list[int] = []
     total_dv_runs_m_s: list[float] = []
+    relative_range_series_runs: list[dict[str, np.ndarray] | None] = []
     failure_mode_counts: dict[str, int] = {}
     success_termination_reasons = {str(x) for x in (mc_out_cfg.get("success_termination_reasons", ["rocket_orbit_insertion"]) or [])}
     require_rocket_insertion = bool(mc_out_cfg.get("require_rocket_insertion", False))
@@ -2782,6 +2846,7 @@ def run_master_simulation(
                 "iteration": int(p["iteration"]),
                 "summary": ro["summary"],
                 "closest_approach_km": _closest_approach_from_run_payload(ro),
+                "relative_range_series": _relative_range_series_from_run_payload(ro),
             }
             completed_count += 1
             if mc_callback is not None:
@@ -2796,6 +2861,7 @@ def run_master_simulation(
         cres = dict(completed.get(i, {}) or {})
         ro_summary = dict(cres.get("summary", {}) or {})
         closest_approach_km = _safe_float(cres.get("closest_approach_km"))
+        relative_range_series_runs.append(cres.get("relative_range_series"))
         closest_approach_km_runs.append(closest_approach_km)
         assessment = _assess_mc_run(
             run_entry={"summary": ro_summary, "closest_approach_km": closest_approach_km},
@@ -3131,11 +3197,36 @@ def run_master_simulation(
             plt.show()
         plt.close(fig)
 
+        range_series_available = [s for s in relative_range_series_runs if isinstance(s, dict)]
+        if range_series_available:
+            fig_rr, ax_rr = plt.subplots(figsize=cap_figsize(10, 6))
+            for idx, series in enumerate(relative_range_series_runs):
+                if not isinstance(series, dict):
+                    continue
+                t_rr = np.array(series.get("time_s", []), dtype=float)
+                r_rr = np.array(series.get("range_km", []), dtype=float)
+                if t_rr.size == 0 or r_rr.size == 0:
+                    continue
+                ax_rr.plot(t_rr, r_rr, linewidth=1.0, alpha=0.65, label=f"run {idx}")
+            ax_rr.set_title("Chaser-Target Relative Range by Iteration")
+            ax_rr.set_xlabel("Time (s)")
+            ax_rr.set_ylabel("Range (km)")
+            ax_rr.grid(True, alpha=0.3)
+            fig_rr.tight_layout()
+            rr_path = outdir / "master_monte_carlo_relative_range_timeseries.png"
+            if save_hist:
+                fig_rr.savefig(str(rr_path), dpi=int(cfg.outputs.plots.get("dpi", 150)))
+                agg["artifacts"]["relative_range_timeseries_png"] = str(rr_path)
+            if show_hist:
+                plt.show()
+            plt.close(fig_rr)
+
     save_ops_dashboard = bool(mc_out_cfg.get("save_ops_dashboard", True))
     show_ops_dashboard = bool(mc_out_cfg.get("display_ops_dashboard", False))
     if (save_ops_dashboard or show_ops_dashboard) and run_details:
         import matplotlib.pyplot as plt
 
+        ric_initial_samples = _mc_initial_relative_ric_curv_samples(cfg, run_details)
         pass_color = np.array(["tab:green" if bool(d.get("pass", False)) else "tab:red" for d in run_details], dtype=object)
         idx_arr = np.arange(len(run_details), dtype=float)
         ca_run_arr = np.array([_safe_float(d.get("closest_approach_km")) for d in run_details], dtype=float)
@@ -3205,6 +3296,43 @@ def run_master_simulation(
         if show_ops_dashboard:
             plt.show()
         plt.close(fig)
+
+        if ric_initial_samples:
+            fig_ic, axes_ic = plt.subplots(3, 2, figsize=cap_figsize(12, 9), squeeze=False)
+            scatter_specs = [
+                ("radial_sep_km", "Initial Radial Separation (km)"),
+                ("radial_vel_km_s", "Initial Radial Velocity (km/s)"),
+                ("in_track_sep_km", "Initial In-Track Separation (km)"),
+                ("in_track_vel_km_s", "Initial In-Track Velocity (km/s)"),
+                ("cross_track_sep_km", "Initial Cross-Track Separation (km)"),
+                ("cross_track_vel_km_s", "Initial Cross-Track Velocity (km/s)"),
+            ]
+            axes_ic_flat = [
+                axes_ic[0, 0],
+                axes_ic[0, 1],
+                axes_ic[1, 0],
+                axes_ic[1, 1],
+                axes_ic[2, 0],
+                axes_ic[2, 1],
+            ]
+            for ax, (key, xlabel) in zip(axes_ic_flat, scatter_specs):
+                x = np.array(ric_initial_samples.get(key, []), dtype=float)
+                finite = np.isfinite(x) & np.isfinite(ca_run_arr)
+                ax.scatter(x[finite], ca_run_arr[finite], c=pass_color[finite], s=24, alpha=0.85)
+                if np.isfinite(keepout_threshold):
+                    ax.axhline(keepout_threshold, linestyle="--", color="k")
+                ax.set_xlabel(xlabel)
+                ax.set_ylabel("Closest Approach (km)")
+                ax.grid(True, alpha=0.3)
+            fig_ic.suptitle("Initial Relative RIC State vs Closest Approach", fontsize=12)
+            fig_ic.tight_layout()
+            ic_path = outdir / "master_monte_carlo_initial_relative_state_vs_closest_approach.png"
+            if save_ops_dashboard:
+                fig_ic.savefig(str(ic_path), dpi=int(cfg.outputs.plots.get("dpi", 150)))
+                agg["artifacts"]["initial_relative_state_vs_closest_approach_png"] = str(ic_path)
+            if show_ops_dashboard:
+                plt.show()
+            plt.close(fig_ic)
 
         rem_obj_ids = [oid for oid in ("chaser", "target") if oid in dv_budget_m_s_by_object]
         if rem_obj_ids:
