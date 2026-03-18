@@ -161,6 +161,27 @@ python run_simulation.py --config configs/automation_smoke.yaml
 
 `run_master_simulation` also auto-switches `outputs.mode: interactive` to `save` when `SIM_AUTOMATION=1` or `CI=1`.
 
+### 2d) Streamlit GUI
+
+The repository also includes a separate Streamlit GUI entrypoint for editing YAML-backed configs and launching runs without changing the existing CLI workflow:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+The GUI:
+
+- loads configs from [`configs/`](/Users/adamcohen/Downloads/NonCooperativeRPO/configs)
+- edits a V1 subset of common scenario/object/output fields
+- provides an advanced raw YAML editor
+- saves a config file and launches the existing [`run_simulation.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/run_simulation.py) entrypoint
+
+The existing CLI flow remains unchanged:
+
+```bash
+python run_simulation.py --config configs/my_scenario.yaml
+```
+
 ### 2b) Use fidelity profiles
 
 Most modern demos now support a shared profile selector:
