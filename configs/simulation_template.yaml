@@ -338,6 +338,7 @@ outputs:
     save_raw_runs: false
     baseline_summary_json: ""
     success_termination_reasons: ["rocket_orbit_insertion"]
+    catastrophic_failure_reasons: ["terminated_early:earth_impact"]
     require_rocket_insertion: false
     gates:
       min_closest_approach_km: 0.25
@@ -349,6 +350,8 @@ monte_carlo:
   enabled: false
   iterations: 100
   base_seed: 1000
+  parallel_enabled: false
+  parallel_workers: 0
   variations:
     - parameter_path: "rocket.initial_state.launch_azimuth_deg"
       mode: "normal"

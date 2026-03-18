@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import importlib
 import json
 import logging
+import multiprocessing as mp
 import os
 from pathlib import Path
+import queue as queue_mod
 import subprocess
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -25,7 +29,17 @@ from sim.dynamics.attitude.rigid_body import get_attitude_guardrail_stats, reset
 from sim.dynamics.model import OrbitalAttitudeDynamics
 from sim.dynamics.orbit.accelerations import OrbitContext
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
-from sim.dynamics.orbit.propagator import OrbitPropagator, drag_plugin, j2_plugin, j3_plugin, j4_plugin, srp_plugin
+from sim.dynamics.orbit.propagator import (
+    OrbitPropagator,
+    drag_plugin,
+    j2_plugin,
+    j3_plugin,
+    j4_plugin,
+    spherical_harmonics_plugin,
+    srp_plugin,
+    third_body_moon_plugin,
+    third_body_sun_plugin,
+)
 from sim.estimation.orbit_ekf import OrbitEKFEstimator
 from sim.knowledge.object_tracking import (
     KnowledgeConditionConfig,
@@ -170,6 +184,82 @@ def _deep_set(root: dict[str, Any], path: str, value: Any) -> None:
             cur[tok] = value
             return
         cur = cur[tok]
+
+
+def _closest_approach_from_run_payload(run_output: dict[str, Any]) -> float:
+    closest_approach_km = float("nan")
+    try:
+        tb = dict(run_output.get("truth_by_object", {}) or {})
+        tgt = np.array(tb.get("target", []), dtype=float)
+        ch = np.array(tb.get("chaser", []), dtype=float)
+        if tgt.ndim == 2 and ch.ndim == 2 and tgt.shape[0] > 0 and ch.shape[0] > 0:
+            n_rel = int(min(tgt.shape[0], ch.shape[0]))
+            dr = ch[:n_rel, :3] - tgt[:n_rel, :3]
+            rng_km = np.linalg.norm(dr, axis=1)
+            finite = rng_km[np.isfinite(rng_km)]
+            if finite.size > 0:
+                closest_approach_km = float(np.min(finite))
+    except (TypeError, ValueError, KeyError, IndexError):
+        closest_approach_km = float("nan")
+    return closest_approach_km
+
+
+def _run_mc_iteration_from_dict(task: dict[str, Any]) -> dict[str, Any]:
+    iteration = int(task.get("iteration", 0))
+    cdict = dict(task.get("config_dict", {}) or {})
+    strict_plugins = bool(task.get("strict_plugins", True))
+    progress_queue = task.get("progress_queue")
+    emit_every = int(task.get("progress_emit_every", 20) or 20)
+    emit_every = max(1, emit_every)
+    ci = scenario_config_from_dict(cdict)
+    if strict_plugins:
+        errs = validate_scenario_plugins(ci)
+        if errs:
+            msg = "Plugin validation failed in Monte Carlo iteration {i}:\n- ".format(i=iteration) + "\n- ".join(errs)
+            raise ValueError(msg)
+
+    last_emit = -10**9
+
+    def _on_step(step: int, total: int) -> None:
+        nonlocal last_emit
+        if progress_queue is None:
+            return
+        s = max(int(step), 0)
+        t = max(int(total), 0)
+        should_emit = (s == 0) or (t > 0 and s >= t) or (s - last_emit >= emit_every)
+        if not should_emit:
+            return
+        last_emit = s
+        try:
+            progress_queue.put(
+                {
+                    "event": "step",
+                    "pid": int(os.getpid()),
+                    "iteration": int(iteration),
+                    "step": int(s),
+                    "total": int(t),
+                }
+            )
+        except Exception:
+            pass
+
+    ro = _run_single_config(ci, step_callback=_on_step if progress_queue is not None else None)
+    if progress_queue is not None:
+        try:
+            progress_queue.put(
+                {
+                    "event": "done",
+                    "pid": int(os.getpid()),
+                    "iteration": int(iteration),
+                }
+            )
+        except Exception:
+            pass
+    return {
+        "iteration": iteration,
+        "summary": ro["summary"],
+        "closest_approach_km": _closest_approach_from_run_payload(ro),
+    }
 
 
 def _sample_variation(v, rng: np.random.Generator) -> Any:
@@ -337,6 +427,23 @@ def _resolve_satellite_isp_s(specs: dict[str, Any]) -> float:
     return 0.0
 
 
+def _satellite_initial_delta_v_budget_m_s(agent_cfg: Any) -> float:
+    specs = dict(getattr(agent_cfg, "specs", {}) or {})
+    dry_mass_kg = _safe_float(specs.get("dry_mass_kg"))
+    fuel_mass_kg = _safe_float(specs.get("fuel_mass_kg"))
+    if not (np.isfinite(dry_mass_kg) and np.isfinite(fuel_mass_kg)):
+        return float("nan")
+    if dry_mass_kg <= 0.0 or fuel_mass_kg < 0.0:
+        return float("nan")
+    m0_kg = dry_mass_kg + fuel_mass_kg
+    if m0_kg <= dry_mass_kg:
+        return 0.0
+    isp_s = _resolve_satellite_isp_s(specs)
+    if isp_s <= 0.0:
+        return float("nan")
+    return float(isp_s * 9.80665 * np.log(m0_kg / dry_mass_kg))
+
+
 def _resolve_satellite_inertia_kg_m2(specs: dict[str, Any]) -> np.ndarray:
     mp = dict(specs.get("mass_properties", {}) or {})
     if "inertia_kg_m2" in mp:
@@ -401,6 +508,7 @@ def _apply_chaser_relative_init_from_target(
 
 def _build_orbit_propagator(cfg: SimulationScenarioConfig) -> OrbitPropagator:
     o = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
+    sh = dict(o.get("spherical_harmonics", {}) or {})
     plugins = []
     if bool(o.get("j2", False)):
         plugins.append(j2_plugin)
@@ -408,10 +516,16 @@ def _build_orbit_propagator(cfg: SimulationScenarioConfig) -> OrbitPropagator:
         plugins.append(j3_plugin)
     if bool(o.get("j4", False)):
         plugins.append(j4_plugin)
+    if bool(sh.get("enabled", False)):
+        plugins.append(spherical_harmonics_plugin)
     if bool(o.get("drag", False)):
         plugins.append(drag_plugin)
     if bool(o.get("srp", False)):
         plugins.append(srp_plugin)
+    if bool(o.get("third_body_sun", False)):
+        plugins.append(third_body_sun_plugin)
+    if bool(o.get("third_body_moon", False)):
+        plugins.append(third_body_moon_plugin)
     return OrbitPropagator(integrator="rk4", plugins=plugins)
 
 
@@ -439,6 +553,7 @@ class AgentRuntime:
     mission_modules: list[Any]
     waiting_for_launch: bool
     orbital_isp_s: float | None = None
+    dry_mass_kg: float | None = None
 
 
 @dataclass
@@ -485,11 +600,12 @@ def _create_satellite_runtime(
     att_ctrl_base = _module_obj(agent_cfg.attitude_control) or ZeroTorqueController()
     orbit_cfg = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
     att_cfg = dict(cfg.simulator.dynamics.get("attitude", {}) or {})
+    attitude_enabled = bool(att_cfg.get("enabled", True))
     dist_cfg = dict(att_cfg.get("disturbance_torques", {}) or {})
     orbit_ctrl_period_s = float(max(float(orbit_cfg.get("orbit_substep_s", cfg.simulator.dt_s) or cfg.simulator.dt_s), 1e-9))
     att_ctrl_period_s = float(max(float(att_cfg.get("attitude_substep_s", cfg.simulator.dt_s) or cfg.simulator.dt_s), 1e-9))
     orbit_ctrl = _RateLimitedController(base=orbit_ctrl_base, period_s=orbit_ctrl_period_s)
-    att_ctrl = _RateLimitedController(base=att_ctrl_base, period_s=att_ctrl_period_s)
+    att_ctrl = _RateLimitedController(base=att_ctrl_base, period_s=att_ctrl_period_s) if attitude_enabled else None
     dmodel = DisturbanceTorqueModel(
         mu_km3_s2=EARTH_MU_KM3_S2,
         inertia_kg_m2=inertia_kg_m2,
@@ -503,15 +619,24 @@ def _create_satellite_runtime(
     dyn = OrbitalAttitudeDynamics(
         mu_km3_s2=EARTH_MU_KM3_S2,
         inertia_kg_m2=inertia_kg_m2,
-        disturbance_model=dmodel if bool(att_cfg.get("enabled", True)) else None,
+        disturbance_model=dmodel if attitude_enabled else None,
         orbit_substep_s=float(orbit_cfg["orbit_substep_s"]) if orbit_cfg.get("orbit_substep_s") is not None else None,
         attitude_substep_s=float(att_cfg["attitude_substep_s"]) if att_cfg.get("attitude_substep_s") is not None else None,
+        propagate_attitude=attitude_enabled,
         orbit_propagator=_build_orbit_propagator(cfg),
     )
     bridge = _module_obj(agent_cfg.bridge) if (agent_cfg.bridge is not None and agent_cfg.bridge.enabled) else None
     missions = [_module_obj(p) for p in list(agent_cfg.mission_objectives or [])]
     missions = [m for m in missions if m is not None]
     sat_isp_s = _resolve_satellite_isp_s(specs)
+    sat_dry_mass_kg: float | None = None
+    if "dry_mass_kg" in specs:
+        try:
+            sat_dry_mass_kg = float(specs.get("dry_mass_kg"))
+        except (TypeError, ValueError):
+            sat_dry_mass_kg = None
+        if sat_dry_mass_kg is not None and (not np.isfinite(sat_dry_mass_kg) or sat_dry_mass_kg < 0.0):
+            sat_dry_mass_kg = None
     return AgentRuntime(
         object_id=object_id,
         kind="satellite",
@@ -535,6 +660,7 @@ def _create_satellite_runtime(
         mission_modules=missions,
         waiting_for_launch=False,
         orbital_isp_s=(None if sat_isp_s <= 0.0 else float(sat_isp_s)),
+        dry_mass_kg=sat_dry_mass_kg,
     )
 
 
@@ -659,6 +785,7 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         mission_modules=missions,
         waiting_for_launch=False,
         orbital_isp_s=None,
+        dry_mass_kg=None,
     )
 
 
@@ -1765,6 +1892,15 @@ def _write_commander_brief_markdown(path: Path, brief: dict[str, Any]) -> None:
             f"P90={_fmt_float(_safe_float(fuel.get('p90'), default=0.0), 2)}, "
             f"P99={_fmt_float(_safe_float(fuel.get('p99'), default=0.0), 2)}",
             "",
+            "## Risk Metrics",
+        ]
+    )
+    lines.extend(
+        [
+            f"- P(catastrophic outcome): {100.0 * _safe_float(brief.get('p_catastrophic_outcome'), default=0.0):.1f}%",
+            f"- P(exceed dV budget): {100.0 * _safe_float(brief.get('p_exceed_dv_budget'), default=0.0):.1f}%",
+            f"- P(exceed time budget): {100.0 * _safe_float(brief.get('p_exceed_time_budget'), default=0.0):.1f}%",
+            "",
             "## Top Failure Modes",
         ]
     )
@@ -1847,6 +1983,7 @@ def _run_single_config(
 
     seed = int(cfg.metadata.get("seed", 123))
     rng = np.random.default_rng(seed)
+    attitude_enabled = bool((cfg.simulator.dynamics.get("attitude", {}) or {}).get("enabled", True))
 
     rocket = _create_rocket_runtime(cfg) if cfg.rocket.enabled else None
     chaser = _create_satellite_runtime("chaser", cfg.chaser, cfg, np.random.default_rng(int(rng.integers(0, 2**31 - 1)))) if cfg.chaser.enabled else None
@@ -1956,7 +2093,11 @@ def _run_single_config(
             if not a.active:
                 continue
             tr_now = world_truth[aid]
-            env_common = {**dict(cfg.simulator.environment or {}), "world_truth": world_truth}
+            env_common = {
+                **dict(cfg.simulator.environment or {}),
+                "world_truth": world_truth,
+                "attitude_disabled": (not attitude_enabled),
+            }
             mission_out: dict[str, Any] = {}
 
             if a.kind == "rocket":
@@ -2020,10 +2161,12 @@ def _run_single_config(
                 att_cfg = dict(cfg.simulator.dynamics.get("attitude", {}) or {})
                 orbit_substep_s = float(max(float(orbit_cfg.get("orbit_substep_s", dt) or dt), 1e-9))
                 attitude_substep_s = float(max(float(att_cfg.get("attitude_substep_s", dt) or dt), 1e-9))
-                sim_substep_s = float(min(orbit_substep_s, attitude_substep_s))
+                sim_substep_s = float(min(orbit_substep_s, attitude_substep_s)) if attitude_enabled else orbit_substep_s
                 t_inner = float(t)
                 tr_inner = tr_now
                 cmd = Command.zero()
+                applied_thrust_last = np.zeros(3, dtype=float)
+                applied_torque_last = np.zeros(3, dtype=float)
                 while t_inner < t_next - 1e-12:
                     h = float(min(sim_substep_s, t_next - t_inner))
                     t_eval = t_inner + h
@@ -2055,7 +2198,7 @@ def _run_single_config(
                                 last_update_t_s=orb_belief.last_update_t_s,
                             )
                     att_belief = a.belief
-                    if att_belief is not None and att_belief.state.size < 13:
+                    if attitude_enabled and att_belief is not None and att_belief.state.size < 13:
                         att_state = np.hstack(
                             (
                                 np.array(att_belief.state[:6], dtype=float),
@@ -2068,6 +2211,8 @@ def _run_single_config(
                             covariance=att_belief.covariance,
                             last_update_t_s=att_belief.last_update_t_s,
                         )
+                    if not attitude_enabled:
+                        att_belief = None
                     mission_out = _run_mission_modules(
                         agent=a,
                         world_truth=world_truth_inner,
@@ -2075,30 +2220,35 @@ def _run_single_config(
                         dt_s=h,
                         env=env_inner_common,
                         orbit_controller=a.orbit_controller,
-                        attitude_controller=a.attitude_controller,
+                        attitude_controller=(a.attitude_controller if attitude_enabled else None),
                         orb_belief=orb_belief,
                         att_belief=att_belief,
                     )
                     # Mission module can set attitude targets on compatible controllers.
-                    if "desired_attitude_quat_bn" in mission_out and a.attitude_controller is not None:
+                    if attitude_enabled and "desired_attitude_quat_bn" in mission_out and a.attitude_controller is not None:
                         q_des = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)
                         if q_des.size == 4 and hasattr(a.attitude_controller, "set_target"):
                             try:
                                 a.attitude_controller.set_target(q_des)
                             except (TypeError, ValueError, AttributeError) as exc:
                                 logger.warning("Failed to set desired_attitude_quat_bn on %s controller: %s", aid, exc)
-                    if "desired_attitude_quat_bn" in mission_out:
+                    if attitude_enabled and "desired_attitude_quat_bn" in mission_out:
                         q_des_log = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)
                         if q_des_log.size == 4 and np.all(np.isfinite(q_des_log)):
                             desired_attitude_hist[aid][k + 1, :] = q_des_log
-                    if "desired_attitude_quat_br" in mission_out and a.attitude_controller is not None:
+                    if attitude_enabled and "desired_attitude_quat_br" in mission_out and a.attitude_controller is not None:
                         q_des_r = np.array(mission_out["desired_attitude_quat_br"], dtype=float).reshape(-1)
                         if q_des_r.size == 4 and hasattr(a.attitude_controller, "set_target"):
                             try:
                                 a.attitude_controller.set_target(q_des_r)
                             except (TypeError, ValueError, AttributeError) as exc:
                                 logger.warning("Failed to set desired_attitude_quat_br on %s controller: %s", aid, exc)
-                    if "desired_ric_euler_rad" in mission_out and a.attitude_controller is not None and hasattr(a.attitude_controller, "set_desired_ric_state"):
+                    if (
+                        attitude_enabled
+                        and "desired_ric_euler_rad" in mission_out
+                        and a.attitude_controller is not None
+                        and hasattr(a.attitude_controller, "set_desired_ric_state")
+                    ):
                         e = np.array(mission_out["desired_ric_euler_rad"], dtype=float).reshape(-1)
                         if e.size == 3:
                             try:
@@ -2113,7 +2263,7 @@ def _run_single_config(
                     )
                     c_att = (
                         a.attitude_controller.act(att_belief, t_eval, 2.0)
-                        if (not use_integrated_cmd) and a.attitude_controller is not None and att_belief is not None
+                        if attitude_enabled and (not use_integrated_cmd) and a.attitude_controller is not None and att_belief is not None
                         else Command.zero()
                     )
                     if use_integrated_cmd:
@@ -2133,15 +2283,26 @@ def _run_single_config(
                             cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
                         if "torque_body_nm" in mission_out:
                             cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
+                    if not attitude_enabled:
+                        cmd.torque_body_nm = np.zeros(3, dtype=float)
                     env_inner = {
                         **dict(cfg.simulator.environment or {}),
                         "world_truth": world_truth_inner,
+                        "attitude_disabled": (not attitude_enabled),
                     }
                     cmd_step = Command(
                         thrust_eci_km_s2=np.array(cmd.thrust_eci_km_s2, dtype=float),
-                        torque_body_nm=np.array(cmd.torque_body_nm, dtype=float),
+                        torque_body_nm=(np.zeros(3, dtype=float) if not attitude_enabled else np.array(cmd.torque_body_nm, dtype=float)),
                         mode_flags=dict(cmd.mode_flags or {}),
                     )
+                    min_mass_kg = 0.0
+                    if a.dry_mass_kg is not None and np.isfinite(float(a.dry_mass_kg)):
+                        min_mass_kg = float(max(float(a.dry_mass_kg), 0.0))
+                    fuel_depleted = bool(tr_inner.mass_kg <= (min_mass_kg + 1e-12))
+                    if fuel_depleted:
+                        cmd_step.thrust_eci_km_s2 = np.zeros(3, dtype=float)
+                        cmd_step.mode_flags["fuel_depleted"] = True
+                    cmd_step.mode_flags["min_mass_kg"] = float(min_mass_kg)
                     isp_s = a.orbital_isp_s
                     if (
                         isp_s is not None
@@ -2152,13 +2313,17 @@ def _run_single_config(
                         a_mag_m_s2 = float(np.linalg.norm(cmd_step.thrust_eci_km_s2) * 1e3)
                         thrust_n = float(max(tr_inner.mass_kg, 0.0) * a_mag_m_s2)
                         mdot_kg_s = 0.0 if thrust_n <= 0.0 else float(thrust_n / (float(isp_s) * g0_m_s2))
-                        cmd_step.mode_flags["delta_mass_kg"] = float(max(mdot_kg_s, 0.0) * h)
+                        delta_mass_kg = float(max(mdot_kg_s, 0.0) * h)
+                        available_propellant_kg = float(max(tr_inner.mass_kg - min_mass_kg, 0.0))
+                        cmd_step.mode_flags["delta_mass_kg"] = float(min(delta_mass_kg, available_propellant_kg))
                     tr_inner = a.dynamics.step(state=tr_inner, command=cmd_step, env=env_inner, dt_s=h)
+                    applied_thrust_last = np.array(cmd_step.thrust_eci_km_s2, dtype=float)
+                    applied_torque_last = np.array(cmd_step.torque_body_nm, dtype=float)
                     t_inner = t_eval
 
                 a.truth = tr_inner
-                thrust_hist[aid][k + 1, :] = cmd.thrust_eci_km_s2
-                torque_hist[aid][k + 1, :] = cmd.torque_body_nm
+                thrust_hist[aid][k + 1, :] = applied_thrust_last
+                torque_hist[aid][k + 1, :] = np.zeros(3, dtype=float) if not attitude_enabled else applied_torque_last
 
             if a.bridge is not None:
                 evt = {"t_s": t_next, "object_id": aid}
@@ -2338,6 +2503,8 @@ def _coerce_noninteractive_for_automation(cfg: SimulationScenarioConfig) -> Simu
 def run_master_simulation(
     config_path: str | Path,
     step_callback: Callable[[int, int], None] | None = None,
+    mc_callback: Callable[[int, int], None] | None = None,
+    mc_progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     cfg = _coerce_noninteractive_for_automation(load_simulation_yaml(config_path))
     strict_plugins = bool(cfg.simulator.plugin_validation.get("strict", True))
@@ -2371,8 +2538,26 @@ def run_master_simulation(
     success_termination_reasons = {str(x) for x in (mc_out_cfg.get("success_termination_reasons", ["rocket_orbit_insertion"]) or [])}
     require_rocket_insertion = bool(mc_out_cfg.get("require_rocket_insertion", False))
     gates = dict(mc_out_cfg.get("gates", {}) or {})
+    dv_budget_m_s_by_object: dict[str, float] = {}
+    if bool(cfg.chaser.enabled):
+        dv_chaser = _satellite_initial_delta_v_budget_m_s(cfg.chaser)
+        if np.isfinite(dv_chaser):
+            dv_budget_m_s_by_object["chaser"] = float(dv_chaser)
+    if bool(cfg.target.enabled):
+        dv_target = _satellite_initial_delta_v_budget_m_s(cfg.target)
+        if np.isfinite(dv_target):
+            dv_budget_m_s_by_object["target"] = float(dv_target)
     varies_metadata_seed = any(str(v.parameter_path) == "metadata.seed" for v in cfg.monte_carlo.variations)
-    for i in range(int(cfg.monte_carlo.iterations)):
+    total_iters = int(cfg.monte_carlo.iterations)
+    parallel_enabled = bool(cfg.monte_carlo.parallel_enabled)
+    max_workers_cfg = int(cfg.monte_carlo.parallel_workers or 0)
+    default_workers = max(1, (os.cpu_count() or 1) - 1)
+    parallel_workers = max_workers_cfg if max_workers_cfg > 0 else default_workers
+    parallel_workers = max(1, min(parallel_workers, total_iters))
+    parallel_active = bool(parallel_enabled and total_iters > 1)
+    parallel_fallback_reason: str | None = None
+    prepared: list[dict[str, Any]] = []
+    for i in range(total_iters):
         cdict = deepcopy(root)
         sampled = {}
         for v in cfg.monte_carlo.variations:
@@ -2388,30 +2573,112 @@ def run_master_simulation(
         if mode == "interactive":
             cdict.setdefault("outputs", {})["mode"] = "save"
         cdict.setdefault("outputs", {})["output_dir"] = str(outdir / f"mc_run_{i:04d}")
-        ci = scenario_config_from_dict(cdict)
-        if strict_plugins:
-            errs = validate_scenario_plugins(ci)
-            if errs:
-                msg = "Plugin validation failed in Monte Carlo iteration {i}:\n- ".format(i=i) + "\n- ".join(errs)
-                raise ValueError(msg)
-        ro = _run_single_config(ci, step_callback=step_callback)
-        closest_approach_km = float("nan")
+        prepared.append(
+            {
+                "iteration": i,
+                "sampled_parameters": sampled,
+                "config_dict": cdict,
+                "seed": int(cdict.get("metadata", {}).get("seed", int(cfg.monte_carlo.base_seed) + i)),
+            }
+        )
+
+    completed: dict[int, dict[str, Any]] = {}
+    if parallel_active:
+        manager = None
+        progress_queue = None
         try:
-            tb = dict(ro.get("truth_by_object", {}) or {})
-            tgt = np.array(tb.get("target", []), dtype=float)
-            ch = np.array(tb.get("chaser", []), dtype=float)
-            if tgt.ndim == 2 and ch.ndim == 2 and tgt.shape[0] > 0 and ch.shape[0] > 0:
-                n_rel = int(min(tgt.shape[0], ch.shape[0]))
-                dr = ch[:n_rel, :3] - tgt[:n_rel, :3]
-                rng_km = np.linalg.norm(dr, axis=1)
-                finite = rng_km[np.isfinite(rng_km)]
-                if finite.size > 0:
-                    closest_approach_km = float(np.min(finite))
-        except (TypeError, ValueError, KeyError, IndexError):
-            closest_approach_km = float("nan")
+            manager = mp.Manager()
+            progress_queue = manager.Queue()
+            tasks = [
+                {
+                    "iteration": p["iteration"],
+                    "config_dict": p["config_dict"],
+                    "strict_plugins": strict_plugins,
+                    "progress_queue": progress_queue,
+                    "progress_emit_every": int(mc_out_cfg.get("parallel_progress_emit_every_steps", 20) or 20),
+                }
+                for p in prepared
+            ]
+            with ProcessPoolExecutor(max_workers=parallel_workers) as ex:
+                fut_to_idx = {ex.submit(_run_mc_iteration_from_dict, t): int(t["iteration"]) for t in tasks}
+                pending = set(fut_to_idx.keys())
+                while pending:
+                    done_now = [f for f in list(pending) if f.done()]
+                    for fut in done_now:
+                        pending.remove(fut)
+                        idx = fut_to_idx[fut]
+                        completed[idx] = fut.result()
+                        if mc_callback is not None:
+                            try:
+                                mc_callback(len(completed), total_iters)
+                            except Exception as exc:
+                                logger.warning("Disabling Monte Carlo callback after runtime error: %s", exc)
+                                mc_callback = None
+                    if progress_queue is not None:
+                        while True:
+                            try:
+                                evt = progress_queue.get_nowait()
+                            except queue_mod.Empty:
+                                break
+                            except Exception:
+                                break
+                            if mc_progress_callback is not None:
+                                try:
+                                    mc_progress_callback(dict(evt or {}))
+                                except Exception as exc:
+                                    logger.warning("Disabling Monte Carlo progress callback after runtime error: %s", exc)
+                                    mc_progress_callback = None
+                    if pending:
+                        time.sleep(0.03)
+        except (OSError, PermissionError, NotImplementedError, EOFError) as exc:
+            parallel_active = False
+            parallel_fallback_reason = f"{type(exc).__name__}: {exc}"
+            logger.warning("Parallel Monte Carlo unavailable, falling back to serial execution: %s", exc)
+        finally:
+            if progress_queue is not None:
+                try:
+                    while True:
+                        evt = progress_queue.get_nowait()
+                        if mc_progress_callback is not None:
+                            mc_progress_callback(dict(evt or {}))
+                except Exception:
+                    pass
+            if manager is not None:
+                try:
+                    manager.shutdown()
+                except Exception:
+                    pass
+    if not parallel_active:
+        completed_count = 0
+        for p in prepared:
+            ci = scenario_config_from_dict(dict(p["config_dict"]))
+            if strict_plugins:
+                errs = validate_scenario_plugins(ci)
+                if errs:
+                    msg = "Plugin validation failed in Monte Carlo iteration {i}:\n- ".format(i=int(p["iteration"])) + "\n- ".join(errs)
+                    raise ValueError(msg)
+            ro = _run_single_config(ci, step_callback=step_callback)
+            completed[int(p["iteration"])] = {
+                "iteration": int(p["iteration"]),
+                "summary": ro["summary"],
+                "closest_approach_km": _closest_approach_from_run_payload(ro),
+            }
+            completed_count += 1
+            if mc_callback is not None:
+                try:
+                    mc_callback(completed_count, total_iters)
+                except Exception as exc:
+                    logger.warning("Disabling Monte Carlo callback after runtime error: %s", exc)
+                    mc_callback = None
+
+    for p in sorted(prepared, key=lambda x: int(x["iteration"])):
+        i = int(p["iteration"])
+        cres = dict(completed.get(i, {}) or {})
+        ro_summary = dict(cres.get("summary", {}) or {})
+        closest_approach_km = _safe_float(cres.get("closest_approach_km"))
         closest_approach_km_runs.append(closest_approach_km)
         assessment = _assess_mc_run(
-            run_entry={"summary": ro["summary"], "closest_approach_km": closest_approach_km},
+            run_entry={"summary": ro_summary, "closest_approach_km": closest_approach_km},
             gates=gates,
             success_termination_reasons=success_termination_reasons,
             require_rocket_insertion=require_rocket_insertion,
@@ -2421,8 +2688,8 @@ def run_master_simulation(
         total_dv_runs_m_s.append(float(assessment["total_dv_m_s_total"]))
         run_detail = {
             "iteration": i,
-            "seed": int(cdict.get("metadata", {}).get("seed", int(cfg.monte_carlo.base_seed) + i)),
-            "sampled_parameters": sampled,
+            "seed": int(p["seed"]),
+            "sampled_parameters": dict(p["sampled_parameters"]),
             "pass": bool(assessment["pass"]),
             "fail_reasons": list(assessment["fail_reasons"]),
             "duration_s": float(assessment["duration_s"]),
@@ -2433,14 +2700,20 @@ def run_master_simulation(
             "rocket_insertion_achieved": bool(assessment["rocket_insertion_achieved"]),
             "total_dv_m_s_total": float(assessment["total_dv_m_s_total"]),
             "total_dv_m_s_by_object": dict(assessment["total_dv_m_s_by_object"]),
+            "delta_v_remaining_m_s_by_object": {},
         }
+        dv_rem = dict(run_detail["delta_v_remaining_m_s_by_object"])
+        for oid, dv_budget in dv_budget_m_s_by_object.items():
+            dv_used = _safe_float(dict(run_detail["total_dv_m_s_by_object"]).get(oid), default=0.0)
+            dv_rem[oid] = float(max(float(dv_budget) - max(float(dv_used), 0.0), 0.0))
+        run_detail["delta_v_remaining_m_s_by_object"] = dv_rem
         for reason in run_detail["fail_reasons"]:
             failure_mode_counts[str(reason)] = int(failure_mode_counts.get(str(reason), 0) + 1)
         run_details.append(run_detail)
         entry = {
             "iteration": i,
-            "sampled_parameters": sampled,
-            "summary": ro["summary"],
+            "sampled_parameters": dict(p["sampled_parameters"]),
+            "summary": ro_summary,
             "closest_approach_km": closest_approach_km,
             "assessment": assessment,
         }
@@ -2467,6 +2740,15 @@ def run_master_simulation(
             tsd = dict(ts or {})
             dv_by_object.setdefault(str(oid), []).append(float(tsd.get("total_dv_m_s", 0.0)))
             burn_samples_by_object.setdefault(str(oid), []).append(float(tsd.get("burn_samples", 0.0)))
+    dv_remaining_m_s_by_object: dict[str, list[float]] = {}
+    for oid in sorted(dv_budget_m_s_by_object.keys()):
+        vals: list[float] = []
+        for d in run_details:
+            rem = _safe_float(dict(d.get("delta_v_remaining_m_s_by_object", {}) or {}).get(oid))
+            if np.isfinite(rem):
+                vals.append(float(rem))
+        if vals:
+            dv_remaining_m_s_by_object[oid] = vals
 
     by_object_stats: dict[str, dict[str, float]] = {}
     all_obj_ids = sorted(set(dv_by_object.keys()) | set(burn_samples_by_object.keys()))
@@ -2483,10 +2765,12 @@ def run_master_simulation(
         }
     ca_arr_full = np.array(closest_approach_km_runs, dtype=float)
     ca_finite = ca_arr_full[np.isfinite(ca_arr_full)]
+    duration_arr = np.array(duration_runs_s, dtype=float)
     total_dv_arr = np.array(total_dv_runs_m_s, dtype=float)
     guardrail_arr = np.array(guardrail_event_runs, dtype=float)
     pass_flags = np.array([1.0 if bool(d.get("pass", False)) else 0.0 for d in run_details], dtype=float)
     pass_rate = float(np.mean(pass_flags)) if pass_flags.size else 0.0
+    guardrail_violation_flags = np.array([1.0 if int(d.get("guardrail_events", 0)) > 0 else 0.0 for d in run_details], dtype=float)
 
     aggregate_stats = {
         "duration_s_mean": float(np.mean(durations_s)) if durations_s.size else 0.0,
@@ -2512,9 +2796,14 @@ def run_master_simulation(
         "guardrail_events_p95": float(np.percentile(guardrail_arr, 95)) if guardrail_arr.size else float("nan"),
         "pass_rate": pass_rate,
         "fail_rate": 1.0 - pass_rate,
+        "guardrail_violation_rate": float(np.mean(guardrail_violation_flags)) if guardrail_violation_flags.size else float("nan"),
         "failure_mode_counts": failure_mode_counts,
         "termination_reason_counts": termination_reason_counts,
         "by_object": by_object_stats,
+        "delta_v_budget_m_s_by_object": dict(dv_budget_m_s_by_object),
+        "delta_v_remaining_m_s_by_object": {
+            oid: _quantile_stats(vals, (50.0, 90.0, 99.0)) for oid, vals in sorted(dv_remaining_m_s_by_object.items())
+        },
     }
 
     keepout_threshold = _safe_float(gates.get("min_closest_approach_km"))
@@ -2523,6 +2812,39 @@ def run_master_simulation(
     p_keepout_violation = float("nan")
     if np.isfinite(keepout_threshold) and ca_finite.size:
         p_keepout_violation = float(np.mean(ca_finite < keepout_threshold))
+
+    catastrophic_failure_reasons = [str(x) for x in (mc_out_cfg.get("catastrophic_failure_reasons", ["terminated_early:earth_impact"]) or [])]
+    catastrophic_count = 0
+    for rd in run_details:
+        reasons = set(str(x) for x in list(rd.get("fail_reasons", []) or []))
+        if any(r in reasons for r in catastrophic_failure_reasons):
+            catastrophic_count += 1
+    p_catastrophic_outcome = float(catastrophic_count / max(len(run_details), 1))
+
+    max_duration_gate = _safe_float(gates.get("max_duration_s"))
+    p_exceed_time_budget = float("nan")
+    if np.isfinite(max_duration_gate) and duration_arr.size:
+        p_exceed_time_budget = float(np.mean(duration_arr > max_duration_gate))
+
+    max_total_dv_gate = _safe_float(gates.get("max_total_dv_m_s"))
+    p_exceed_dv_budget = float("nan")
+    if np.isfinite(max_total_dv_gate) and total_dv_arr.size:
+        p_exceed_dv_budget = float(np.mean(total_dv_arr > max_total_dv_gate))
+
+    if np.isfinite(max_total_dv_gate) and total_dv_arr.size:
+        fuel_margin = max_total_dv_gate - total_dv_arr
+        fuel_margin_stats = _quantile_stats(fuel_margin, (5.0, 50.0, 95.0))
+    else:
+        fuel_margin_stats = _quantile_stats([], (5.0, 50.0, 95.0))
+    if np.isfinite(max_duration_gate) and duration_arr.size:
+        time_margin = max_duration_gate - duration_arr
+        time_margin_stats = _quantile_stats(time_margin, (5.0, 50.0, 95.0))
+    else:
+        time_margin_stats = _quantile_stats([], (5.0, 50.0, 95.0))
+    aggregate_stats["p_keepout_violation"] = p_keepout_violation
+    aggregate_stats["p_catastrophic_outcome"] = p_catastrophic_outcome
+    aggregate_stats["p_exceed_dv_budget"] = p_exceed_dv_budget
+    aggregate_stats["p_exceed_time_budget"] = p_exceed_time_budget
 
     top_failure_modes: list[dict[str, Any]] = []
     if failure_mode_counts:
@@ -2536,22 +2858,6 @@ def run_master_simulation(
                 }
             )
 
-    commander_brief = {
-        "scenario_name": cfg.scenario_name,
-        "runs": int(cfg.monte_carlo.iterations),
-        "p_success": pass_rate,
-        "p_fail": 1.0 - pass_rate,
-        "p_keepout_violation": p_keepout_violation,
-        "keepout_threshold_km": keepout_threshold if np.isfinite(keepout_threshold) else None,
-        "worst_case_closest_approach_km": float(np.min(ca_finite)) if ca_finite.size else float("nan"),
-        "timeline_confidence_bands_s": _quantile_stats(duration_runs_s, (50.0, 90.0, 99.0)),
-        "fuel_confidence_bands_total_dv_m_s": _quantile_stats(total_dv_runs_m_s, (50.0, 90.0, 99.0)),
-        "fuel_confidence_bands_dv_m_s_by_object": {
-            oid: _quantile_stats(dv_by_object.get(oid, []), (50.0, 90.0, 99.0)) for oid in sorted(dv_by_object.keys())
-        },
-        "top_failure_modes": top_failure_modes,
-    }
-
     cfg_json = json.dumps(root, sort_keys=True, separators=(",", ":"))
     reproducibility = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
@@ -2564,6 +2870,62 @@ def run_master_simulation(
             else "metadata.seed controlled by monte_carlo variations."
         ),
     }
+    sensitivity_rankings = _build_parameter_sensitivity_rankings(run_details)
+    top_parameter_drivers = [
+        {
+            "parameter_path": str(row.get("parameter_path")),
+            "importance_score": _safe_float(row.get("importance_score"), default=0.0),
+            "abs_corr_pass": _safe_float(row.get("abs_corr_pass")),
+            "abs_corr_closest_approach_km": _safe_float(row.get("abs_corr_closest_approach_km")),
+            "abs_corr_total_dv_m_s": _safe_float(row.get("abs_corr_total_dv_m_s")),
+        }
+        for row in sensitivity_rankings[:5]
+    ]
+    unique_seeds = len(set(int(_safe_float(d.get("seed"), default=-1)) for d in run_details))
+    finite_ca_rate = float(np.mean(np.isfinite(ca_arr_full))) if ca_arr_full.size else float("nan")
+    analysis_confidence = {
+        "runs_executed": int(len(run_details)),
+        "run_count_sufficient_for_tail_estimates": bool(len(run_details) >= 100),
+        "unique_seed_count": int(unique_seeds),
+        "finite_closest_approach_rate": finite_ca_rate,
+        "varied_parameter_count": int(len(set(str(v.parameter_path) for v in cfg.monte_carlo.variations))),
+        "model_profile": reproducibility.get("model_profile"),
+        "git_commit_sha": reproducibility.get("git_commit_sha"),
+        "config_sha256": reproducibility.get("config_sha256"),
+    }
+    commander_brief = {
+        "scenario_name": cfg.scenario_name,
+        "runs": int(cfg.monte_carlo.iterations),
+        "p_success": pass_rate,
+        "p_fail": 1.0 - pass_rate,
+        "p_keepout_violation": p_keepout_violation,
+        "p_catastrophic_outcome": p_catastrophic_outcome,
+        "p_exceed_dv_budget": p_exceed_dv_budget,
+        "p_exceed_time_budget": p_exceed_time_budget,
+        "keepout_threshold_km": keepout_threshold if np.isfinite(keepout_threshold) else None,
+        "worst_case_closest_approach_km": float(np.min(ca_finite)) if ca_finite.size else float("nan"),
+        "timeline_confidence_bands_s": _quantile_stats(duration_runs_s, (50.0, 90.0, 99.0)),
+        "fuel_confidence_bands_total_dv_m_s": _quantile_stats(total_dv_runs_m_s, (50.0, 90.0, 99.0)),
+        "fuel_confidence_bands_dv_m_s_by_object": {
+            oid: _quantile_stats(dv_by_object.get(oid, []), (50.0, 90.0, 99.0)) for oid in sorted(dv_by_object.keys())
+        },
+        "delta_v_remaining_confidence_bands_m_s_by_object": {
+            oid: _quantile_stats(vals, (50.0, 90.0, 99.0)) for oid, vals in sorted(dv_remaining_m_s_by_object.items())
+        },
+        "resource_margin": {
+            "fuel_margin_m_s_vs_budget": fuel_margin_stats,
+            "time_margin_s_vs_budget": time_margin_stats,
+        },
+        "constraint_violation_summary": {
+            "p_guardrail_violation": float(np.mean(guardrail_violation_flags)) if guardrail_violation_flags.size else float("nan"),
+            "guardrail_events_per_run": _quantile_stats(guardrail_event_runs, (50.0, 90.0, 99.0)),
+            "compute_deadline_overrun_available": False,
+            "control_saturation_available": False,
+        },
+        "top_failure_modes": top_failure_modes,
+        "top_parameter_drivers": top_parameter_drivers,
+        "analysis_confidence": analysis_confidence,
+    }
 
     analyst_pack = {
         "scenario_name": cfg.scenario_name,
@@ -2571,13 +2933,21 @@ def run_master_simulation(
         "gates": gates,
         "run_details": run_details,
         "failure_mode_counts": failure_mode_counts,
-        "sensitivity_rankings": _build_parameter_sensitivity_rankings(run_details),
+        "sensitivity_rankings": sensitivity_rankings,
+        "catastrophic_failure_reasons": catastrophic_failure_reasons,
     }
 
     agg = {
         "config_path": str(Path(config_path).resolve()),
         "scenario_name": cfg.scenario_name,
-        "monte_carlo": {"enabled": True, "iterations": int(cfg.monte_carlo.iterations), "base_seed": int(cfg.monte_carlo.base_seed)},
+        "monte_carlo": {
+            "enabled": True,
+            "iterations": int(cfg.monte_carlo.iterations),
+            "base_seed": int(cfg.monte_carlo.base_seed),
+            "parallel_enabled": bool(parallel_active),
+            "parallel_requested": bool(parallel_enabled and total_iters > 1),
+            "parallel_workers": int(parallel_workers if parallel_active else 1),
+        },
         "aggregate_stats": aggregate_stats,
         "commander_brief": commander_brief,
         "reproducibility": reproducibility,
@@ -2585,6 +2955,8 @@ def run_master_simulation(
         "artifacts": {},
         "runs": runs,
     }
+    if parallel_fallback_reason is not None:
+        agg["monte_carlo"]["parallel_fallback_reason"] = str(parallel_fallback_reason)
 
     baseline_summary_json = str(mc_out_cfg.get("baseline_summary_json", "")).strip()
     if baseline_summary_json:
@@ -2611,6 +2983,10 @@ def run_master_simulation(
             dv_arr = np.array(dv_by_object.get(oid, []), dtype=float)
             if dv_arr.size:
                 plot_series.append((f"{oid} Total dV (m/s)", dv_arr))
+        for oid in ("chaser", "target"):
+            rem_arr = np.array(dv_remaining_m_s_by_object.get(oid, []), dtype=float)
+            if rem_arr.size:
+                plot_series.append((f"{oid} dV Remaining (m/s)", rem_arr))
         nplots = len(plot_series)
         fig, axes = plt.subplots(1, nplots, figsize=(5.0 * nplots, 4.0))
         if nplots == 1:
@@ -2703,6 +3079,39 @@ def run_master_simulation(
         if show_ops_dashboard:
             plt.show()
         plt.close(fig)
+
+        rem_obj_ids = [oid for oid in ("chaser", "target") if oid in dv_budget_m_s_by_object]
+        if rem_obj_ids:
+            fig_rem, axes_rem = plt.subplots(2, len(rem_obj_ids), figsize=(5.0 * len(rem_obj_ids), 7.0), squeeze=False)
+            for j, oid in enumerate(rem_obj_ids):
+                rem_arr = np.array(
+                    [
+                        _safe_float(dict(d.get("delta_v_remaining_m_s_by_object", {}) or {}).get(oid))
+                        for d in run_details
+                    ],
+                    dtype=float,
+                )
+                finite_rem = rem_arr[np.isfinite(rem_arr)]
+                bins_rem = int(max(5, min(30, np.sqrt(max(finite_rem.size, 1)))))
+                axes_rem[0, j].hist(finite_rem, bins=bins_rem, alpha=0.85, color="tab:blue")
+                axes_rem[0, j].set_title(f"{oid} dV Remaining (m/s)")
+                axes_rem[0, j].set_ylabel("count")
+                axes_rem[0, j].grid(True, alpha=0.3)
+
+                axes_rem[1, j].scatter(idx_arr, rem_arr, c=pass_color, s=22, alpha=0.9)
+                axes_rem[1, j].set_title(f"{oid} dV Remaining by Run")
+                axes_rem[1, j].set_xlabel("run index")
+                axes_rem[1, j].set_ylabel("m/s")
+                axes_rem[1, j].grid(True, alpha=0.3)
+            fig_rem.suptitle("Monte Carlo Delta-V Remaining", fontsize=12)
+            fig_rem.tight_layout()
+            rem_path = outdir / "master_monte_carlo_delta_v_remaining.png"
+            if save_ops_dashboard:
+                fig_rem.savefig(str(rem_path), dpi=int(cfg.outputs.plots.get("dpi", 150)))
+                agg["artifacts"]["delta_v_remaining_png"] = str(rem_path)
+            if show_ops_dashboard:
+                plt.show()
+            plt.close(fig_rem)
 
     if bool(cfg.outputs.monte_carlo.get("save_aggregate_summary", True)):
         summary_path = outdir / "master_monte_carlo_summary.json"

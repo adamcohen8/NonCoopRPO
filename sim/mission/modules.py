@@ -326,6 +326,8 @@ class DefensiveRICAxisBurnMissionModule:
         dt_s: float,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        env = dict(kwargs.get("env", {}) or {})
+        attitude_disabled = bool(env.get("attitude_disabled", False))
         out: dict[str, Any] = {}
         know = self._has_chaser_knowledge(own_knowledge)
         if not know:
@@ -367,23 +369,27 @@ class DefensiveRICAxisBurnMissionModule:
         )
         q_des = np.array(q_req if q_req is not None else truth.attitude_quat_bn, dtype=float)
 
-        if attitude_controller is not None and hasattr(attitude_controller, "set_target"):
+        if (not attitude_disabled) and attitude_controller is not None and hasattr(attitude_controller, "set_target"):
             try:
                 attitude_controller.set_target(q_des)
             except (TypeError, ValueError, AttributeError) as exc:
                 logger.warning("Failed to set defensive burn attitude target: %s", exc)
 
         att_belief_eff = att_belief
-        if att_belief_eff is None and attitude_controller is not None:
+        if (not attitude_disabled) and att_belief_eff is None and attitude_controller is not None:
             att_belief_eff = StateBelief(
                 state=np.hstack((np.array(truth.attitude_quat_bn, dtype=float), np.array(truth.angular_rate_body_rad_s, dtype=float))),
                 covariance=np.eye(7) * 1e-6,
                 last_update_t_s=float(truth.t_s),
             )
-        c_att = attitude_controller.act(att_belief_eff, float(t_s), 2.0) if attitude_controller is not None and att_belief_eff is not None else Command.zero()
+        c_att = (
+            attitude_controller.act(att_belief_eff, float(t_s), 2.0)
+            if (not attitude_disabled) and attitude_controller is not None and att_belief_eff is not None
+            else Command.zero()
+        )
 
         align_ok, align_angle = self._alignment(truth=truth, accel_eci_km_s2=np.array(thrust_cmd, dtype=float))
-        if attitude_controller is None:
+        if attitude_disabled or attitude_controller is None:
             # Permit immediate burns when no attitude loop is present to execute slews.
             align_ok = True
         fire = bool(align_ok and float(np.linalg.norm(thrust_cmd)) > float(max(self.min_burn_accel_km_s2, 0.0)))
@@ -520,6 +526,8 @@ class EndStateManeuverMissionModule:
         dt_s: float,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        env = dict(kwargs.get("env", {}) or {})
+        attitude_disabled = bool(env.get("attitude_disabled", False))
         out: dict[str, Any] = {}
         desired = self._resolve_desired_state(own_knowledge=own_knowledge, world_truth=world_truth)
         if desired is None:
@@ -540,7 +548,7 @@ class EndStateManeuverMissionModule:
             max_thrust_n=float(max(self.max_thrust_n, 0.0)),
             dt_s=float(max(self.burn_dt_s, 1e-6)),
             min_thrust_n=float(max(self.min_thrust_n, 0.0)),
-            require_attitude_alignment=bool(self.require_attitude_alignment),
+            require_attitude_alignment=(bool(self.require_attitude_alignment) and (not attitude_disabled)),
             thruster_position_body_m=None if self.thruster_position_body_m is None else np.array(self.thruster_position_body_m, dtype=float),
             thruster_direction_body=None if self.thruster_direction_body is None else np.array(self.thruster_direction_body, dtype=float),
             alignment_tolerance_rad=float(max(self.alignment_tolerance_rad, 0.0)),
@@ -683,6 +691,8 @@ class IntegratedCommandMissionModule:
         dt_s: float,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        env = dict(kwargs.get("env", {}) or {})
+        attitude_disabled = bool(env.get("attitude_disabled", False))
         out: dict[str, Any] = {}
         desired = self._resolve_desired_state(own_knowledge=own_knowledge, world_truth=world_truth)
         if desired is not None:
@@ -699,7 +709,7 @@ class IntegratedCommandMissionModule:
         align_ok = True
         align_angle = 0.0
         required_q = np.array(truth.attitude_quat_bn, dtype=float)
-        if burn_requested and self.require_attitude_alignment:
+        if burn_requested and self.require_attitude_alignment and (not attitude_disabled):
             align_ok, align_angle, required_q = self._burn_alignment(
                 truth=truth,
                 thrust_eci_km_s2=thrust_cmd,
@@ -707,13 +717,13 @@ class IntegratedCommandMissionModule:
                 alignment_tolerance_rad=float(self.alignment_tolerance_rad),
             )
 
-        if attitude_controller is not None and hasattr(attitude_controller, "set_target"):
+        if (not attitude_disabled) and attitude_controller is not None and hasattr(attitude_controller, "set_target"):
             try:
                 attitude_controller.set_target(np.array(required_q, dtype=float))
             except (TypeError, ValueError, AttributeError) as exc:
                 logger.warning("Failed to set attitude target in IntegratedCommandMissionModule: %s", exc)
         c_att = Command.zero()
-        if attitude_controller is not None and att_belief is not None:
+        if (not attitude_disabled) and attitude_controller is not None and att_belief is not None:
             c_att = attitude_controller.act(att_belief, float(t_s), 2.0)
 
         if burn_requested and align_ok:
@@ -874,6 +884,8 @@ class PredictiveIntegratedCommandMissionModule:
         dt_s: float,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        env = dict(kwargs.get("env", {}) or {})
+        attitude_disabled = bool(env.get("attitude_disabled", False))
         out: dict[str, Any] = {}
         in_detumble_mode, mode_str = self._attitude_controller_in_detumble_mode(attitude_controller)
         planning_blocked_by_detumble = bool(self.skip_orbit_planning_in_detumble_mode and in_detumble_mode)
@@ -916,13 +928,13 @@ class PredictiveIntegratedCommandMissionModule:
             planned_this_step = True
 
         # Slew/hold phase before gate
-        if attitude_controller is not None and hasattr(attitude_controller, "set_target"):
+        if (not attitude_disabled) and attitude_controller is not None and hasattr(attitude_controller, "set_target"):
             try:
                 attitude_controller.set_target(np.array(self._planned_attitude_quat_bn, dtype=float))
             except (TypeError, ValueError, AttributeError) as exc:
                 logger.warning("Failed to set predictive attitude target: %s", exc)
         att_belief_eff = att_belief
-        if att_belief_eff is None and attitude_controller is not None:
+        if (not attitude_disabled) and att_belief_eff is None and attitude_controller is not None:
             # Ensure integrated attitude logic can still run even if self-knowledge is not configured.
             att_belief_eff = StateBelief(
                 state=np.hstack((np.array(truth.attitude_quat_bn, dtype=float), np.array(truth.angular_rate_body_rad_s, dtype=float))),
@@ -931,12 +943,15 @@ class PredictiveIntegratedCommandMissionModule:
             )
         c_att = (
             attitude_controller.act(att_belief_eff, float(t_s), float(max(self.attitude_controller_budget_ms, 1e-9)))
-            if attitude_controller is not None and att_belief_eff is not None
+            if (not attitude_disabled) and attitude_controller is not None and att_belief_eff is not None
             else Command.zero()
         )
 
         fire = False
         align_ok, align_angle = self._alignment(truth=truth, accel_eci_km_s2=self._planned_accel_eci_km_s2)
+        if attitude_disabled:
+            align_ok = True
+            align_angle = 0.0
         if planning_blocked_by_detumble:
             fire = False
         else:

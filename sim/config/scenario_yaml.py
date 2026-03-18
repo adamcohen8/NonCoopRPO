@@ -77,6 +77,8 @@ class MonteCarloSection:
     enabled: bool = False
     iterations: int = 1
     base_seed: int = 0
+    parallel_enabled: bool = False
+    parallel_workers: int = 0
     variations: list[MonteCarloVariation] = field(default_factory=list)
 
 
@@ -198,10 +200,14 @@ def _parse_monte_carlo_section(value: Any) -> MonteCarloSection:
         enabled=bool(d.get("enabled", False)),
         iterations=int(d.get("iterations", 1)),
         base_seed=int(d.get("base_seed", 0)),
+        parallel_enabled=bool(d.get("parallel_enabled", False)),
+        parallel_workers=int(d.get("parallel_workers", 0)),
         variations=[_parse_mc_variation(v) for v in vars_raw],
     )
     if out.iterations <= 0:
         raise ValueError("monte_carlo.iterations must be positive.")
+    if out.parallel_workers < 0:
+        raise ValueError("monte_carlo.parallel_workers must be >= 0.")
     return out
 
 

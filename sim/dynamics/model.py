@@ -27,6 +27,7 @@ class OrbitalAttitudeDynamics(DynamicsModel):
     rectangular_prism_dims_m: tuple[float, float, float] | None = None
     orbit_substep_s: float | None = None
     attitude_substep_s: float | None = None
+    propagate_attitude: bool = True
     orbit_propagator: OrbitPropagator = field(default_factory=lambda: OrbitPropagator(integrator="rk4"))
 
     def __post_init__(self) -> None:
@@ -80,34 +81,39 @@ class OrbitalAttitudeDynamics(DynamicsModel):
             )
             t_local += h
 
-        disturbance_torque = (
-            np.zeros(3) if self.disturbance_model is None else self.disturbance_model.total_torque_body_nm(state, env_local)
-        )
-        total_torque = command.torque_body_nm + disturbance_torque
-
-        att_dt = self._effective_substep(self.attitude_substep_s, dt_s)
         q_next = state.attitude_quat_bn.copy()
         w_next = state.angular_rate_body_rad_s.copy()
-        for h in self._substep_sequence(dt_s, att_dt):
-            q_next, w_next = propagate_attitude_exponential_map(
-                quat_bn=q_next,
-                omega_body_rad_s=w_next,
-                inertia_kg_m2=self.inertia_kg_m2,
-                torque_body_nm=total_torque,
-                dt_s=h,
+        if self.propagate_attitude:
+            disturbance_torque = (
+                np.zeros(3) if self.disturbance_model is None else self.disturbance_model.total_torque_body_nm(state, env_local)
             )
+            total_torque = command.torque_body_nm + disturbance_torque
+            att_dt = self._effective_substep(self.attitude_substep_s, dt_s)
+            for h in self._substep_sequence(dt_s, att_dt):
+                q_next, w_next = propagate_attitude_exponential_map(
+                    quat_bn=q_next,
+                    omega_body_rad_s=w_next,
+                    inertia_kg_m2=self.inertia_kg_m2,
+                    torque_body_nm=total_torque,
+                    dt_s=h,
+                )
 
         # Optional direct attitude state override for surrogate controller testing.
-        att_override = dict(command.mode_flags.get("attitude_state_override", {}) or {})
-        if att_override:
-            q_cmd = np.array(att_override.get("q_next_bn", q_next), dtype=float).reshape(-1)
-            w_cmd = np.array(att_override.get("w_next_body_rad_s", w_next), dtype=float).reshape(-1)
-            if q_cmd.size == 4:
-                q_next = normalize_quaternion(q_cmd)
-            if w_cmd.size == 3:
-                w_next = w_cmd
+        if self.propagate_attitude:
+            att_override = dict(command.mode_flags.get("attitude_state_override", {}) or {})
+            if att_override:
+                q_cmd = np.array(att_override.get("q_next_bn", q_next), dtype=float).reshape(-1)
+                w_cmd = np.array(att_override.get("w_next_body_rad_s", w_next), dtype=float).reshape(-1)
+                if q_cmd.size == 4:
+                    q_next = normalize_quaternion(q_cmd)
+                if w_cmd.size == 3:
+                    w_next = w_cmd
         delta_mass_kg = float(command.mode_flags.get("delta_mass_kg", 0.0))
-        mass_next = max(0.0, state.mass_kg - delta_mass_kg)
+        min_mass_kg = float(command.mode_flags.get("min_mass_kg", 0.0))
+        if not np.isfinite(min_mass_kg):
+            min_mass_kg = 0.0
+        min_mass_kg = max(min_mass_kg, 0.0)
+        mass_next = max(min_mass_kg, state.mass_kg - delta_mass_kg)
 
         return StateTruth(
             position_eci_km=x_orbit_next[:3],

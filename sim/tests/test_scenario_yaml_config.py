@@ -14,7 +14,13 @@ class TestScenarioYamlConfig(unittest.TestCase):
                 "target": {"enabled": True},
                 "simulator": {"duration_s": 120.0, "dt_s": 0.5},
                 "outputs": {"output_dir": "outputs/test", "mode": "both", "plots": {"enabled": True}},
-                "monte_carlo": {"enabled": True, "iterations": 10, "variations": [{"parameter_path": "simulator.dt_s", "mode": "choice", "options": [0.5, 1.0]}]},
+                "monte_carlo": {
+                    "enabled": True,
+                    "iterations": 10,
+                    "parallel_enabled": True,
+                    "parallel_workers": 3,
+                    "variations": [{"parameter_path": "simulator.dt_s", "mode": "choice", "options": [0.5, 1.0]}],
+                },
             }
         )
         self.assertEqual(cfg.scenario_name, "unit_test")
@@ -22,6 +28,8 @@ class TestScenarioYamlConfig(unittest.TestCase):
         self.assertFalse(cfg.chaser.enabled)
         self.assertTrue(cfg.monte_carlo.enabled)
         self.assertEqual(cfg.monte_carlo.iterations, 10)
+        self.assertTrue(cfg.monte_carlo.parallel_enabled)
+        self.assertEqual(cfg.monte_carlo.parallel_workers, 3)
         self.assertEqual(len(cfg.monte_carlo.variations), 1)
         self.assertEqual(cfg.outputs.mode, "both")
         self.assertEqual(cfg.outputs.output_dir, "outputs/test")

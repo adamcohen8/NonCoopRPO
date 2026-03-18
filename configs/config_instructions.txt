@@ -243,6 +243,7 @@ Outputs Section
   - save_raw_runs: save compact per-run detail JSON.
   - baseline_summary_json: optional path to prior summary JSON for delta comparison.
   - success_termination_reasons: termination reasons that count as success (default includes rocket_orbit_insertion).
+  - catastrophic_failure_reasons: fail reason tags that count as catastrophic risk.
   - require_rocket_insertion: require insertion-achieved for run pass.
   - gates: optional pass/fail thresholds.
     - min_closest_approach_km
@@ -253,7 +254,7 @@ Outputs Section
 
 Generated MC artifacts when save_aggregate_summary=true:
 - master_monte_carlo_summary.json (full aggregate + runs + reproducibility metadata)
-- master_monte_carlo_commander_brief.json
+- master_monte_carlo_commander_brief.json (includes risk probabilities, resource margins, top parameter drivers, analysis confidence)
 - master_monte_carlo_commander_brief.md
 - master_monte_carlo_analyst_pack.json (includes run_details + sensitivity ranking)
 - master_monte_carlo_ops_dashboard.png (when save_ops_dashboard=true)
@@ -263,6 +264,8 @@ Monte Carlo Section
 - enabled: true/false
 - iterations: number of runs
 - base_seed: seed offset
+- parallel_enabled: true/false; run MC iterations concurrently in separate processes.
+- parallel_workers: worker process count (0 or omitted = auto, usually cpu_count-1).
 - variations: list of parameter variation definitions
 
 Variation Entry Fields
