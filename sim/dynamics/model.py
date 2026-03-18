@@ -84,12 +84,21 @@ class OrbitalAttitudeDynamics(DynamicsModel):
         q_next = state.attitude_quat_bn.copy()
         w_next = state.angular_rate_body_rad_s.copy()
         if self.propagate_attitude:
-            disturbance_torque = (
-                np.zeros(3) if self.disturbance_model is None else self.disturbance_model.total_torque_body_nm(state, env_local)
-            )
-            total_torque = command.torque_body_nm + disturbance_torque
             att_dt = self._effective_substep(self.attitude_substep_s, dt_s)
+            t_att = state.t_s
             for h in self._substep_sequence(dt_s, att_dt):
+                att_state = StateTruth(
+                    position_eci_km=np.array(state.position_eci_km, dtype=float),
+                    velocity_eci_km_s=np.array(state.velocity_eci_km_s, dtype=float),
+                    attitude_quat_bn=np.array(q_next, dtype=float),
+                    angular_rate_body_rad_s=np.array(w_next, dtype=float),
+                    mass_kg=float(state.mass_kg),
+                    t_s=float(t_att),
+                )
+                disturbance_torque = (
+                    np.zeros(3) if self.disturbance_model is None else self.disturbance_model.total_torque_body_nm(att_state, env_local)
+                )
+                total_torque = command.torque_body_nm + disturbance_torque
                 q_next, w_next = propagate_attitude_exponential_map(
                     quat_bn=q_next,
                     omega_body_rad_s=w_next,
@@ -97,6 +106,7 @@ class OrbitalAttitudeDynamics(DynamicsModel):
                     torque_body_nm=total_torque,
                     dt_s=h,
                 )
+                t_att += h
 
         # Optional direct attitude state override for surrogate controller testing.
         if self.propagate_attitude:

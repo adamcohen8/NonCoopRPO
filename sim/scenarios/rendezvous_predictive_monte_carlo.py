@@ -15,6 +15,7 @@ from sim.core.models import Command, StateBelief
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2
 from sim.estimation.orbit_ekf import OrbitEKFEstimator
 from sim.sensors.noisy_own_state import NoisyOwnStateSensor
+from sim.utils.figure_size import cap_figsize
 from sim.utils.io import write_json
 from sim.utils.quaternion import quaternion_to_dcm_bn
 
@@ -204,7 +205,7 @@ def run_predictive_rendezvous_monte_carlo(
     summary_path = out / "predictive_rendezvous_mc_summary.json"
     write_json(str(summary_path), summary)
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    fig, axes = plt.subplots(2, 2, figsize=cap_figsize(12, 9))
     bins = min(20, max(5, int(np.sqrt(config.runs))))
     axes[0, 0].hist(final_miss, bins=bins, alpha=0.85)
     axes[0, 0].axvline(config.pass_final_miss_km, linestyle="--", color="k")

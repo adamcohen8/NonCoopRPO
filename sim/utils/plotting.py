@@ -8,6 +8,7 @@ import numpy as np
 from matplotlib.patches import Polygon, Rectangle
 
 from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
+from sim.utils.figure_size import cap_figsize
 from sim.utils.frames import dcm_to_euler_321, ric_dcm_ir_from_rv
 from sim.utils.ground_track import split_ground_track_dateline
 from sim.utils.quaternion import quaternion_to_dcm_bn
@@ -36,7 +37,7 @@ def _draw_earth_sphere_3d(ax: plt.Axes, radius_km: float = EARTH_RADIUS_KM) -> N
 
 def plot_orbit_eci(truth_hist: np.ndarray, mode: PlotMode = "interactive", out_path: str | None = None) -> None:
     r = truth_hist[:, :3]
-    fig = plt.figure(figsize=(8, 6))
+    fig = plt.figure(figsize=cap_figsize(8, 6))
     ax = fig.add_subplot(111, projection="3d")
     _draw_earth_sphere_3d(ax)
     ax.plot(r[:, 0], r[:, 1], r[:, 2], linewidth=1.5)
@@ -69,7 +70,7 @@ def plot_attitude_tumble(
     q = truth_hist[:, 6:10]
     w = truth_hist[:, 10:13]
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=cap_figsize(10, 7), sharex=True)
     axes[0].plot(t_s, q[:, 0], label="q0")
     axes[0].plot(t_s, q[:, 1], label="q1")
     axes[0].plot(t_s, q[:, 2], label="q2")
@@ -118,7 +119,7 @@ def plot_attitude_ric(
     roll_about_i_deg = euler_321_deg[:, 1]
     pitch_about_c_deg = euler_321_deg[:, 2]
 
-    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=cap_figsize(10, 8), sharex=True)
     axes[0].plot(t_s, yaw_about_r_deg, linewidth=1.4)
     axes[0].set_ylabel("yaw about R (deg)")
     axes[0].grid(True, alpha=0.3)
@@ -146,7 +147,7 @@ def plot_angular_rates(
     t_s: np.ndarray, truth_hist: np.ndarray, mode: PlotMode = "interactive", out_path: str | None = None
 ) -> None:
     w = truth_hist[:, 10:13]
-    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=cap_figsize(10, 8), sharex=True)
     labels = ["wx (rad/s)", "wy (rad/s)", "wz (rad/s)"]
     for i, ax in enumerate(axes):
         ax.plot(t_s, w[:, i], linewidth=1.4)
@@ -179,7 +180,7 @@ def plot_ground_track(
     cartopy_ok = False
     if draw_earth_map and _HAS_CARTOPY:
         cartopy_attempted = True
-        fig = plt.figure(figsize=(11, 5))
+        fig = plt.figure(figsize=cap_figsize(11, 5))
         ax = fig.add_subplot(111, projection=ccrs.PlateCarree())
         ax.set_global()
         ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="#cfe8ff", zorder=0)
@@ -222,7 +223,7 @@ def plot_ground_track(
     if cartopy_attempted and cartopy_ok:
         return
 
-    fig, ax = plt.subplots(figsize=(11, 5))
+    fig, ax = plt.subplots(figsize=cap_figsize(11, 5))
     if draw_earth_map:
         _draw_stylized_earth_map(ax)
     ax.plot(lon_p, lat_p, linewidth=1.4)

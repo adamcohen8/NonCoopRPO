@@ -4,13 +4,179 @@ import json
 import unittest
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 import numpy as np
 
-from sim.master_simulator import run_master_simulation
+from sim.config import scenario_config_from_dict
+from sim.master_simulator import _run_single_config, run_master_simulation
+
+
+class ConstantIntegratedThrustMission:
+    def __init__(self, thrust_eci_km_s2: list[float] | tuple[float, float, float]):
+        self.thrust_eci_km_s2 = np.array(thrust_eci_km_s2, dtype=float)
+
+    def update(self, **kwargs):
+        return {
+            "mission_use_integrated_command": True,
+            "thrust_eci_km_s2": self.thrust_eci_km_s2.copy(),
+        }
+
+
+class TrackTargetXMission:
+    def __init__(self, gain_km_s2_per_km: float = 1.0):
+        self.gain_km_s2_per_km = float(gain_km_s2_per_km)
+
+    def update(self, *, object_id, truth, world_truth, **kwargs):
+        target_truth = world_truth.get("target")
+        if target_truth is None or object_id == "target":
+            return {}
+        accel_x = self.gain_km_s2_per_km * float(target_truth.position_eci_km[0])
+        return {
+            "mission_use_integrated_command": True,
+            "thrust_eci_km_s2": np.array([accel_x, 0.0, 0.0], dtype=float),
+        }
+
+
+class TimeSplitThrustMission:
+    def __init__(self, split_time_s: float, low_km_s2: float, high_km_s2: float):
+        self.split_time_s = float(split_time_s)
+        self.low_km_s2 = float(low_km_s2)
+        self.high_km_s2 = float(high_km_s2)
+
+    def update(self, *, t_s, **kwargs):
+        accel_x = self.low_km_s2 if float(t_s) <= self.split_time_s else self.high_km_s2
+        return {
+            "mission_use_integrated_command": True,
+            "thrust_eci_km_s2": np.array([accel_x, 0.0, 0.0], dtype=float),
+        }
 
 
 class TestMasterSimulator(unittest.TestCase):
+    def test_master_runner_updates_knowledge_and_world_truth_after_propagation(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "world_truth_live",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [1.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [1.0, 0.0, 0.0],
+                    },
+                    "mission_objectives": [
+                        {
+                            "module": "sim.tests.test_master_simulator",
+                            "class_name": "ConstantIntegratedThrustMission",
+                            "params": {"thrust_eci_km_s2": [1.0, 0.0, 0.0]},
+                        }
+                    ],
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [10.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 0.0, 0.0],
+                    },
+                    "mission_objectives": [
+                        {
+                            "module": "sim.tests.test_master_simulator",
+                            "class_name": "TrackTargetXMission",
+                            "params": {"gain_km_s2_per_km": 1.0},
+                        }
+                    ],
+                    "knowledge": {
+                        "targets": ["target"],
+                        "refresh_rate_s": 1.0,
+                        "sensor_error": {
+                            "pos_sigma_km": [0.0, 0.0, 0.0],
+                            "vel_sigma_km_s": [0.0, 0.0, 0.0],
+                        },
+                    },
+                },
+                "simulator": {
+                    "duration_s": 1.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_world_truth_live",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        with patch("sim.master_simulator.EARTH_MU_KM3_S2", 0.0):
+            payload = _run_single_config(cfg)
+
+        target_truth = np.array(payload["truth_by_object"]["target"], dtype=float)
+        chaser_truth = np.array(payload["truth_by_object"]["chaser"], dtype=float)
+        chaser_knowledge = np.array(payload["knowledge_by_observer"]["chaser"]["target"], dtype=float)
+
+        self.assertAlmostEqual(float(target_truth[-1, 0]), 2.5, places=9)
+        self.assertAlmostEqual(float(chaser_truth[-1, 3]), 2.5, places=9)
+        self.assertAlmostEqual(float(chaser_knowledge[-1, 0]), 2.5, places=9)
+
+    def test_master_runner_accumulates_delta_v_across_substeps(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "delta_v_substeps",
+                "rocket": {"enabled": False},
+                "chaser": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [1.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 0.0, 0.0],
+                    },
+                    "mission_objectives": [
+                        {
+                            "module": "sim.tests.test_master_simulator",
+                            "class_name": "TimeSplitThrustMission",
+                            "params": {"split_time_s": 0.5, "low_km_s2": 1.0, "high_km_s2": 3.0},
+                        }
+                    ],
+                },
+                "simulator": {
+                    "duration_s": 1.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {
+                        "attitude": {"enabled": False},
+                        "orbit": {"orbit_substep_s": 0.5},
+                    },
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_delta_v_substeps",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        with patch("sim.master_simulator.EARTH_MU_KM3_S2", 0.0):
+            payload = _run_single_config(cfg)
+
+        summary = dict(payload["summary"])
+        thrust_stats = dict(summary["thrust_stats"]["target"])
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["target"], dtype=float)
+
+        self.assertAlmostEqual(float(thrust_stats["total_dv_m_s"]), 2000.0, places=9)
+        self.assertEqual(int(thrust_stats["burn_samples"]), 1)
+        self.assertAlmostEqual(float(thrust_stats["max_accel_km_s2"]), 3.0, places=9)
+        self.assertAlmostEqual(float(thrust_hist[-1, 0]), 2.0, places=9)
+
     def test_master_runner_executes_rocket_ascent_from_yaml(self):
         try:
             import yaml  # noqa: F401

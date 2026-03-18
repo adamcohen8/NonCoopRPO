@@ -25,13 +25,12 @@ def compute_engagement_metrics(log: SimLog, keepout_radius_km: float | None = No
     time_inside = 0.0
     for i, oid_i in enumerate(object_ids):
         ri = log.truth_by_object[oid_i][:, :3]
-        if keepout_radius_km is not None:
-            r_norm = np.linalg.norm(ri, axis=1)
-            time_inside += float(np.sum(r_norm < keepout_radius_km) * dt)
         for oid_j in object_ids[i + 1 :]:
             rj = log.truth_by_object[oid_j][:, :3]
             d = np.linalg.norm(ri - rj, axis=1)
             min_sep = min(min_sep, float(np.min(d)))
+            if keepout_radius_km is not None:
+                time_inside += float(np.sum(d < keepout_radius_km) * dt)
     if np.isinf(min_sep):
         min_sep = 0.0
 

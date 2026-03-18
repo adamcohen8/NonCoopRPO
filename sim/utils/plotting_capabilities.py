@@ -14,6 +14,7 @@ from sim.dynamics.orbit.frames import eci_to_ecef
 from sim.dynamics.orbit.epoch import julian_date_to_datetime
 from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
 from sim.utils.ground_track import ground_track_from_eci_history, split_ground_track_dateline
+from sim.utils.figure_size import cap_figsize
 from sim.utils.quaternion import dcm_to_quaternion_bn, quaternion_to_dcm_bn
 from sim.utils.plotting import (
     plot_angular_rates as plot_angular_rates_legacy,
@@ -74,7 +75,7 @@ def _setup_ground_track_axes(
     draw_earth_map: bool,
 ) -> tuple[plt.Figure, Any, bool]:
     if draw_earth_map and _HAS_CARTOPY:
-        fig = plt.figure(figsize=(11, 5))
+        fig = plt.figure(figsize=cap_figsize(11, 5))
         ax = fig.add_subplot(111, projection=ccrs.PlateCarree())
         ax.set_global()
         ax.add_feature(cfeature.OCEAN.with_scale("110m"), facecolor="#cfe8ff", zorder=0)
@@ -88,7 +89,7 @@ def _setup_ground_track_axes(
         ax.set_title(title)
         return fig, ax, True
 
-    fig, ax = plt.subplots(figsize=(11, 5))
+    fig, ax = plt.subplots(figsize=cap_figsize(11, 5))
     if draw_earth_map:
         _draw_stylized_earth_map(ax)
     ax.set_xlim(-180.0, 180.0)
@@ -149,7 +150,7 @@ def plot_quaternion_components(
     q = _truth_quaternion_in_frame(truth_hist, frame)
     labels = ["q0", "q1", "q2", "q3"]
     if layout == "single":
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
         for i in range(4):
             ax.plot(t_s, q[:, i], label=labels[i])
         ax.set_title(f"Quaternion Components ({frame.upper()} frame)")
@@ -158,7 +159,7 @@ def plot_quaternion_components(
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best")
     else:
-        fig, axes = plt.subplots(4, 1, figsize=(10, 9), sharex=True)
+        fig, axes = plt.subplots(4, 1, figsize=cap_figsize(10, 9), sharex=True)
         for i, ax in enumerate(axes):
             ax.plot(t_s, q[:, i], linewidth=1.3)
             ax.set_ylabel(labels[i])
@@ -181,7 +182,7 @@ def plot_body_rates(
     w = _rates_in_frame(truth_hist, frame)
     labels = ["wx", "wy", "wz"]
     if layout == "single":
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
         for i in range(3):
             ax.plot(t_s, w[:, i], label=labels[i])
         ax.set_title(f"Body Angular Rates ({frame.upper()} frame)")
@@ -190,7 +191,7 @@ def plot_body_rates(
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best")
     else:
-        fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        fig, axes = plt.subplots(3, 1, figsize=cap_figsize(10, 8), sharex=True)
         for i, ax in enumerate(axes):
             ax.plot(t_s, w[:, i], linewidth=1.3)
             ax.set_ylabel(f"{labels[i]} (rad/s)")
@@ -273,7 +274,7 @@ def plot_trajectory_frame(
         jd_utc_start=jd_utc_start,
         reference_truth_hist=reference_truth_hist,
     )
-    fig = plt.figure(figsize=(8, 6))
+    fig = plt.figure(figsize=cap_figsize(8, 6))
     ax = fig.add_subplot(111, projection="3d")
     if frame in ("ric_rect", "ric_curv"):
         # Display RIC with radial on y-axis: x=I, y=R, z=C.
@@ -308,7 +309,7 @@ def plot_multi_trajectory_frame(
     mode: PlotMode = "interactive",
     out_path: str | None = None,
 ) -> None:
-    fig = plt.figure(figsize=(9, 7))
+    fig = plt.figure(figsize=cap_figsize(9, 7))
     ax = fig.add_subplot(111, projection="3d")
     if frame in ("ric_rect", "ric_curv"):
         # Display RIC with radial on y-axis: x=I, y=R, z=C.
@@ -374,7 +375,7 @@ def plot_ric_2d_projections(
         reference_truth_hist=reference_truth_hist,
     )
     p_list = planes if planes is not None and len(planes) > 0 else ["ri", "ic", "rc"]
-    fig, axes = plt.subplots(1, len(p_list), figsize=(5.0 * len(p_list), 4.5))
+    fig, axes = plt.subplots(1, len(p_list), figsize=cap_figsize(5.0 * len(p_list), 4.5))
     if len(p_list) == 1:
         axes = [axes]
     for ax, p in zip(axes, p_list):
@@ -407,7 +408,7 @@ def plot_multi_ric_2d_projections(
     if frame not in ("ric_rect", "ric_curv"):
         raise ValueError("frame must be 'ric_rect' or 'ric_curv'.")
     p_list = planes if planes is not None and len(planes) > 0 else ["ri", "ic", "rc"]
-    fig, axes = plt.subplots(1, len(p_list), figsize=(5.0 * len(p_list), 4.5))
+    fig, axes = plt.subplots(1, len(p_list), figsize=cap_figsize(5.0 * len(p_list), 4.5))
     if len(p_list) == 1:
         axes = [axes]
     for oid, hist in truth_hist_by_object.items():
@@ -458,7 +459,7 @@ def plot_control_commands(
     if len(labels) != m:
         raise ValueError("input_labels length must match u_hist second dimension.")
     if layout == "single":
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
         for i in range(m):
             ax.plot(t_s, u[:, i], label=labels[i])
         ax.set_title(title)
@@ -467,7 +468,7 @@ def plot_control_commands(
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best")
     else:
-        fig, axes = plt.subplots(m, 1, figsize=(10, max(3.0, 2.4 * m)), sharex=True)
+        fig, axes = plt.subplots(m, 1, figsize=cap_figsize(10, max(3.0, 2.4 * m)), sharex=True)
         if m == 1:
             axes = [axes]
         for i, ax in enumerate(axes):
@@ -490,7 +491,7 @@ def plot_multi_control_commands(
     mode: PlotMode = "interactive",
     out_path: str | None = None,
 ) -> None:
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
     for oid, u in u_hist_by_object.items():
         arr = np.array(u, dtype=float)
         if arr.ndim != 2 or arr.shape[1] <= component_index:
@@ -553,7 +554,7 @@ def animate_rectangular_prism_attitude(
             c_anim[k, :, :] = c_ir.T @ c_bn.T  # body -> RIC
 
     max_dim = 0.7 * max(lx_m, ly_m, lz_m)
-    fig = plt.figure(figsize=(7, 7))
+    fig = plt.figure(figsize=cap_figsize(7, 7))
     ax = fig.add_subplot(111, projection="3d")
     ax.set_xlim(-max_dim, max_dim)
     ax.set_ylim(-max_dim, max_dim)
@@ -611,7 +612,7 @@ def animate_trajectory_frame(
     )
     lim = np.nanmax(np.abs(r))
     lim = float(max(lim, 1.0))
-    fig = plt.figure(figsize=(8, 6))
+    fig = plt.figure(figsize=cap_figsize(8, 6))
     ax = fig.add_subplot(111, projection="3d")
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
@@ -962,7 +963,7 @@ def animate_multi_rectangular_prism_ric_curv(
         [1, 3, 7, 5],
     ]
 
-    fig = plt.figure(figsize=(9, 8))
+    fig = plt.figure(figsize=cap_figsize(9, 8))
     ax = fig.add_subplot(111, projection="3d")
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
@@ -1126,7 +1127,7 @@ def animate_side_by_side_rectangular_prism_ric_attitude(
     c_left = _body_to_ric_dcm(left_hist)
     c_right = _body_to_ric_dcm(right_hist)
 
-    fig = plt.figure(figsize=(12, 6))
+    fig = plt.figure(figsize=cap_figsize(12, 6))
     ax_left = fig.add_subplot(1, 2, 1, projection="3d")
     ax_right = fig.add_subplot(1, 2, 2, projection="3d")
     for ax, title in ((ax_left, left_object_id), (ax_right, right_object_id)):

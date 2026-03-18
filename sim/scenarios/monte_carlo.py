@@ -14,6 +14,7 @@ import numpy as np
 
 from sim.core.models import SimLog
 from sim.metrics.engagement import compute_engagement_metrics
+from sim.utils.figure_size import cap_figsize
 from sim.utils.io import write_json
 
 try:
@@ -435,7 +436,7 @@ def _save_plots(
 
     bins = min(20, max(5, int(np.sqrt(max(values.size, 1)))))
 
-    fig_hist, ax_hist = plt.subplots(figsize=(8, 4.5))
+    fig_hist, ax_hist = plt.subplots(figsize=cap_figsize(8, 4.5))
     ax_hist.hist(values, bins=bins, alpha=0.8)
     for threshold in thresholds:
         ax_hist.axvline(float(threshold), linestyle="--", color="tab:red", alpha=0.6)
@@ -449,7 +450,7 @@ def _save_plots(
     if plot_mode in ("save", "both"):
         plot_paths["histogram_png"] = str(hist_path)
 
-    fig_cdf, ax_cdf = plt.subplots(figsize=(8, 4.5))
+    fig_cdf, ax_cdf = plt.subplots(figsize=cap_figsize(8, 4.5))
     sorted_values = np.sort(values)
     if sorted_values.size > 0:
         empirical = np.arange(1, sorted_values.size + 1, dtype=float) / sorted_values.size
@@ -468,7 +469,7 @@ def _save_plots(
         plot_paths["cdf_png"] = str(cdf_path)
 
     if tca_values:
-        fig_tca, ax_tca = plt.subplots(figsize=(8, 4.5))
+        fig_tca, ax_tca = plt.subplots(figsize=cap_figsize(8, 4.5))
         ax_tca.hist(np.asarray(tca_values, dtype=float), bins=min(20, max(5, int(np.sqrt(len(tca_values))))), alpha=0.8, color="tab:orange")
         ax_tca.set_title("Time of Closest Approach")
         ax_tca.set_xlabel("Time (s)")

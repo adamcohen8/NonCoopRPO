@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import unittest
 
 import numpy as np
@@ -5,6 +7,12 @@ import numpy as np
 from sim.core.models import Command, StateTruth
 from sim.dynamics.attitude.disturbances import DisturbanceTorqueConfig, DisturbanceTorqueModel
 from sim.dynamics.model import OrbitalAttitudeDynamics
+
+
+class _AttitudeCoupledDisturbance:
+    def total_torque_body_nm(self, state: StateTruth, env: dict | None = None) -> np.ndarray:
+        q = np.array(state.attitude_quat_bn, dtype=float).reshape(4)
+        return np.array([0.0, 0.0, 50.0 * q[2]], dtype=float)
 
 
 class TestAttitudeDisturbances(unittest.TestCase):
@@ -54,6 +62,28 @@ class TestAttitudeDisturbances(unittest.TestCase):
         x_yes = with_dist.step(state.copy(), command, env={}, dt_s=2.0)
         diff_norm = np.linalg.norm(x_yes.angular_rate_body_rad_s - x_no.angular_rate_body_rad_s)
         self.assertGreater(diff_norm, 0.0)
+
+    def test_disturbance_torque_recomputed_each_attitude_substep(self):
+        inertia = np.diag([120.0, 100.0, 80.0])
+        state = StateTruth(
+            position_eci_km=np.array([6778.0, 0.0, 0.0]),
+            velocity_eci_km_s=np.array([0.0, 7.67, 0.0]),
+            attitude_quat_bn=np.array([1.0, 0.0, 0.0, 0.0]),
+            angular_rate_body_rad_s=np.array([0.0, 0.4, 0.0]),
+            mass_kg=300.0,
+            t_s=0.0,
+        )
+        dyn = OrbitalAttitudeDynamics(
+            mu_km3_s2=398600.4418,
+            inertia_kg_m2=inertia,
+            disturbance_model=_AttitudeCoupledDisturbance(),
+            orbit_substep_s=1.0,
+            attitude_substep_s=0.1,
+        )
+
+        out = dyn.step(state.copy(), Command.zero(), env={}, dt_s=1.0)
+
+        self.assertGreater(abs(float(out.angular_rate_body_rad_s[2])), 1e-8)
 
 
 if __name__ == "__main__":

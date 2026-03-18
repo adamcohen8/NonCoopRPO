@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -57,6 +57,7 @@ from sim.utils.io import write_json
 from sim.utils.ground_track import ground_track_from_eci_history
 from sim.utils.geodesy import ecef_to_geodetic_deg_km
 from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_rect_state_to_eci, ric_rect_to_curv
+from sim.utils.figure_size import cap_figsize
 from sim.utils.quaternion import quaternion_to_dcm_bn
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,51 @@ def _rocket_state_to_truth(s: RocketState) -> StateTruth:
         mass_kg=float(s.mass_kg),
         t_s=float(s.t_s),
     )
+
+
+def _truth_state6(truth: StateTruth, out: np.ndarray | None = None) -> np.ndarray:
+    state = np.empty(6, dtype=float) if out is None else out
+    state[0:3] = truth.position_eci_km
+    state[3:6] = truth.velocity_eci_km_s
+    return state
+
+
+def _attitude_state13_from_belief(
+    belief: StateBelief,
+    truth: StateTruth,
+    out: np.ndarray | None = None,
+) -> np.ndarray:
+    state = np.empty(13, dtype=float) if out is None else out
+    state[0:6] = belief.state[:6]
+    state[6:10] = truth.attitude_quat_bn
+    state[10:13] = truth.angular_rate_body_rad_s
+    return state
+
+
+def _relative_orbit_state12(
+    chief_truth: StateTruth,
+    deputy_truth: StateTruth,
+    out: np.ndarray | None = None,
+    deputy_state6: np.ndarray | None = None,
+    chief_state6: np.ndarray | None = None,
+) -> np.ndarray:
+    state = np.empty(12, dtype=float) if out is None else out
+    r_c = chief_truth.position_eci_km
+    v_c = chief_truth.velocity_eci_km_s
+    x_dep_eci = np.empty(6, dtype=float) if deputy_state6 is None else deputy_state6
+    x_chief_eci = np.empty(6, dtype=float) if chief_state6 is None else chief_state6
+    x_dep_eci[0:3] = deputy_truth.position_eci_km
+    x_dep_eci[3:6] = deputy_truth.velocity_eci_km_s
+    x_chief_eci[0:3] = r_c
+    x_chief_eci[3:6] = v_c
+    x_rect = eci_relative_to_ric_rect(
+        x_dep_eci=x_dep_eci,
+        x_chief_eci=x_chief_eci,
+    )
+    state[0:6] = ric_rect_to_curv(x_rect, r0_km=float(np.linalg.norm(r_c)))
+    state[6:9] = r_c
+    state[9:12] = v_c
+    return state
 
 
 def _quat_error_angle_deg(q_des: np.ndarray, q_cur: np.ndarray) -> float:
@@ -1002,7 +1048,7 @@ def _plot_outputs(
         ids = list(truth_hist.keys())
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
                 a = truth_hist[ids[i]][:, :3]
@@ -1050,7 +1096,7 @@ def _plot_outputs(
             finite = np.isfinite(err_deg)
             if not np.any(finite):
                 continue
-            fig, ax = plt.subplots(figsize=(10, 5))
+            fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
             ax.plot(t_s[:n_s][finite], err_deg[finite], linewidth=1.4)
             ax.set_xlabel("Time (s)")
             ax.set_ylabel("Error Angle (deg)")
@@ -1230,7 +1276,7 @@ def _plot_outputs(
                 throttle = np.array(rocket_metrics["throttle_cmd"], dtype=float).reshape(-1)[: t_s.size]
         a_cmd = np.linalg.norm(np.nan_to_num(thrust_hist.get("rocket", np.zeros((t_s.size, 3))), nan=0.0), axis=1)
 
-        fig, ax = plt.subplots(4, 1, figsize=(11, 11), sharex=True)
+        fig, ax = plt.subplots(4, 1, figsize=cap_figsize(11, 11), sharex=True)
 
         ax0r = ax[0].twinx()
         l00 = ax[0].plot(t_s, alt_km, label="altitude (km)", color="tab:blue")
@@ -1285,7 +1331,7 @@ def _plot_outputs(
         for k in range(min(t_s.size, x.shape[0])):
             a_km[k], e[k] = _orbital_elements_basic(x[k, 0:3], x[k, 3:6], EARTH_MU_KM3_S2)
 
-        fig, ax = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+        fig, ax = plt.subplots(2, 1, figsize=cap_figsize(10, 7), sharex=True)
         ax[0].plot(t_s, a_km)
         ax[0].set_ylabel("a (km)")
         ax[0].set_title("Rocket Orbital Elements")
@@ -1318,7 +1364,7 @@ def _plot_outputs(
         else:
             fuel_pct = np.zeros_like(m)
 
-        fig, ax = plt.subplots(figsize=(10, 4.5))
+        fig, ax = plt.subplots(figsize=cap_figsize(10, 4.5))
         ax.plot(t_s, fuel_pct, linewidth=1.6)
         ax.set_ylim(-1.0, 101.0)
         ax.set_ylabel("Fuel Remaining (%)")
@@ -1338,7 +1384,7 @@ def _plot_outputs(
 
         g0_m_s2 = 9.80665
         section_by_id = {"chaser": cfg.chaser, "target": cfg.target}
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
         plotted = False
         for oid in ("chaser", "target"):
             hist = truth_hist.get(oid)
@@ -1505,7 +1551,7 @@ def _plot_outputs(
                     continue
                 err_deg[k] = float(np.degrees(np.arccos(cosang)))
 
-            fig, ax = plt.subplots(figsize=(10, 5))
+            fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
             finite = np.isfinite(err_deg)
             if np.any(finite):
                 t_f = np.array(t_s[finite], dtype=float)
@@ -1538,7 +1584,7 @@ def _plot_outputs(
     if "knowledge_timeline" in figure_ids:
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
         i = 0
         for obs, by_tgt in knowledge_hist.items():
             for tgt, hist in by_tgt.items():
@@ -2032,7 +2078,17 @@ def _run_single_config(
 
     seed = int(cfg.metadata.get("seed", 123))
     rng = np.random.default_rng(seed)
-    attitude_enabled = bool((cfg.simulator.dynamics.get("attitude", {}) or {}).get("enabled", True))
+    dynamics_cfg = dict(cfg.simulator.dynamics or {})
+    orbit_cfg = dict(dynamics_cfg.get("orbit", {}) or {})
+    att_cfg = dict(dynamics_cfg.get("attitude", {}) or {})
+    base_environment = dict(cfg.simulator.environment or {})
+    attitude_enabled = bool(att_cfg.get("enabled", True))
+    orbit_substep_s = float(max(float(orbit_cfg.get("orbit_substep_s", dt) or dt), 1e-9))
+    attitude_substep_s = float(max(float(att_cfg.get("attitude_substep_s", dt) or dt), 1e-9))
+    sim_substep_s = float(min(orbit_substep_s, attitude_substep_s)) if attitude_enabled else orbit_substep_s
+    eye6 = np.eye(6) * 1e-4
+    eye12 = np.eye(12) * 1e-4
+    zero3 = np.zeros(3, dtype=float)
 
     rocket = _create_rocket_runtime(cfg) if cfg.rocket.enabled else None
     chaser = _create_satellite_runtime("chaser", cfg.chaser, cfg, np.random.default_rng(int(rng.integers(0, 2**31 - 1)))) if cfg.chaser.enabled else None
@@ -2087,6 +2143,9 @@ def _run_single_config(
     rocket_inserted = False
     rocket_insertion_time_s: float | None = None
     rocket_insertion_hold_s = 0.0
+    total_dv_m_s_by_object = {aid: 0.0 for aid in agents.keys()}
+    burn_samples_by_object = {aid: 0 for aid in agents.keys()}
+    max_accel_km_s2_by_object = {aid: 0.0 for aid in agents.keys()}
 
     # Initial logging
     for aid, a in agents.items():
@@ -2126,25 +2185,15 @@ def _run_single_config(
                 continue
             world_truth[aid] = a.truth if a.kind == "satellite" else _rocket_state_to_truth(a.rocket_state)
 
-        for aid, a in agents.items():
-            if not a.active or a.knowledge_base is None:
-                continue
-            a.knowledge_base.update(observer_truth=world_truth[aid], world_truth=world_truth, t_s=t_next)
-            snap = a.knowledge_base.snapshot()
-            for tid, hist in knowledge_hist.get(aid, {}).items():
-                b = snap.get(tid)
-                if b is not None:
-                    hist[k + 1, :] = b.state[:6]
-                elif k > 0:
-                    hist[k + 1, :] = hist[k, :]
+        world_truth_live = dict(world_truth)
 
         for aid, a in agents.items():
             if not a.active:
                 continue
-            tr_now = world_truth[aid]
+            tr_now = world_truth_live[aid]
             env_common = {
-                **dict(cfg.simulator.environment or {}),
-                "world_truth": world_truth,
+                **base_environment,
+                "world_truth": world_truth_live,
                 "attitude_disabled": (not attitude_enabled),
             }
             mission_out: dict[str, Any] = {}
@@ -2152,7 +2201,7 @@ def _run_single_config(
             if a.kind == "rocket":
                 mission_out = _run_mission_modules(
                     agent=a,
-                    world_truth=world_truth,
+                    world_truth=world_truth_live,
                     t_s=t_next,
                     dt_s=dt,
                     env=env_common,
@@ -2163,14 +2212,11 @@ def _run_single_config(
                     a.rocket_state.t_s = float(t_next)
                     a.truth = _rocket_state_to_truth(a.rocket_state)
                     if a.belief is not None:
-                        a.belief = StateBelief(
-                            state=np.hstack((a.truth.position_eci_km, a.truth.velocity_eci_km_s)),
-                            covariance=a.belief.covariance,
-                            last_update_t_s=t_next,
-                        )
+                        a.belief.state[:6] = _truth_state6(a.truth, a.belief.state[:6])
+                        a.belief.last_update_t_s = t_next
                     throttle_hist["rocket"][k] = 0.0
-                    thrust_hist[aid][k + 1, :] = np.zeros(3, dtype=float)
-                    torque_hist[aid][k + 1, :] = np.zeros(3, dtype=float)
+                    thrust_hist[aid][k + 1, :] = zero3
+                    torque_hist[aid][k + 1, :] = zero3
                     if rocket_stage_hist is not None:
                         rocket_stage_hist[k + 1] = float(a.rocket_state.active_stage_index)
                     if rocket_q_dyn_hist is not None:
@@ -2189,16 +2235,18 @@ def _run_single_config(
                     a.rocket_state = a.rocket_sim.step(a.rocket_state, cmd, dt_s=dt)
                     a.truth = _rocket_state_to_truth(a.rocket_state)
                     if a.belief is not None:
-                        a.belief = StateBelief(
-                            state=np.hstack((a.truth.position_eci_km, a.truth.velocity_eci_km_s)),
-                            covariance=a.belief.covariance,
-                            last_update_t_s=t_next,
-                        )
+                        a.belief.state[:6] = _truth_state6(a.truth, a.belief.state[:6])
+                        a.belief.last_update_t_s = t_next
                     thrust_n = float(getattr(a.rocket_state, "_last_step_thrust_n", 0.0))
                     axis_eci = quaternion_to_dcm_bn(a.rocket_state.attitude_quat_bn).T @ np.array(a.rocket_sim.vehicle_cfg.thrust_axis_body, dtype=float)
                     accel = (thrust_n / max(a.rocket_state.mass_kg, 1e-9)) * axis_eci / 1e3
                     thrust_hist[aid][k + 1, :] = accel
-                    torque_hist[aid][k + 1, :] = np.array(a.rocket_state.angular_rate_body_rad_s, dtype=float) * 0.0
+                    torque_hist[aid][k + 1, :] = zero3
+                    accel_mag = float(np.linalg.norm(accel))
+                    total_dv_m_s_by_object[aid] += accel_mag * dt * 1e3
+                    max_accel_km_s2_by_object[aid] = max(max_accel_km_s2_by_object[aid], accel_mag)
+                    if accel_mag > 1e-15:
+                        burn_samples_by_object[aid] += 1
                     if rocket_stage_hist is not None:
                         rocket_stage_hist[k + 1] = float(a.rocket_state.active_stage_index)
                     if rocket_q_dyn_hist is not None:
@@ -2206,60 +2254,60 @@ def _run_single_config(
                     if rocket_mach_hist is not None:
                         rocket_mach_hist[k + 1] = float(getattr(a.rocket_state, "_last_step_mach", 0.0))
             else:
-                orbit_cfg = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
-                att_cfg = dict(cfg.simulator.dynamics.get("attitude", {}) or {})
-                orbit_substep_s = float(max(float(orbit_cfg.get("orbit_substep_s", dt) or dt), 1e-9))
-                attitude_substep_s = float(max(float(att_cfg.get("attitude_substep_s", dt) or dt), 1e-9))
-                sim_substep_s = float(min(orbit_substep_s, attitude_substep_s)) if attitude_enabled else orbit_substep_s
                 t_inner = float(t)
                 tr_inner = tr_now
                 cmd = Command.zero()
-                applied_thrust_last = np.zeros(3, dtype=float)
-                applied_torque_last = np.zeros(3, dtype=float)
+                accel_time_integral = zero3.copy()
+                torque_time_integral = zero3.copy()
+                step_delta_v_m_s = 0.0
+                step_max_accel_km_s2 = 0.0
+                burned_this_step = False
+                world_truth_inner = world_truth_live.copy()
+                env_inner_common = {**base_environment, "world_truth": world_truth_inner}
+                env_sensor = {"world_truth": world_truth_inner}
+                env_inner = {
+                    **base_environment,
+                    "world_truth": world_truth_inner,
+                    "attitude_disabled": (not attitude_enabled),
+                }
+                orbit_state12_scratch = np.empty(12, dtype=float)
+                attitude_state13_scratch = np.empty(13, dtype=float)
+                deputy_state6_scratch = np.empty(6, dtype=float)
+                chief_state6_scratch = np.empty(6, dtype=float)
+                orbit_belief_scratch = StateBelief(state=orbit_state12_scratch, covariance=eye12, last_update_t_s=t)
+                attitude_belief_scratch = StateBelief(state=attitude_state13_scratch, covariance=eye6, last_update_t_s=t)
                 while t_inner < t_next - 1e-12:
                     h = float(min(sim_substep_s, t_next - t_inner))
                     t_eval = t_inner + h
-                    world_truth_inner = dict(world_truth)
                     world_truth_inner[aid] = tr_inner
-                    env_inner_common = {**dict(cfg.simulator.environment or {}), "world_truth": world_truth_inner}
-                    meas = a.sensor.measure(truth=tr_inner, env={"world_truth": world_truth_inner}, t_s=t_eval) if a.sensor is not None else None
+                    meas = a.sensor.measure(truth=tr_inner, env=env_sensor, t_s=t_eval) if a.sensor is not None else None
                     if a.estimator is not None and a.belief is not None:
                         a.belief = a.estimator.update(a.belief, meas, t_eval)
                     elif a.belief is None:
-                        a.belief = StateBelief(state=np.hstack((tr_inner.position_eci_km, tr_inner.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=t_eval)
+                        a.belief = StateBelief(state=_truth_state6(tr_inner), covariance=eye6.copy(), last_update_t_s=t_eval)
                     orb_belief = a.belief
                     if a.orbit_controller is not None and orb_belief is not None:
                         chief_truth = world_truth_inner.get("target")
                         if chief_truth is not None and aid != "target" and hasattr(a.orbit_controller, "ric_curv_state_slice"):
-                            r_c = np.array(chief_truth.position_eci_km, dtype=float)
-                            v_c = np.array(chief_truth.velocity_eci_km_s, dtype=float)
-                            r_s = np.array(tr_inner.position_eci_km, dtype=float)
-                            v_s = np.array(tr_inner.velocity_eci_km_s, dtype=float)
-                            x_rect = eci_relative_to_ric_rect(
-                                x_dep_eci=np.hstack((r_s, v_s)),
-                                x_chief_eci=np.hstack((r_c, v_c)),
+                            orbit_belief_scratch.last_update_t_s = orb_belief.last_update_t_s
+                            orbit_belief_scratch.state = _relative_orbit_state12(
+                                chief_truth=chief_truth,
+                                deputy_truth=tr_inner,
+                                out=orbit_state12_scratch,
+                                deputy_state6=deputy_state6_scratch,
+                                chief_state6=chief_state6_scratch,
                             )
-                            x_curv = ric_rect_to_curv(x_rect, r0_km=float(np.linalg.norm(r_c)))
-                            orb_state = np.hstack((x_curv, np.hstack((r_c, v_c))))
-                            orb_belief = StateBelief(
-                                state=orb_state,
-                                covariance=np.eye(12) * 1e-4,
-                                last_update_t_s=orb_belief.last_update_t_s,
-                            )
+                            orb_belief = orbit_belief_scratch
                     att_belief = a.belief
                     if attitude_enabled and att_belief is not None and att_belief.state.size < 13:
-                        att_state = np.hstack(
-                            (
-                                np.array(att_belief.state[:6], dtype=float),
-                                np.array(tr_inner.attitude_quat_bn, dtype=float),
-                                np.array(tr_inner.angular_rate_body_rad_s, dtype=float),
-                            )
+                        attitude_belief_scratch.covariance = att_belief.covariance
+                        attitude_belief_scratch.last_update_t_s = att_belief.last_update_t_s
+                        attitude_belief_scratch.state = _attitude_state13_from_belief(
+                            belief=att_belief,
+                            truth=tr_inner,
+                            out=attitude_state13_scratch,
                         )
-                        att_belief = StateBelief(
-                            state=att_state,
-                            covariance=att_belief.covariance,
-                            last_update_t_s=att_belief.last_update_t_s,
-                        )
+                        att_belief = attitude_belief_scratch
                     if not attitude_enabled:
                         att_belief = None
                     mission_out = _run_mission_modules(
@@ -2333,15 +2381,10 @@ def _run_single_config(
                         if "torque_body_nm" in mission_out:
                             cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
                     if not attitude_enabled:
-                        cmd.torque_body_nm = np.zeros(3, dtype=float)
-                    env_inner = {
-                        **dict(cfg.simulator.environment or {}),
-                        "world_truth": world_truth_inner,
-                        "attitude_disabled": (not attitude_enabled),
-                    }
+                        cmd.torque_body_nm = zero3
                     cmd_step = Command(
                         thrust_eci_km_s2=np.array(cmd.thrust_eci_km_s2, dtype=float),
-                        torque_body_nm=(np.zeros(3, dtype=float) if not attitude_enabled else np.array(cmd.torque_body_nm, dtype=float)),
+                        torque_body_nm=(zero3.copy() if not attitude_enabled else np.array(cmd.torque_body_nm, dtype=float)),
                         mode_flags=dict(cmd.mode_flags or {}),
                     )
                     min_mass_kg = 0.0
@@ -2366,13 +2409,25 @@ def _run_single_config(
                         available_propellant_kg = float(max(tr_inner.mass_kg - min_mass_kg, 0.0))
                         cmd_step.mode_flags["delta_mass_kg"] = float(min(delta_mass_kg, available_propellant_kg))
                     tr_inner = a.dynamics.step(state=tr_inner, command=cmd_step, env=env_inner, dt_s=h)
-                    applied_thrust_last = np.array(cmd_step.thrust_eci_km_s2, dtype=float)
-                    applied_torque_last = np.array(cmd_step.torque_body_nm, dtype=float)
+                    applied_thrust = np.array(cmd_step.thrust_eci_km_s2, dtype=float)
+                    applied_torque = np.array(cmd_step.torque_body_nm, dtype=float)
+                    accel_time_integral += applied_thrust * h
+                    torque_time_integral += applied_torque * h
+                    accel_mag = float(np.linalg.norm(applied_thrust))
+                    step_delta_v_m_s += accel_mag * h * 1e3
+                    step_max_accel_km_s2 = max(step_max_accel_km_s2, accel_mag)
+                    burned_this_step = burned_this_step or (accel_mag > 1e-15)
                     t_inner = t_eval
 
                 a.truth = tr_inner
-                thrust_hist[aid][k + 1, :] = applied_thrust_last
-                torque_hist[aid][k + 1, :] = np.zeros(3, dtype=float) if not attitude_enabled else applied_torque_last
+                thrust_hist[aid][k + 1, :] = accel_time_integral / dt
+                torque_hist[aid][k + 1, :] = zero3 if not attitude_enabled else (torque_time_integral / dt)
+                total_dv_m_s_by_object[aid] += step_delta_v_m_s
+                max_accel_km_s2_by_object[aid] = max(max_accel_km_s2_by_object[aid], step_max_accel_km_s2)
+                if burned_this_step:
+                    burn_samples_by_object[aid] += 1
+
+            world_truth_live[aid] = a.truth if a.kind == "satellite" else _rocket_state_to_truth(a.rocket_state)
 
             if a.bridge is not None:
                 evt = {"t_s": t_next, "object_id": aid}
@@ -2384,6 +2439,21 @@ def _run_single_config(
                     except Exception as ex:
                         evt["bridge_error"] = str(ex)
                 bridge_hist[aid].append(evt)
+
+        for aid, a in agents.items():
+            if not a.active or a.knowledge_base is None:
+                continue
+            observer_truth = world_truth_live.get(aid)
+            if observer_truth is None:
+                continue
+            a.knowledge_base.update(observer_truth=observer_truth, world_truth=world_truth_live, t_s=t_next)
+            snap = a.knowledge_base.snapshot()
+            for tid, hist in knowledge_hist.get(aid, {}).items():
+                b = snap.get(tid)
+                if b is not None:
+                    hist[k + 1, :] = b.state[:6]
+                elif k > 0:
+                    hist[k + 1, :] = hist[k, :]
 
         if active_step_callback is not None:
             try:
@@ -2490,13 +2560,11 @@ def _run_single_config(
     )
 
     thrust_stats: dict[str, dict[str, float | int]] = {}
-    for oid, u in thrust_out.items():
-        mag = np.linalg.norm(np.nan_to_num(u, nan=0.0), axis=1)
-        burn_mask = mag > 1e-15
+    for oid in thrust_out.keys():
         thrust_stats[oid] = {
-            "burn_samples": int(np.sum(burn_mask)),
-            "max_accel_km_s2": float(np.max(mag)) if mag.size else 0.0,
-            "total_dv_m_s": float(np.sum(mag) * float(dt) * 1e3),
+            "burn_samples": int(burn_samples_by_object.get(oid, 0)),
+            "max_accel_km_s2": float(max_accel_km_s2_by_object.get(oid, 0.0)),
+            "total_dv_m_s": float(total_dv_m_s_by_object.get(oid, 0.0)),
         }
 
     summary = {
@@ -2657,9 +2725,8 @@ def run_master_simulation(
                 fut_to_idx = {ex.submit(_run_mc_iteration_from_dict, t): int(t["iteration"]) for t in tasks}
                 pending = set(fut_to_idx.keys())
                 while pending:
-                    done_now = [f for f in list(pending) if f.done()]
+                    done_now, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
                     for fut in done_now:
-                        pending.remove(fut)
                         idx = fut_to_idx[fut]
                         completed[idx] = fut.result()
                         if mc_callback is not None:
@@ -2682,8 +2749,6 @@ def run_master_simulation(
                                 except Exception as exc:
                                     logger.warning("Disabling Monte Carlo progress callback after runtime error: %s", exc)
                                     mc_progress_callback = None
-                    if pending:
-                        time.sleep(0.03)
         except (OSError, PermissionError, NotImplementedError, EOFError) as exc:
             parallel_active = False
             parallel_fallback_reason = f"{type(exc).__name__}: {exc}"
@@ -3043,15 +3108,21 @@ def run_master_simulation(
             if rem_arr.size:
                 plot_series.append((f"{oid} dV Remaining (m/s)", rem_arr))
         nplots = len(plot_series)
-        fig, axes = plt.subplots(1, nplots, figsize=(5.0 * nplots, 4.0))
-        if nplots == 1:
-            axes = [axes]
-        for ax, (title, arr) in zip(axes, plot_series):
+        if nplots == 6:
+            nrows, ncols = 3, 2
+        else:
+            ncols = min(3, max(1, nplots))
+            nrows = int(np.ceil(nplots / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=cap_figsize(5.2 * ncols, 3.8 * nrows), squeeze=False)
+        axes_flat = list(np.ravel(axes))
+        for ax, (title, arr) in zip(axes_flat, plot_series):
             bins = int(max(5, min(30, np.sqrt(max(arr.size, 1)))))
             ax.hist(arr, bins=bins, alpha=0.85)
             ax.set_title(title)
             ax.set_ylabel("count")
             ax.grid(True, alpha=0.3)
+        for ax in axes_flat[nplots:]:
+            ax.set_visible(False)
         fig.tight_layout()
         if save_hist:
             fig.savefig(str(outdir / "master_monte_carlo_histograms.png"), dpi=int(cfg.outputs.plots.get("dpi", 150)))
@@ -3071,7 +3142,7 @@ def run_master_simulation(
         dur_run_arr = np.array([_safe_float(d.get("duration_s"), default=0.0) for d in run_details], dtype=float)
         dv_run_arr = np.array([_safe_float(d.get("total_dv_m_s_total"), default=0.0) for d in run_details], dtype=float)
 
-        fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+        fig, axes = plt.subplots(2, 3, figsize=cap_figsize(14, 8))
         bins = int(max(5, min(30, np.sqrt(max(len(run_details), 1)))))
 
         finite_ca = ca_run_arr[np.isfinite(ca_run_arr)]
@@ -3137,7 +3208,7 @@ def run_master_simulation(
 
         rem_obj_ids = [oid for oid in ("chaser", "target") if oid in dv_budget_m_s_by_object]
         if rem_obj_ids:
-            fig_rem, axes_rem = plt.subplots(2, len(rem_obj_ids), figsize=(5.0 * len(rem_obj_ids), 7.0), squeeze=False)
+            fig_rem, axes_rem = plt.subplots(2, len(rem_obj_ids), figsize=cap_figsize(5.0 * len(rem_obj_ids), 7.0), squeeze=False)
             for j, oid in enumerate(rem_obj_ids):
                 rem_arr = np.array(
                     [
