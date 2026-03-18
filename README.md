@@ -161,26 +161,23 @@ python run_simulation.py --config configs/automation_smoke.yaml
 
 `run_master_simulation` also auto-switches `outputs.mode: interactive` to `save` when `SIM_AUTOMATION=1` or `CI=1`.
 
-### 2d) Streamlit GUI
+### 2d) Native Desktop GUI
 
-The repository also includes a separate Streamlit GUI entrypoint for editing YAML-backed configs and launching runs without changing the existing CLI workflow:
-
-```bash
-streamlit run streamlit_app.py
-```
-
-The GUI:
-
-- loads configs from [`configs/`](/Users/adamcohen/Downloads/NonCooperativeRPO/configs)
-- edits a V1 subset of common scenario/object/output fields
-- provides an advanced raw YAML editor
-- saves a config file and launches the existing [`run_simulation.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/run_simulation.py) entrypoint
-
-The existing CLI flow remains unchanged:
+For a native operator-console workflow closer to a traditional desktop simulator, use the `PySide6` launcher:
 
 ```bash
-python run_simulation.py --config configs/my_scenario.yaml
+python run_gui.py
 ```
+
+This opens a local desktop window, not a browser page. The GUI:
+
+- loads and edits YAML-backed scenario configs
+- saves the current config to a chosen path
+- launches the existing [`run_simulation.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/run_simulation.py) entrypoint
+- streams console output into the application
+- lists generated output artifacts from the configured output directory
+
+This path is parallel to the CLI and does not replace it.
 
 ### 2b) Use fidelity profiles
 

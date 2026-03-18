@@ -8,7 +8,7 @@ tqdm>=4.65
 
 # YAML config loading
 PyYAML>=6.0
-streamlit>=1.36
+PySide6>=6.7
 
 # Test runner
 pytest>=8.0

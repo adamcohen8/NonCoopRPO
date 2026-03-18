@@ -13,7 +13,7 @@ from sim.config.scenario_yaml import SimulationScenarioConfig, load_simulation_y
 try:
     import yaml  # type: ignore
 except Exception as exc:  # pragma: no cover
-    raise RuntimeError("PyYAML is required for GUI helpers.") from exc
+    raise RuntimeError("PyYAML is required for application I/O helpers.") from exc
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -112,31 +112,9 @@ def run_simulation_cli(config_path: str | Path) -> dict[str, Any]:
     }
 
 
-def summarize_config(cfg: SimulationScenarioConfig) -> dict[str, Any]:
-    outputs = cfg.outputs
-    mc = cfg.monte_carlo
-    objects = [
-        object_id
-        for object_id, section in (("rocket", cfg.rocket), ("chaser", cfg.chaser), ("target", cfg.target))
-        if bool(section.enabled)
-    ]
-    return {
-        "scenario_name": cfg.scenario_name,
-        "scenario_type": cfg.simulator.scenario_type,
-        "duration_s": float(cfg.simulator.duration_s),
-        "dt_s": float(cfg.simulator.dt_s),
-        "objects": objects,
-        "output_dir": outputs.output_dir,
-        "output_mode": outputs.mode,
-        "monte_carlo_enabled": bool(mc.enabled),
-        "mc_iterations": int(mc.iterations),
-    }
-
-
 def list_output_files(output_dir: str | Path, limit: int = 200) -> list[Path]:
     outdir = Path(output_dir)
     if not outdir.exists() or not outdir.is_dir():
         return []
     files = sorted((p for p in outdir.rglob("*") if p.is_file()), key=lambda p: str(p))
     return files[: max(int(limit), 0)]
-
