@@ -22,6 +22,10 @@ def _fmt_float(x: float, digits: int = 3) -> str:
     return f"{float(x):.{digits}f}"
 
 
+def _print_field(label: str, value: str, label_width: int = 13) -> None:
+    print(f"{label:<{label_width}} : {value}")
+
+
 def _pointer_label(ptr) -> str:
     if ptr is None:
         return "none"
@@ -107,9 +111,9 @@ def _print_single_run_summary(out: dict) -> None:
     thrust = dict(run.get("thrust_stats", {}) or {})
     guardrails = dict(run.get("attitude_guardrail_stats", {}) or {})
     print("")
-    print("=" * 72)
+    print("=" * 102)
     print("MASTER SIMULATION COMPLETED")
-    print("=" * 72)
+    print("=" * 102)
     print(f"Config     : {out.get('config_path', '')}")
     print(f"Scenario   : {out.get('scenario_name', run.get('scenario_name', 'unknown'))}")
     print(f"Objects    : {', '.join(run.get('objects', []))}")
@@ -133,7 +137,7 @@ def _print_single_run_summary(out: dict) -> None:
             print("Insertion  : not achieved")
 
     if thrust:
-        print("-" * 72)
+        print("-" * 102)
         print("Thrust Stats")
         print(f"{'Object':<14}{'Burn Samples':>14}{'Max Accel (km/s^2)':>24}{'Total dV (m/s)':>18}")
         for oid in sorted(thrust.keys()):
@@ -160,29 +164,29 @@ def _print_monte_carlo_summary(out: dict) -> None:
         for r in runs
     ]
     print("")
-    print("=" * 72)
+    print("=" * 102)
     print("MASTER MONTE CARLO COMPLETED")
-    print("=" * 72)
-    print(f"Config     : {out.get('config_path', '')}")
-    print(f"Scenario   : {out.get('scenario_name', 'unknown')}")
-    print(f"Iterations : {len(runs)}")
+    print("=" * 102)
+    _print_field("Config", str(out.get("config_path", "")))
+    _print_field("Scenario", str(out.get("scenario_name", "unknown")))
+    _print_field("Iterations", str(len(runs)))
     if agg_stats:
         d_min = float(agg_stats.get("duration_s_min", 0.0))
         d_mean = float(agg_stats.get("duration_s_mean", 0.0))
         d_max = float(agg_stats.get("duration_s_max", 0.0))
         t_rate = float(agg_stats.get("terminated_early_rate", 0.0))
         p_success = float(agg_stats.get("pass_rate", brief.get("p_success", 0.0)))
-        print(f"Duration   : min={d_min:.1f}s  mean={d_mean:.1f}s  max={d_max:.1f}s")
-        print(f"Early Term : {100.0 * t_rate:.1f}%")
-        print(f"P(success) : {100.0 * p_success:.1f}%")
+        _print_field("Duration", f"min={d_min:.1f}s  mean={d_mean:.1f}s  max={d_max:.1f}s")
+        _print_field("Early Term", f"{100.0 * t_rate:.1f}%")
+        _print_field("P(success)", f"{100.0 * p_success:.1f}%")
         ca_min = agg_stats.get("closest_approach_km_min")
         ca_mean = agg_stats.get("closest_approach_km_mean")
         ca_max = agg_stats.get("closest_approach_km_max")
         if all(v is not None for v in (ca_min, ca_mean, ca_max)):
             try:
-                print(
-                    "Closest App: "
-                    f"min={float(ca_min):.3f} km  mean={float(ca_mean):.3f} km  max={float(ca_max):.3f} km"
+                _print_field(
+                    "Closest App",
+                    f"min={float(ca_min):.3f} km  mean={float(ca_mean):.3f} km  max={float(ca_max):.3f} km",
                 )
             except (TypeError, ValueError):
                 pass
@@ -191,7 +195,7 @@ def _print_monte_carlo_summary(out: dict) -> None:
             try:
                 p_keepout_f = float(p_keepout)
                 if not math.isnan(p_keepout_f):
-                    print(f"Keepout Risk: {100.0 * p_keepout_f:.1f}%")
+                    _print_field("Keepout Risk", f"{100.0 * p_keepout_f:.1f}%")
             except (TypeError, ValueError):
                 pass
         p_cat = brief.get("p_catastrophic_outcome", agg_stats.get("p_catastrophic_outcome"))
@@ -199,40 +203,40 @@ def _print_monte_carlo_summary(out: dict) -> None:
             try:
                 p_cat_f = float(p_cat)
                 if not math.isnan(p_cat_f):
-                    print(f"Catastrophic: {100.0 * p_cat_f:.1f}%")
+                    _print_field("Catastrophic", f"{100.0 * p_cat_f:.1f}%")
             except (TypeError, ValueError):
                 pass
         p_dv = brief.get("p_exceed_dv_budget", agg_stats.get("p_exceed_dv_budget"))
         p_time = brief.get("p_exceed_time_budget", agg_stats.get("p_exceed_time_budget"))
         try:
             if p_dv is not None and not math.isnan(float(p_dv)):
-                print(f"DV > Budget : {100.0 * float(p_dv):.1f}%")
+                _print_field("DV > Budget", f"{100.0 * float(p_dv):.1f}%")
         except (TypeError, ValueError):
             pass
         try:
             if p_time is not None and not math.isnan(float(p_time)):
-                print(f"Time > Budget: {100.0 * float(p_time):.1f}%")
+                _print_field("Time > Budget", f"{100.0 * float(p_time):.1f}%")
         except (TypeError, ValueError):
             pass
         timeline = dict(brief.get("timeline_confidence_bands_s", {}) or {})
         fuel = dict(brief.get("fuel_confidence_bands_total_dv_m_s", {}) or {})
         if timeline:
             try:
-                print(
-                    "Timeline   : "
+                _print_field(
+                    "Timeline",
                     f"P50={float(timeline.get('p50', float('nan'))):.1f}s  "
                     f"P90={float(timeline.get('p90', float('nan'))):.1f}s  "
-                    f"P99={float(timeline.get('p99', float('nan'))):.1f}s"
+                    f"P99={float(timeline.get('p99', float('nan'))):.1f}s",
                 )
             except (TypeError, ValueError):
                 pass
         if fuel:
             try:
-                print(
-                    "Total dV   : "
+                _print_field(
+                    "Total dV",
                     f"P50={float(fuel.get('p50', float('nan'))):.2f}m/s  "
                     f"P90={float(fuel.get('p90', float('nan'))):.2f}m/s  "
-                    f"P99={float(fuel.get('p99', float('nan'))):.2f}m/s"
+                    f"P99={float(fuel.get('p99', float('nan'))):.2f}m/s",
                 )
             except (TypeError, ValueError):
                 pass
@@ -252,7 +256,7 @@ def _print_monte_carlo_summary(out: dict) -> None:
                 )
         top_fail = list(brief.get("top_failure_modes", []) or [])
         if top_fail:
-            print("-" * 72)
+            print("-" * 102)
             print("Top Failure Modes")
             for row in top_fail:
                 try:
@@ -261,10 +265,10 @@ def _print_monte_carlo_summary(out: dict) -> None:
                     continue
     elif runs:
         durations = [float(dict(r.get("summary", {}) or {}).get("duration_s", 0.0)) for r in runs]
-        print(f"Duration   : min={min(durations):.1f}s  max={max(durations):.1f}s")
+        _print_field("Duration", f"min={min(durations):.1f}s  max={max(durations):.1f}s")
     if guardrail_event_totals:
-        print(f"Guardrails : mean={sum(guardrail_event_totals)/len(guardrail_event_totals):.1f}  max={max(guardrail_event_totals)}")
-    print("=" * 72)
+        _print_field("Guardrails", f"mean={sum(guardrail_event_totals)/len(guardrail_event_totals):.1f}  max={max(guardrail_event_totals)}")
+    print("=" * 102)
 
 
 def _physical_cpu_count() -> int | None:

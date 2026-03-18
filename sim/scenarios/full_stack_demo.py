@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Mapping
 
 import numpy as np
 
@@ -32,11 +32,26 @@ from sim.utils.plotting import plot_attitude_tumble, plot_orbit_eci
 
 
 class CombinedActuator:
-    def __init__(self, orbital: OrbitalActuator, attitude: AttitudeActuator):
+    def __init__(
+        self,
+        orbital: OrbitalActuator,
+        attitude: AttitudeActuator,
+        thrust_magnitude_scale: float = 1.0,
+        pointing_error_rad: np.ndarray | None = None,
+    ):
         self.orbital = orbital
         self.attitude = attitude
+        self.thrust_magnitude_scale = float(thrust_magnitude_scale)
+        self.pointing_error_rad = np.array(pointing_error_rad if pointing_error_rad is not None else np.zeros(3), dtype=float)
 
     def apply(self, command: Command, limits: dict, dt_s: float) -> Command:
+        thrust = _apply_pointing_error(np.array(command.thrust_eci_km_s2, dtype=float), self.pointing_error_rad)
+        thrust *= self.thrust_magnitude_scale
+        command = Command(
+            thrust_eci_km_s2=thrust,
+            torque_body_nm=np.array(command.torque_body_nm, dtype=float),
+            mode_flags=dict(command.mode_flags),
+        )
         c1 = self.orbital.apply(command, limits, dt_s)
         return self.attitude.apply(c1, limits, dt_s)
 
@@ -66,10 +81,23 @@ def _make_object(
     rng: np.random.Generator,
     profile: str,
     dt_s: float,
+    initial_position_offset_km: np.ndarray | None = None,
+    initial_velocity_offset_km_s: np.ndarray | None = None,
+    deployment_timing_jitter_s: float = 0.0,
+    thrust_magnitude_scale: float = 1.0,
+    actuator_pointing_error_rad: np.ndarray | None = None,
+    sensor_noise_scale_multiplier: float = 1.0,
+    update_cadence_jitter_s: float = 0.0,
+    dropout_probability: float | None = None,
 ) -> SimObject:
+    phase = float(phase_rad + _phase_offset_from_timing_jitter(r_km=r_km, timing_jitter_s=deployment_timing_jitter_s))
     speed = np.sqrt(EARTH_MU_KM3_S2 / r_km)
-    pos = np.array([r_km * np.cos(phase_rad), r_km * np.sin(phase_rad), 0.0])
-    vel = np.array([-speed * np.sin(phase_rad), speed * np.cos(phase_rad), 0.0])
+    pos = np.array([r_km * np.cos(phase), r_km * np.sin(phase), 0.0])
+    vel = np.array([-speed * np.sin(phase), speed * np.cos(phase), 0.0])
+    if initial_position_offset_km is not None:
+        pos = pos + np.array(initial_position_offset_km, dtype=float)
+    if initial_velocity_offset_km_s is not None:
+        vel = vel + np.array(initial_velocity_offset_km_s, dtype=float)
 
     truth = StateTruth(
         position_eci_km=pos,
@@ -111,16 +139,30 @@ def _make_object(
     sensor = CompositeSensorModel(
         sensors=[
             OwnStateSensor(
-                noise=SensorNoiseConfig(sigma=np.array([0.005, 0.005, 0.005, 5e-5, 5e-5, 5e-5]), dropout_prob=0.05, latency_s=0.2),
+                noise=SensorNoiseConfig(
+                    sigma=np.array([0.005, 0.005, 0.005, 5e-5, 5e-5, 5e-5]) * float(sensor_noise_scale_multiplier),
+                    dropout_prob=float(np.clip(0.05 if dropout_probability is None else dropout_probability, 0.0, 1.0)),
+                    latency_s=0.2,
+                ),
                 rng=rng,
-                access_model=AccessModel(AccessConfig(update_cadence_s=max(dt_s, 1.0))),
+                access_model=AccessModel(
+                    AccessConfig(update_cadence_s=max(1e-6, max(dt_s, 1.0) + float(update_cadence_jitter_s)))
+                ),
             ),
             RelativeSensor(
                 target_id=target_id,
                 mode="range_rate",
-                noise=SensorNoiseConfig(sigma=np.array([0.01, 5e-4]), dropout_prob=0.1),
+                noise=SensorNoiseConfig(
+                    sigma=np.array([0.01, 5e-4]) * float(sensor_noise_scale_multiplier),
+                    dropout_prob=float(np.clip(0.1 if dropout_probability is None else dropout_probability, 0.0, 1.0)),
+                ),
                 rng=rng,
-                access_model=AccessModel(AccessConfig(update_cadence_s=max(2.0 * dt_s, 2.0), max_range_km=200.0)),
+                access_model=AccessModel(
+                    AccessConfig(
+                        update_cadence_s=max(1e-6, max(2.0 * dt_s, 2.0) + float(update_cadence_jitter_s)),
+                        max_range_km=200.0,
+                    )
+                ),
             ),
         ]
     )
@@ -148,6 +190,8 @@ def _make_object(
     actuator = CombinedActuator(
         orbital=OrbitalActuator(lag_tau_s=0.4),
         attitude=AttitudeActuator(reaction_wheels=ReactionWheelLimits(max_torque_nm=np.array([0.05, 0.05, 0.05]), max_momentum_nms=np.array([0.2, 0.2, 0.2]))),
+        thrust_magnitude_scale=thrust_magnitude_scale,
+        pointing_error_rad=actuator_pointing_error_rad,
     )
 
     return SimObject(
@@ -170,15 +214,52 @@ def run_full_stack_demo(
     seed: int = 7,
     pos_sigma_km: float = 0.01,
     vel_sigma_km_s: float = 1e-4,
+    mc_sample: Mapping[str, Any] | None = None,
     plot_mode: Literal["interactive", "save", "both"] = "interactive",
     profile: str = "ops",
 ):
     rng = np.random.default_rng(seed)
     p = get_simulation_profile(profile)
     dt_s = resolve_dt_s(profile)
+    sample = _normalize_mc_sample(mc_sample)
 
-    obj_a = _make_object("sat_a", 6778.0 + rng.normal(0.0, pos_sigma_km), 0.0, "sat_b", rng, profile=profile, dt_s=dt_s)
-    obj_b = _make_object("sat_b", 6778.0 + rng.normal(0.0, pos_sigma_km), 0.03, "sat_a", rng, profile=profile, dt_s=dt_s)
+    obj_a_sample = sample["by_object"].get("sat_a", {})
+    obj_b_sample = sample["by_object"].get("sat_b", {})
+
+    obj_a = _make_object(
+        "sat_a",
+        6778.0 + rng.normal(0.0, pos_sigma_km),
+        0.0,
+        "sat_b",
+        rng,
+        profile=profile,
+        dt_s=dt_s,
+        initial_position_offset_km=np.array(obj_a_sample.get("initial_position_offset_km", np.zeros(3)), dtype=float),
+        initial_velocity_offset_km_s=np.array(obj_a_sample.get("initial_velocity_offset_km_s", rng.normal(0.0, vel_sigma_km_s, size=3)), dtype=float),
+        deployment_timing_jitter_s=float(obj_a_sample.get("deployment_timing_jitter_s", 0.0)),
+        thrust_magnitude_scale=float(obj_a_sample.get("thrust_magnitude_scale", 1.0)),
+        actuator_pointing_error_rad=np.array(obj_a_sample.get("actuator_pointing_error_rad", np.zeros(3)), dtype=float),
+        sensor_noise_scale_multiplier=float(obj_a_sample.get("sensor_noise_scale_multiplier", 1.0)),
+        update_cadence_jitter_s=float(obj_a_sample.get("update_cadence_jitter_s", 0.0)),
+        dropout_probability=obj_a_sample.get("dropout_probability"),
+    )
+    obj_b = _make_object(
+        "sat_b",
+        6778.0 + rng.normal(0.0, pos_sigma_km),
+        0.03,
+        "sat_a",
+        rng,
+        profile=profile,
+        dt_s=dt_s,
+        initial_position_offset_km=np.array(obj_b_sample.get("initial_position_offset_km", np.zeros(3)), dtype=float),
+        initial_velocity_offset_km_s=np.array(obj_b_sample.get("initial_velocity_offset_km_s", rng.normal(0.0, vel_sigma_km_s, size=3)), dtype=float),
+        deployment_timing_jitter_s=float(obj_b_sample.get("deployment_timing_jitter_s", 0.0)),
+        thrust_magnitude_scale=float(obj_b_sample.get("thrust_magnitude_scale", 1.0)),
+        actuator_pointing_error_rad=np.array(obj_b_sample.get("actuator_pointing_error_rad", np.zeros(3)), dtype=float),
+        sensor_noise_scale_multiplier=float(obj_b_sample.get("sensor_noise_scale_multiplier", 1.0)),
+        update_cadence_jitter_s=float(obj_b_sample.get("update_cadence_jitter_s", 0.0)),
+        dropout_probability=obj_b_sample.get("dropout_probability"),
+    )
 
     kernel = SimulationKernel(
         config=SimConfig(
@@ -205,4 +286,40 @@ def run_full_stack_demo(
     write_json(str(out / "sim_log.json"), log.to_jsonable())
     write_json(str(out / "engagement_metrics.json"), asdict(metrics))
 
-    return {"log": log, "metrics": metrics, "output_dir": str(out), "keepout_radius_km": 6650.0}
+    return {
+        "log": log,
+        "metrics": metrics,
+        "output_dir": str(out),
+        "keepout_radius_km": 6650.0,
+        "sampled_parameters": sample,
+    }
+
+
+def _normalize_mc_sample(mc_sample: Mapping[str, Any] | None) -> dict[str, Any]:
+    if mc_sample is None:
+        return {"by_object": {}, "global": {}, "legacy_args": {}}
+    by_object = mc_sample.get("by_object", {}) if isinstance(mc_sample, Mapping) else {}
+    global_values = mc_sample.get("global", {}) if isinstance(mc_sample, Mapping) else {}
+    legacy_args = mc_sample.get("legacy_args", {}) if isinstance(mc_sample, Mapping) else {}
+    return {
+        "by_object": dict(by_object) if isinstance(by_object, Mapping) else {},
+        "global": dict(global_values) if isinstance(global_values, Mapping) else {},
+        "legacy_args": dict(legacy_args) if isinstance(legacy_args, Mapping) else {},
+    }
+
+
+def _phase_offset_from_timing_jitter(r_km: float, timing_jitter_s: float) -> float:
+    if timing_jitter_s == 0.0:
+        return 0.0
+    mean_motion_rad_s = float(np.sqrt(EARTH_MU_KM3_S2 / (r_km ** 3)))
+    return mean_motion_rad_s * float(timing_jitter_s)
+
+
+def _apply_pointing_error(vector: np.ndarray, error_rad: np.ndarray) -> np.ndarray:
+    if np.linalg.norm(vector) <= 0.0:
+        return vector
+    rx, ry, rz = np.array(error_rad, dtype=float).reshape(3)
+    rot_x = np.array([[1.0, 0.0, 0.0], [0.0, np.cos(rx), -np.sin(rx)], [0.0, np.sin(rx), np.cos(rx)]])
+    rot_y = np.array([[np.cos(ry), 0.0, np.sin(ry)], [0.0, 1.0, 0.0], [-np.sin(ry), 0.0, np.cos(ry)]])
+    rot_z = np.array([[np.cos(rz), -np.sin(rz), 0.0], [np.sin(rz), np.cos(rz), 0.0], [0.0, 0.0, 1.0]])
+    return rot_z @ rot_y @ rot_x @ vector

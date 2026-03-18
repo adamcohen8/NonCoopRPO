@@ -61,6 +61,33 @@ from sim.utils.quaternion import quaternion_to_dcm_bn
 
 logger = logging.getLogger(__name__)
 
+_PARALLEL_WORKER_THREAD_ENV_VARS = (
+    "VECLIB_MAXIMUM_THREADS",
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+)
+
+
+def _set_parallel_worker_thread_limits(default_threads: str = "1") -> dict[str, str | None]:
+    """Limit native math library threads for spawned MC workers unless the user already set them."""
+    previous: dict[str, str | None] = {}
+    for name in _PARALLEL_WORKER_THREAD_ENV_VARS:
+        previous[name] = os.environ.get(name)
+        if previous[name] is None:
+            os.environ[name] = str(default_threads)
+    return previous
+
+
+def _restore_env_vars(previous: dict[str, str | None]) -> None:
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
 
 def _load_plotting_functions() -> dict[str, Any]:
     from sim.utils.plotting import plot_attitude_tumble, plot_orbit_eci
@@ -2612,6 +2639,7 @@ def run_master_simulation(
     if parallel_active:
         manager = None
         progress_queue = None
+        thread_env_prev = _set_parallel_worker_thread_limits(default_threads="1")
         try:
             manager = mp.Manager()
             progress_queue = manager.Queue()
@@ -2674,6 +2702,7 @@ def run_master_simulation(
                     manager.shutdown()
                 except Exception:
                     pass
+            _restore_env_vars(thread_env_prev)
     if not parallel_active:
         completed_count = 0
         for p in prepared:

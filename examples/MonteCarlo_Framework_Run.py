@@ -20,14 +20,22 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    cfg = MonteCarloConfig(runs=10, base_seed=11, pos_sigma_km=0.02, vel_sigma_km_s=2e-4)
+    cfg = MonteCarloConfig(
+        runs=10,
+        base_seed=11,
+        pos_sigma_km=0.02,
+        vel_sigma_km_s=2e-4,
+        threshold_km=0.1,
+        object_ids=("sat_a", "sat_b"),
+    )
     outputs = run_monte_carlo(
         config=cfg,
-        scenario_fn=lambda seed, pos_sigma_km, vel_sigma_km_s: run_full_stack_demo(
+        scenario_fn=lambda seed, pos_sigma_km, vel_sigma_km_s, mc_sample=None: run_full_stack_demo(
             output_dir=f"outputs/full_stack_demo_mc/run_{seed}",
             seed=seed,
             pos_sigma_km=pos_sigma_km,
             vel_sigma_km_s=vel_sigma_km_s,
+            mc_sample=mc_sample,
             plot_mode=args.plot_mode,
         ),
         output_dir="outputs/full_stack_demo_mc",
