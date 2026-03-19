@@ -11,7 +11,7 @@ from sim.control.attitude.pose_commands import PoseCommandGenerator
 from sim.core.models import Command, StateBelief, StateTruth
 from sim.dynamics.orbit.two_body import propagate_two_body_rk4
 from sim.rocket.models import RocketState, RocketVehicleConfig
-from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_rect_to_curv
+from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
 from sim.utils.quaternion import dcm_to_quaternion_bn, normalize_quaternion, quaternion_to_dcm_bn
 
 logger = logging.getLogger(__name__)
