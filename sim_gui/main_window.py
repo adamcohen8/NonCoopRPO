@@ -154,6 +154,50 @@ ANIMATION_TYPE_OPTIONS = [
     "ground_track",
     "ground_track_multi",
 ]
+MC_PARAMETER_CATEGORIES = {
+    "Launch": [
+        ("Launch Latitude", "rocket.initial_state.launch_lat_deg"),
+        ("Launch Longitude", "rocket.initial_state.launch_lon_deg"),
+        ("Launch Altitude", "rocket.initial_state.launch_alt_km"),
+        ("Launch Azimuth", "rocket.initial_state.launch_azimuth_deg"),
+    ],
+    "Chaser Init": [
+        ("Deploy Time", "chaser.initial_state.deploy_time_s"),
+        ("Deploy dV X", "chaser.initial_state.deploy_dv_body_m_s[0]"),
+        ("Deploy dV Y", "chaser.initial_state.deploy_dv_body_m_s[1]"),
+        ("Deploy dV Z", "chaser.initial_state.deploy_dv_body_m_s[2]"),
+        ("Relative State R", "chaser.initial_state.relative_to_target_ric.state[0]"),
+        ("Relative State I", "chaser.initial_state.relative_to_target_ric.state[1]"),
+        ("Relative State C", "chaser.initial_state.relative_to_target_ric.state[2]"),
+        ("Relative State dR", "chaser.initial_state.relative_to_target_ric.state[3]"),
+        ("Relative State dI", "chaser.initial_state.relative_to_target_ric.state[4]"),
+        ("Relative State dC", "chaser.initial_state.relative_to_target_ric.state[5]"),
+        ("RIC Rect R", "chaser.initial_state.relative_ric_rect[0]"),
+        ("RIC Rect I", "chaser.initial_state.relative_ric_rect[1]"),
+        ("RIC Rect C", "chaser.initial_state.relative_ric_rect[2]"),
+        ("RIC Rect dR", "chaser.initial_state.relative_ric_rect[3]"),
+        ("RIC Rect dI", "chaser.initial_state.relative_ric_rect[4]"),
+        ("RIC Rect dC", "chaser.initial_state.relative_ric_rect[5]"),
+        ("RIC Curv R", "chaser.initial_state.relative_ric_curv[0]"),
+        ("RIC Curv I", "chaser.initial_state.relative_ric_curv[1]"),
+        ("RIC Curv C", "chaser.initial_state.relative_ric_curv[2]"),
+        ("RIC Curv dR", "chaser.initial_state.relative_ric_curv[3]"),
+        ("RIC Curv dI", "chaser.initial_state.relative_ric_curv[4]"),
+        ("RIC Curv dC", "chaser.initial_state.relative_ric_curv[5]"),
+    ],
+    "Target Orbit": [
+        ("Semi-major Axis", "target.initial_state.coes.a_km"),
+        ("Eccentricity", "target.initial_state.coes.ecc"),
+        ("Inclination", "target.initial_state.coes.inc_deg"),
+        ("RAAN", "target.initial_state.coes.raan_deg"),
+        ("Arg Periapsis", "target.initial_state.coes.argp_deg"),
+        ("True Anomaly", "target.initial_state.coes.true_anomaly_deg"),
+    ],
+    "Environment": [
+        ("Solar Flux F10.7", "simulator.environment.atmosphere_env.solar_flux_f107"),
+        ("Geomagnetic Ap", "simulator.environment.atmosphere_env.geomagnetic_ap"),
+    ],
+}
 
 
 class MainWindow(QMainWindow):
@@ -162,6 +206,7 @@ class MainWindow(QMainWindow):
         self.repo_root = get_repo_root()
         self.loaded_config_path = get_default_config_path()
         self.current_config = load_config(self.loaded_config_path)
+        self.mc_variations: list[dict] = []
         self.process: QProcess | None = None
         self.preview_image_path: Path | None = None
         self.preview_zoom_factor = 1.0
@@ -178,6 +223,21 @@ class MainWindow(QMainWindow):
         self.mc_enabled_check.toggled.connect(self._refresh_outputs_mode_ui)
         self.orbit_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         self.attitude_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
+        for combo in (
+            self.target_guidance_combo,
+            self.target_orbit_control_combo,
+            self.target_attitude_control_combo,
+            self.target_mission_combo,
+            self.chaser_guidance_combo,
+            self.chaser_orbit_control_combo,
+            self.chaser_attitude_control_combo,
+            self.chaser_mission_combo,
+            self.rocket_guidance_combo,
+            self.rocket_orbit_control_combo,
+            self.rocket_attitude_control_combo,
+            self.rocket_mission_combo,
+        ):
+            combo.currentIndexChanged.connect(self._on_mc_catalog_source_changed)
         self._load_config_into_widgets(self.current_config)
         self._refresh_yaml()
         self._refresh_validation_state()
@@ -347,7 +407,6 @@ class MainWindow(QMainWindow):
             self.reference_object_edit,
             self.mc_baseline_summary_json,
             self.save_path_edit,
-            self.mc_variations_editor,
             self.yaml_editor,
         ]
         for widget in line_edits:
@@ -528,7 +587,6 @@ class MainWindow(QMainWindow):
     def _build_monte_carlo_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        form = QFormLayout()
         self.mc_enabled_check = QCheckBox("Enable Monte Carlo")
         self.mc_iterations_spin = QSpinBox()
         self.mc_iterations_spin.setRange(1, 1000000)
@@ -537,22 +595,95 @@ class MainWindow(QMainWindow):
         self.mc_workers_spin.setRange(0, 1024)
         self.mc_base_seed_spin = QSpinBox()
         self.mc_base_seed_spin.setRange(0, 2**31 - 1)
-        form.addRow(self.mc_enabled_check)
-        form.addRow("Iterations", self.mc_iterations_spin)
-        form.addRow(self.mc_parallel_check)
-        form.addRow("Workers (0=auto)", self.mc_workers_spin)
-        form.addRow("Base Seed", self.mc_base_seed_spin)
-        layout.addLayout(form)
+        execution_row = QHBoxLayout()
+        execution_row.addWidget(self.mc_enabled_check)
+        execution_row.addWidget(QLabel("Iterations"))
+        execution_row.addWidget(self.mc_iterations_spin)
+        execution_row.addSpacing(12)
+        execution_row.addWidget(self.mc_parallel_check)
+        execution_row.addWidget(QLabel("Workers (0=auto)"))
+        execution_row.addWidget(self.mc_workers_spin)
+        execution_row.addSpacing(12)
+        execution_row.addWidget(QLabel("Base Seed"))
+        execution_row.addWidget(self.mc_base_seed_spin)
+        execution_row.addStretch(1)
+        layout.addLayout(execution_row)
 
-        layout.addWidget(QLabel("Variations (YAML list)"))
-        self.mc_variations_editor = QPlainTextEdit()
-        self.mc_variations_editor.setPlaceholderText(
-            "- parameter_path: chaser.initial_state.deploy_dv_body_m_s[0]\n"
-            "  mode: normal\n"
-            "  mean: 10.0\n"
-            "  std: 0.5"
-        )
-        layout.addWidget(self.mc_variations_editor, 1)
+        layout.addWidget(QLabel("Variations"))
+        variations_split = QHBoxLayout()
+        self.mc_variations_list = QListWidget()
+        self.mc_variations_list.currentRowChanged.connect(self._on_mc_variation_selected)
+        variations_split.addWidget(self.mc_variations_list, 2)
+
+        editor_box = QGroupBox("Variation Editor")
+        editor_box_layout = QHBoxLayout(editor_box)
+        editor_box_layout.setContentsMargins(8, 16, 8, 8)
+        editor_box_layout.setSpacing(4)
+        editor_form = QFormLayout()
+        editor_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        editor_box_layout.addLayout(editor_form, 0)
+        button_column = QVBoxLayout()
+        button_column.setContentsMargins(0, 0, 0, 0)
+        button_column.setSpacing(4)
+        self.mc_new_variation_button = QPushButton("New")
+        self.mc_new_variation_button.clicked.connect(self._clear_mc_variation_editor)
+        button_column.addWidget(self.mc_new_variation_button)
+        self.mc_add_update_variation_button = QPushButton("Add / Update")
+        self.mc_add_update_variation_button.clicked.connect(self._on_add_or_update_mc_variation)
+        button_column.addWidget(self.mc_add_update_variation_button)
+        self.mc_remove_variation_button = QPushButton("Remove")
+        self.mc_remove_variation_button.clicked.connect(self._on_remove_mc_variation)
+        button_column.addWidget(self.mc_remove_variation_button)
+        button_column.addStretch(1)
+        editor_box_layout.addLayout(button_column)
+        editor_box_layout.addStretch(1)
+        self.mc_variation_form = editor_form
+        self.mc_category_combo = QComboBox()
+        self.mc_category_combo.currentIndexChanged.connect(self._refresh_mc_parameter_options)
+        editor_form.addRow("Category", self.mc_category_combo)
+
+        self.mc_parameter_combo = QComboBox()
+        editor_form.addRow("Parameter", self.mc_parameter_combo)
+
+        self.mc_custom_path_edit = QLineEdit()
+        self.mc_custom_path_edit.setPlaceholderText("simulator.environment.atmosphere_env.solar_flux_f107")
+        editor_form.addRow("Custom Path", self.mc_custom_path_edit)
+
+        self.mc_mode_combo = QComboBox()
+        self.mc_mode_combo.addItems(["choice", "uniform", "normal"])
+        self.mc_mode_combo.currentTextChanged.connect(self._refresh_mc_mode_ui)
+        editor_form.addRow("Mode", self.mc_mode_combo)
+
+        self.mc_mode_stack = QStackedWidget()
+        choice_page = QWidget()
+        choice_form = QFormLayout(choice_page)
+        self.mc_choice_options_edit = QLineEdit()
+        self.mc_choice_options_edit.setPlaceholderText("0.5, 1.0, 1.5")
+        choice_form.addRow("Options", self.mc_choice_options_edit)
+        self.mc_mode_stack.addWidget(choice_page)
+
+        uniform_page = QWidget()
+        uniform_form = QFormLayout(uniform_page)
+        self.mc_uniform_low_spin = self._make_free_spinbox()
+        self.mc_uniform_high_spin = self._make_free_spinbox()
+        uniform_form.addRow("Low", self.mc_uniform_low_spin)
+        uniform_form.addRow("High", self.mc_uniform_high_spin)
+        self.mc_mode_stack.addWidget(uniform_page)
+
+        normal_page = QWidget()
+        normal_form = QFormLayout(normal_page)
+        self.mc_normal_mean_spin = self._make_free_spinbox()
+        self.mc_normal_std_spin = self._make_free_spinbox()
+        normal_form.addRow("Mean", self.mc_normal_mean_spin)
+        normal_form.addRow("Std", self.mc_normal_std_spin)
+        self.mc_mode_stack.addWidget(normal_page)
+        editor_form.addRow("Settings", self.mc_mode_stack)
+
+        variations_split.addWidget(editor_box, 3)
+        layout.addLayout(variations_split, 1)
+        self._rebuild_mc_category_combo()
+        self._refresh_mc_parameter_options()
+        self._refresh_mc_mode_ui()
         return tab
 
     def _build_objects_tab(self) -> QWidget:
@@ -969,6 +1100,279 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Updated params for {object_key}.{pointer_kind}.", 5000)
         except Exception as exc:
             self._show_error("Invalid Params YAML", str(exc))
+            return
+        self._on_mc_catalog_source_changed()
+
+    def _on_mc_catalog_source_changed(self) -> None:
+        self._rebuild_mc_category_combo()
+        self._refresh_mc_parameter_options()
+        self._refresh_mc_variations_list()
+
+    def _rebuild_mc_category_combo(self) -> None:
+        current_text = self.mc_category_combo.currentText() if hasattr(self, "mc_category_combo") else ""
+        self.mc_category_combo.blockSignals(True)
+        self.mc_category_combo.clear()
+        for category_name in MC_PARAMETER_CATEGORIES:
+            self.mc_category_combo.addItem(category_name)
+        controller_params = self._get_controller_param_variation_options()
+        if controller_params:
+            self.mc_category_combo.addItem("Controller Params")
+        self.mc_category_combo.addItem("Custom Path")
+        if current_text:
+            idx = self.mc_category_combo.findText(current_text)
+            if idx >= 0:
+                self.mc_category_combo.setCurrentIndex(idx)
+        self.mc_category_combo.blockSignals(False)
+
+    def _get_controller_param_variation_options(self) -> list[tuple[str, str]]:
+        try:
+            cfg = self._collect_config_from_widgets()
+        except Exception:
+            cfg = copy.deepcopy(self.current_config)
+        options: list[tuple[str, str]] = []
+        pointer_paths = [
+            ("target", "guidance", cfg.get("target", {}).get("guidance")),
+            ("target", "orbit_control", cfg.get("target", {}).get("orbit_control")),
+            ("target", "attitude_control", cfg.get("target", {}).get("attitude_control")),
+            ("target", "mission_objectives[0]", (cfg.get("target", {}).get("mission_objectives") or [None])[0]),
+            ("chaser", "guidance", cfg.get("chaser", {}).get("guidance")),
+            ("chaser", "orbit_control", cfg.get("chaser", {}).get("orbit_control")),
+            ("chaser", "attitude_control", cfg.get("chaser", {}).get("attitude_control")),
+            ("chaser", "mission_objectives[0]", (cfg.get("chaser", {}).get("mission_objectives") or [None])[0]),
+            ("rocket", "guidance", cfg.get("rocket", {}).get("guidance")),
+            ("rocket", "orbit_control", cfg.get("rocket", {}).get("orbit_control")),
+            ("rocket", "attitude_control", cfg.get("rocket", {}).get("attitude_control")),
+            ("rocket", "mission_objectives[0]", (cfg.get("rocket", {}).get("mission_objectives") or [None])[0]),
+        ]
+        for object_key, pointer_key, pointer in pointer_paths:
+            if not isinstance(pointer, dict):
+                continue
+            params = pointer.get("params")
+            if not isinstance(params, (dict, list)):
+                continue
+            class_name = str(pointer.get("class_name", "") or pointer.get("function", "") or pointer_key)
+            base_label = f"{object_key}.{class_name}"
+            base_path = f"{object_key}.{pointer_key}.params"
+            options.extend(self._flatten_mc_parameter_options(params, base_path, base_label))
+        return options
+
+    def _flatten_mc_parameter_options(self, value: object, path_prefix: str, label_prefix: str) -> list[tuple[str, str]]:
+        if isinstance(value, dict):
+            out: list[tuple[str, str]] = []
+            for key, child in value.items():
+                child_path = f"{path_prefix}.{key}"
+                child_label = f"{label_prefix}.{key}"
+                out.extend(self._flatten_mc_parameter_options(child, child_path, child_label))
+            return out
+        if isinstance(value, list):
+            out = []
+            for idx, child in enumerate(value):
+                child_path = f"{path_prefix}[{idx}]"
+                child_label = f"{label_prefix}[{idx}]"
+                out.extend(self._flatten_mc_parameter_options(child, child_path, child_label))
+            return out
+        return [(label_prefix, path_prefix)]
+
+    def _current_mc_category_options(self) -> list[tuple[str, str]]:
+        category = self.mc_category_combo.currentText()
+        if category == "Controller Params":
+            return self._get_controller_param_variation_options()
+        return list(MC_PARAMETER_CATEGORIES.get(category, []))
+
+    def _refresh_mc_parameter_options(self) -> None:
+        category = self.mc_category_combo.currentText()
+        current_path = self.mc_parameter_combo.currentData()
+        self.mc_parameter_combo.blockSignals(True)
+        self.mc_parameter_combo.clear()
+        for label, path in self._current_mc_category_options():
+            self.mc_parameter_combo.addItem(label, path)
+        if current_path:
+            idx = self.mc_parameter_combo.findData(current_path)
+            if idx >= 0:
+                self.mc_parameter_combo.setCurrentIndex(idx)
+        self.mc_parameter_combo.blockSignals(False)
+        custom = category == "Custom Path"
+        self.mc_parameter_combo.setEnabled(not custom)
+        self.mc_custom_path_edit.setVisible(custom)
+        parameter_label = self.mc_variation_form.labelForField(self.mc_parameter_combo)
+        custom_label = self.mc_variation_form.labelForField(self.mc_custom_path_edit)
+        if parameter_label is not None:
+            parameter_label.setVisible(not custom)
+        if custom_label is not None:
+            custom_label.setVisible(custom)
+        self.mc_parameter_combo.setVisible(not custom)
+        self._refresh_mc_variation_button_state()
+
+    def _refresh_mc_mode_ui(self) -> None:
+        mode = self.mc_mode_combo.currentText().strip().lower()
+        mode_to_index = {"choice": 0, "uniform": 1, "normal": 2}
+        self.mc_mode_stack.setCurrentIndex(mode_to_index.get(mode, 0))
+
+    def _refresh_mc_variation_button_state(self) -> None:
+        has_selection = self.mc_variations_list.currentRow() >= 0
+        self.mc_add_update_variation_button.setText("Update" if has_selection else "Add")
+        self.mc_remove_variation_button.setEnabled(has_selection)
+
+    def _mc_path_display_name(self, path: str) -> str:
+        for entries in MC_PARAMETER_CATEGORIES.values():
+            for label, candidate_path in entries:
+                if candidate_path == path:
+                    return label
+        for label, candidate_path in self._get_controller_param_variation_options():
+            if candidate_path == path:
+                return label
+        return path
+
+    def _format_mc_variation_label(self, variation: dict) -> str:
+        path = str(variation.get("parameter_path", "") or "")
+        mode = str(variation.get("mode", "choice") or "choice").lower()
+        label = self._mc_path_display_name(path)
+        if mode == "choice":
+            options = list(variation.get("options", []) or [])
+            return f"{label} | choice | {len(options)} option(s)"
+        if mode == "uniform":
+            return f"{label} | uniform | {variation.get('low')} to {variation.get('high')}"
+        if mode == "normal":
+            return f"{label} | normal | mean {variation.get('mean')} std {variation.get('std')}"
+        return f"{label} | {mode}"
+
+    def _refresh_mc_variations_list(self) -> None:
+        self.mc_variations_list.blockSignals(True)
+        selected_row = self.mc_variations_list.currentRow()
+        self.mc_variations_list.clear()
+        for variation in self.mc_variations:
+            self.mc_variations_list.addItem(self._format_mc_variation_label(variation))
+        if 0 <= selected_row < self.mc_variations_list.count():
+            self.mc_variations_list.setCurrentRow(selected_row)
+        self.mc_variations_list.blockSignals(False)
+        self._refresh_mc_variation_button_state()
+
+    def _set_mc_variation_path_selection(self, parameter_path: str) -> None:
+        matched_category: str | None = None
+        for category_name, entries in MC_PARAMETER_CATEGORIES.items():
+            if any(candidate_path == parameter_path for _, candidate_path in entries):
+                matched_category = category_name
+                break
+        if matched_category is None:
+            controller_paths = {candidate_path for _, candidate_path in self._get_controller_param_variation_options()}
+            matched_category = "Controller Params" if parameter_path in controller_paths else "Custom Path"
+        category_index = self.mc_category_combo.findText(matched_category)
+        if category_index >= 0:
+            self.mc_category_combo.setCurrentIndex(category_index)
+        self._refresh_mc_parameter_options()
+        if matched_category == "Custom Path":
+            self.mc_custom_path_edit.setText(parameter_path)
+            return
+        param_index = self.mc_parameter_combo.findData(parameter_path)
+        if param_index >= 0:
+            self.mc_parameter_combo.setCurrentIndex(param_index)
+        else:
+            custom_index = self.mc_category_combo.findText("Custom Path")
+            if custom_index >= 0:
+                self.mc_category_combo.setCurrentIndex(custom_index)
+            self._refresh_mc_parameter_options()
+            self.mc_custom_path_edit.setText(parameter_path)
+
+    def _on_mc_variation_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self.mc_variations):
+            self._refresh_mc_variation_button_state()
+            return
+        variation = dict(self.mc_variations[row] or {})
+        self._set_mc_variation_path_selection(str(variation.get("parameter_path", "") or ""))
+        mode = str(variation.get("mode", "choice") or "choice").lower()
+        self.mc_mode_combo.setCurrentText(mode if mode in {"choice", "uniform", "normal"} else "choice")
+        self.mc_choice_options_edit.setText(", ".join(str(v) for v in list(variation.get("options", []) or [])))
+        self.mc_uniform_low_spin.setValue(float(variation.get("low", 0.0) or 0.0))
+        self.mc_uniform_high_spin.setValue(float(variation.get("high", 0.0) or 0.0))
+        self.mc_normal_mean_spin.setValue(float(variation.get("mean", 0.0) or 0.0))
+        self.mc_normal_std_spin.setValue(float(variation.get("std", 0.0) or 0.0))
+        self._refresh_mc_mode_ui()
+        self._refresh_mc_variation_button_state()
+
+    def _clear_mc_variation_editor(self) -> None:
+        self.mc_variations_list.blockSignals(True)
+        self.mc_variations_list.clearSelection()
+        self.mc_variations_list.setCurrentRow(-1)
+        self.mc_variations_list.blockSignals(False)
+        if self.mc_category_combo.count() > 0:
+            self.mc_category_combo.setCurrentIndex(0)
+        self._refresh_mc_parameter_options()
+        self.mc_custom_path_edit.clear()
+        self.mc_mode_combo.setCurrentText("choice")
+        self.mc_choice_options_edit.clear()
+        self.mc_uniform_low_spin.setValue(0.0)
+        self.mc_uniform_high_spin.setValue(0.0)
+        self.mc_normal_mean_spin.setValue(0.0)
+        self.mc_normal_std_spin.setValue(0.0)
+        self._refresh_mc_mode_ui()
+        self._refresh_mc_variation_button_state()
+
+    def _parse_mc_choice_options(self) -> list[object]:
+        raw = self.mc_choice_options_edit.text().strip()
+        if not raw:
+            raise ValueError("Choice mode requires at least one option.")
+        options: list[object] = []
+        for token in raw.split(","):
+            item = token.strip()
+            if not item:
+                continue
+            options.append(yaml.safe_load(item))
+        if not options:
+            raise ValueError("Choice mode requires at least one option.")
+        return options
+
+    def _build_mc_variation_from_editor(self) -> dict:
+        category = self.mc_category_combo.currentText()
+        if category == "Custom Path":
+            parameter_path = self.mc_custom_path_edit.text().strip()
+        else:
+            parameter_path = str(self.mc_parameter_combo.currentData() or "").strip()
+        if not parameter_path:
+            raise ValueError("Select a Monte Carlo parameter or enter a custom path.")
+        mode = self.mc_mode_combo.currentText().strip().lower()
+        variation: dict[str, object] = {"parameter_path": parameter_path, "mode": mode}
+        if mode == "choice":
+            variation["options"] = self._parse_mc_choice_options()
+        elif mode == "uniform":
+            variation["low"] = float(self.mc_uniform_low_spin.value())
+            variation["high"] = float(self.mc_uniform_high_spin.value())
+        elif mode == "normal":
+            variation["mean"] = float(self.mc_normal_mean_spin.value())
+            variation["std"] = float(self.mc_normal_std_spin.value())
+        else:
+            raise ValueError(f"Unsupported Monte Carlo mode '{mode}'.")
+        return variation
+
+    def _on_add_or_update_mc_variation(self) -> None:
+        try:
+            variation = self._build_mc_variation_from_editor()
+            row = self.mc_variations_list.currentRow()
+            if 0 <= row < len(self.mc_variations):
+                self.mc_variations[row] = variation
+                action = "Updated"
+            else:
+                self.mc_variations.append(variation)
+                row = len(self.mc_variations) - 1
+                action = "Added"
+            self._refresh_mc_variations_list()
+            self.mc_variations_list.setCurrentRow(row)
+            self._mark_dirty()
+            self.statusBar().showMessage(f"{action} Monte Carlo variation.", 5000)
+        except Exception as exc:
+            self._show_error("Invalid Monte Carlo Variation", str(exc))
+
+    def _on_remove_mc_variation(self) -> None:
+        row = self.mc_variations_list.currentRow()
+        if row < 0 or row >= len(self.mc_variations):
+            return
+        self.mc_variations.pop(row)
+        self._refresh_mc_variations_list()
+        if self.mc_variations:
+            self.mc_variations_list.setCurrentRow(min(row, len(self.mc_variations) - 1))
+        else:
+            self._clear_mc_variation_editor()
+        self._mark_dirty()
+        self.statusBar().showMessage("Removed Monte Carlo variation.", 5000)
 
     def _load_config_into_widgets(self, cfg: dict) -> None:
         self._suppress_dirty_tracking = True
@@ -989,7 +1393,11 @@ class MainWindow(QMainWindow):
         self.mc_parallel_check.setChecked(bool(mc.get("parallel_enabled", False)))
         self.mc_workers_spin.setValue(int(mc.get("parallel_workers", 0)))
         self.mc_base_seed_spin.setValue(int(mc.get("base_seed", 0)))
-        self.mc_variations_editor.setPlainText(yaml.safe_dump(list(mc.get("variations", []) or []), sort_keys=False, allow_unicode=False))
+        self.mc_variations = [dict(v or {}) for v in list(mc.get("variations", []) or [])]
+        self._rebuild_mc_category_combo()
+        self._refresh_mc_parameter_options()
+        self._refresh_mc_variations_list()
+        self._clear_mc_variation_editor()
         dynamics = dict(sim.get("dynamics", {}) or {})
         orbit_dyn = dict(dynamics.get("orbit", {}) or {})
         att_dyn = dict(dynamics.get("attitude", {}) or {})
@@ -1149,12 +1557,7 @@ class MainWindow(QMainWindow):
         mc["parallel_enabled"] = bool(self.mc_parallel_check.isChecked())
         mc["parallel_workers"] = int(self.mc_workers_spin.value())
         mc["base_seed"] = int(self.mc_base_seed_spin.value())
-        variations_raw = yaml.safe_load(self.mc_variations_editor.toPlainText() or "[]")
-        if variations_raw is None:
-            variations_raw = []
-        if not isinstance(variations_raw, list):
-            raise ValueError("Monte Carlo variations editor must contain a YAML list.")
-        mc["variations"] = variations_raw
+        mc["variations"] = copy.deepcopy(self.mc_variations)
 
         target["enabled"] = bool(self.target_enabled.isChecked())
         target.setdefault("specs", {})["preset_satellite"] = self.target_preset.currentText().strip()
