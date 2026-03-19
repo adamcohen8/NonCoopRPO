@@ -344,6 +344,30 @@ def _cpu_time_seconds_including_children() -> float:
         return float(time.process_time())
 
 
+def _is_truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_use_tqdm() -> bool:
+    return not _is_truthy_env("NONCOOP_GUI")
+
+
+def _make_plain_progress_reporter(label: str):
+    last_percent = {"value": -1}
+
+    def _report(step: int, total: int) -> None:
+        t = max(int(total), 0)
+        s = max(int(step), 0)
+        if t <= 0:
+            return
+        pct = int(min(100, max(0, (100 * s) // t)))
+        if pct >= 100 or last_percent["value"] < 0 or pct >= last_percent["value"] + 5:
+            print(f"{label}: {pct}% ({s}/{t})")
+            last_percent["value"] = pct
+
+    return _report
+
+
 def _recommend_workers(
     *,
     logical_cores: int,
@@ -495,6 +519,7 @@ def main() -> None:
         return
     cfg = load_simulation_yaml(args.config)
     _print_run_header(args.config, cfg)
+    use_tqdm = _should_use_tqdm()
 
     # Show progress only for the integration loop; config parsing and plotting are excluded.
     if cfg.monte_carlo.enabled:
@@ -504,76 +529,113 @@ def main() -> None:
             worker_bars = []
             pid_to_slot: dict[int, int] = {}
             slot_state: dict[int, dict] = {}
-            try:
-                from tqdm.auto import tqdm  # type: ignore
+            if use_tqdm:
+                try:
+                    from tqdm.auto import tqdm  # type: ignore
 
-                if mc_total > 0:
-                    mc_bar = tqdm(total=mc_total, desc="Monte Carlo", unit="run", position=0)
-                last_done = 0
-                max_workers_cfg = int(cfg.monte_carlo.parallel_workers or 0)
-                default_workers = int(max(1, (os.cpu_count() or 1) - 1))
-                display_workers = int(max_workers_cfg if max_workers_cfg > 0 else default_workers)
-                display_workers = max(1, min(display_workers, mc_total))
-                for i in range(display_workers):
-                    wb = tqdm(
-                        total=1,
-                        desc=f"Worker {i+1}",
-                        unit="step",
-                        position=i + 1,
-                        leave=False,
-                        dynamic_ncols=True,
+                    if mc_total > 0:
+                        mc_bar = tqdm(total=mc_total, desc="Monte Carlo", unit="run", position=0)
+                    last_done = 0
+                    max_workers_cfg = int(cfg.monte_carlo.parallel_workers or 0)
+                    default_workers = int(max(1, (os.cpu_count() or 1) - 1))
+                    display_workers = int(max_workers_cfg if max_workers_cfg > 0 else default_workers)
+                    display_workers = max(1, min(display_workers, mc_total))
+                    for i in range(display_workers):
+                        wb = tqdm(
+                            total=1,
+                            desc=f"Worker {i+1}",
+                            unit="step",
+                            position=i + 1,
+                            leave=False,
+                            dynamic_ncols=True,
+                        )
+                        worker_bars.append(wb)
+                        slot_state[i] = {"iteration": None, "last_step": 0}
+
+                    def _on_mc_done(done: int, total: int) -> None:
+                        nonlocal last_done, mc_bar
+                        if mc_bar is None:
+                            return
+                        d = max(int(done), 0)
+                        t = max(int(total), 0)
+                        if t > 0 and int(mc_bar.total) != t:
+                            mc_bar.total = t
+                        if d > last_done:
+                            mc_bar.update(d - last_done)
+                        last_done = d
+
+                    def _on_worker_progress(evt: dict) -> None:
+                        nonlocal pid_to_slot, slot_state, worker_bars, mc_total
+                        if not worker_bars:
+                            return
+                        event = str(evt.get("event", ""))
+                        pid = int(evt.get("pid", -1))
+                        iteration = int(evt.get("iteration", -1))
+                        if pid <= 0:
+                            return
+                        if pid not in pid_to_slot:
+                            used = set(pid_to_slot.values())
+                            free_slots = [i for i in range(len(worker_bars)) if i not in used]
+                            pid_to_slot[pid] = free_slots[0] if free_slots else (len(pid_to_slot) % len(worker_bars))
+                        slot = int(pid_to_slot[pid])
+                        bar = worker_bars[slot]
+                        state = slot_state.setdefault(slot, {"iteration": None, "last_step": 0})
+                        if event == "done":
+                            state["iteration"] = None
+                            state["last_step"] = 0
+                            bar.set_description(f"Worker {slot+1} (idle)")
+                            return
+                        if event != "step":
+                            return
+                        step = max(int(evt.get("step", 0)), 0)
+                        total = max(int(evt.get("total", 0)), 0)
+                        if state.get("iteration") != iteration:
+                            state["iteration"] = iteration
+                            state["last_step"] = 0
+                            bar.reset(total=max(total, 1))
+                            bar.set_description(f"Worker {slot+1} (run {iteration+1}/{max(mc_total,1)})")
+                        if total > 0 and int(bar.total) != total:
+                            bar.total = total
+                        last_step = int(state.get("last_step", 0))
+                        if step > last_step:
+                            bar.update(step - last_step)
+                            state["last_step"] = step
+
+                    out = run_master_simulation(
+                        config_path=args.config,
+                        step_callback=None,
+                        mc_callback=_on_mc_done,
+                        mc_progress_callback=_on_worker_progress,
                     )
-                    worker_bars.append(wb)
-                    slot_state[i] = {"iteration": None, "last_step": 0}
+                finally:
+                    for wb in worker_bars:
+                        wb.close()
+                    if mc_bar is not None:
+                        if mc_bar.n < mc_total:
+                            mc_bar.update(mc_total - mc_bar.n)
+                        mc_bar.close()
+            else:
+                mc_report = _make_plain_progress_reporter("Monte Carlo")
+                worker_last: dict[int, int] = {}
 
                 def _on_mc_done(done: int, total: int) -> None:
-                    nonlocal last_done, mc_bar
-                    if mc_bar is None:
-                        return
-                    d = max(int(done), 0)
-                    t = max(int(total), 0)
-                    if t > 0 and int(mc_bar.total) != t:
-                        mc_bar.total = t
-                    if d > last_done:
-                        mc_bar.update(d - last_done)
-                    last_done = d
+                    mc_report(done, total)
 
                 def _on_worker_progress(evt: dict) -> None:
-                    nonlocal pid_to_slot, slot_state, worker_bars, mc_total
-                    if not worker_bars:
-                        return
                     event = str(evt.get("event", ""))
-                    pid = int(evt.get("pid", -1))
-                    iteration = int(evt.get("iteration", -1))
-                    if pid <= 0:
-                        return
-                    if pid not in pid_to_slot:
-                        used = set(pid_to_slot.values())
-                        free_slots = [i for i in range(len(worker_bars)) if i not in used]
-                        pid_to_slot[pid] = free_slots[0] if free_slots else (len(pid_to_slot) % len(worker_bars))
-                    slot = int(pid_to_slot[pid])
-                    bar = worker_bars[slot]
-                    state = slot_state.setdefault(slot, {"iteration": None, "last_step": 0})
-                    if event == "done":
-                        state["iteration"] = None
-                        state["last_step"] = 0
-                        bar.set_description(f"Worker {slot+1} (idle)")
-                        return
                     if event != "step":
                         return
+                    pid = int(evt.get("pid", -1))
+                    iteration = int(evt.get("iteration", -1))
                     step = max(int(evt.get("step", 0)), 0)
                     total = max(int(evt.get("total", 0)), 0)
-                    if state.get("iteration") != iteration:
-                        state["iteration"] = iteration
-                        state["last_step"] = 0
-                        bar.reset(total=max(total, 1))
-                        bar.set_description(f"Worker {slot+1} (run {iteration+1}/{max(mc_total,1)})")
-                    if total > 0 and int(bar.total) != total:
-                        bar.total = total
-                    last_step = int(state.get("last_step", 0))
-                    if step > last_step:
-                        bar.update(step - last_step)
-                        state["last_step"] = step
+                    if pid <= 0 or total <= 0:
+                        return
+                    pct = int(min(100, max(0, (100 * step) // total)))
+                    last = int(worker_last.get(pid, -1))
+                    if pct >= 100 or last < 0 or pct >= last + 10:
+                        print(f"Worker {pid} run {iteration + 1}/{max(mc_total, 1)}: {pct}% ({step}/{total})")
+                        worker_last[pid] = pct
 
                 out = run_master_simulation(
                     config_path=args.config,
@@ -581,95 +643,110 @@ def main() -> None:
                     mc_callback=_on_mc_done,
                     mc_progress_callback=_on_worker_progress,
                 )
-            finally:
-                for wb in worker_bars:
-                    wb.close()
-                if mc_bar is not None:
-                    if mc_bar.n < mc_total:
-                        mc_bar.update(mc_total - mc_bar.n)
-                    mc_bar.close()
         else:
             mc_bar = None
             sim_bar = None
             started_runs = 0
             last_step = 0
             run_done = True
-            try:
-                from tqdm.auto import tqdm  # type: ignore
+            if use_tqdm:
+                try:
+                    from tqdm.auto import tqdm  # type: ignore
 
-                if mc_total > 0:
-                    mc_bar = tqdm(total=mc_total, desc="Monte Carlo", unit="run")
+                    if mc_total > 0:
+                        mc_bar = tqdm(total=mc_total, desc="Monte Carlo", unit="run")
 
-                def _on_mc_step(step: int, total: int) -> None:
-                    nonlocal sim_bar, started_runs, last_step, run_done, mc_bar
-                    s = max(int(step), 0)
-                    t = max(int(total), 0)
-                    if s == 0:
-                        started_runs += 1
-                        run_done = False
-                        last_step = 0
-                        if sim_bar is not None:
-                            sim_bar.close()
-                        sim_bar = tqdm(
-                            total=t,
-                            desc=f"Simulation {started_runs}/{max(mc_total, 1)}",
-                            unit="step",
-                            leave=False,
-                        )
-                        if t == 0:
+                    def _on_mc_step(step: int, total: int) -> None:
+                        nonlocal sim_bar, started_runs, last_step, run_done, mc_bar
+                        s = max(int(step), 0)
+                        t = max(int(total), 0)
+                        if s == 0:
+                            started_runs += 1
+                            run_done = False
+                            last_step = 0
+                            if sim_bar is not None:
+                                sim_bar.close()
+                            sim_bar = tqdm(
+                                total=t,
+                                desc=f"Simulation {started_runs}/{max(mc_total, 1)}",
+                                unit="step",
+                                leave=False,
+                            )
+                            if t == 0:
+                                if mc_bar is not None:
+                                    mc_bar.update(1)
+                                run_done = True
+                                if sim_bar is not None:
+                                    sim_bar.close()
+                                    sim_bar = None
+                            return
+
+                        if sim_bar is None:
+                            sim_bar = tqdm(total=t, desc=f"Simulation {started_runs}/{max(mc_total, 1)}", unit="step", leave=False)
+                        if t > 0 and int(sim_bar.total) != t:
+                            sim_bar.total = t
+                        if s > last_step:
+                            sim_bar.update(s - last_step)
+                        last_step = s
+
+                        if t > 0 and s >= t and not run_done:
                             if mc_bar is not None:
                                 mc_bar.update(1)
                             run_done = True
                             if sim_bar is not None:
                                 sim_bar.close()
                                 sim_bar = None
+
+                    out = run_master_simulation(config_path=args.config, step_callback=_on_mc_step)
+                finally:
+                    if sim_bar is not None:
+                        sim_bar.close()
+                    if mc_bar is not None:
+                        if mc_bar.n < mc_total:
+                            mc_bar.update(mc_total - mc_bar.n)
+                        mc_bar.close()
+            else:
+                overall_report = _make_plain_progress_reporter("Monte Carlo")
+                run_report = None
+
+                def _on_mc_step(step: int, total: int) -> None:
+                    nonlocal started_runs, run_report
+                    s = max(int(step), 0)
+                    t = max(int(total), 0)
+                    if s == 0:
+                        started_runs += 1
+                        print(f"Simulation {started_runs}/{max(mc_total, 1)} started")
+                        run_report = _make_plain_progress_reporter(f"Simulation {started_runs}/{max(mc_total, 1)}")
                         return
-
-                    if sim_bar is None:
-                        sim_bar = tqdm(total=t, desc=f"Simulation {started_runs}/{max(mc_total, 1)}", unit="step", leave=False)
-                    if t > 0 and int(sim_bar.total) != t:
-                        sim_bar.total = t
-                    if s > last_step:
-                        sim_bar.update(s - last_step)
-                    last_step = s
-
-                    if t > 0 and s >= t and not run_done:
-                        if mc_bar is not None:
-                            mc_bar.update(1)
-                        run_done = True
-                        if sim_bar is not None:
-                            sim_bar.close()
-                            sim_bar = None
+                    if run_report is not None:
+                        run_report(s, t)
+                    if t > 0 and s >= t:
+                        overall_report(started_runs, mc_total)
 
                 out = run_master_simulation(config_path=args.config, step_callback=_on_mc_step)
-            finally:
-                if sim_bar is not None:
-                    sim_bar.close()
-                if mc_bar is not None:
-                    if mc_bar.n < mc_total:
-                        mc_bar.update(mc_total - mc_bar.n)
-                    mc_bar.close()
     else:
         total_steps = int(max(math.floor(float(cfg.simulator.duration_s) / float(cfg.simulator.dt_s)), 0))
         pbar = None
         last_step = 0
-        if total_steps > 0:
+        if use_tqdm and total_steps > 0:
             try:
                 from tqdm.auto import tqdm  # type: ignore
 
                 pbar = tqdm(total=total_steps, desc="Simulation", unit="step")
             except ImportError:
                 pbar = None
+        plain_report = None if use_tqdm else _make_plain_progress_reporter("Simulation")
 
         def _on_step(step: int, total: int) -> None:
-            nonlocal last_step, pbar
-            if pbar is None:
-                return
-            if int(total) > 0 and int(total) != int(pbar.total):
-                pbar.total = int(total)
+            nonlocal last_step, pbar, plain_report
             s = max(int(step), 0)
-            if s > last_step:
-                pbar.update(s - last_step)
+            if pbar is not None:
+                if int(total) > 0 and int(total) != int(pbar.total):
+                    pbar.total = int(total)
+                if s > last_step:
+                    pbar.update(s - last_step)
+            elif plain_report is not None:
+                plain_report(s, total)
             last_step = s
 
         try:
