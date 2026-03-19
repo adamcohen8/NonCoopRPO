@@ -176,6 +176,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_dirty_tracking()
         self.mc_enabled_check.toggled.connect(self._refresh_outputs_mode_ui)
+        self.orbit_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
+        self.attitude_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         self._load_config_into_widgets(self.current_config)
         self._refresh_yaml()
         self._refresh_validation_state()
@@ -277,6 +279,7 @@ class MainWindow(QMainWindow):
 
         self.tabs.addTab(self._build_scenario_tab(), "Scenario")
         self.tabs.addTab(self._build_objects_tab(), "Objects")
+        self.tabs.addTab(self._build_monte_carlo_tab(), "Monte Carlo")
         self.tabs.addTab(self._build_outputs_tab(), "Outputs")
         self.tabs.addTab(self._build_yaml_tab(), "Advanced YAML")
         self.tabs.addTab(self._build_results_tab(), "Results")
@@ -296,7 +299,6 @@ class MainWindow(QMainWindow):
         scenario_item = QTreeWidgetItem(["Scenario"])
         scenario_item.setData(0, Qt.UserRole, 0)
         scenario_item.addChild(self._nav_item("Simulator", 0))
-        scenario_item.addChild(self._nav_item("Monte Carlo", 0))
 
         objects_item = QTreeWidgetItem(["Objects"])
         objects_item.setData(0, Qt.UserRole, 1)
@@ -304,23 +306,29 @@ class MainWindow(QMainWindow):
         objects_item.addChild(self._nav_item("Chaser", 1))
         objects_item.addChild(self._nav_item("Rocket", 1))
 
+        mc_item = QTreeWidgetItem(["Monte Carlo"])
+        mc_item.setData(0, Qt.UserRole, 2)
+        mc_item.addChild(self._nav_item("Execution", 2))
+        mc_item.addChild(self._nav_item("Variations", 2))
+
         outputs_item = QTreeWidgetItem(["Outputs"])
-        outputs_item.setData(0, Qt.UserRole, 2)
-        outputs_item.addChild(self._nav_item("Stats", 2))
-        outputs_item.addChild(self._nav_item("Plots", 2))
-        outputs_item.addChild(self._nav_item("Animations", 2))
+        outputs_item.setData(0, Qt.UserRole, 3)
+        outputs_item.addChild(self._nav_item("Stats", 3))
+        outputs_item.addChild(self._nav_item("Plots", 3))
+        outputs_item.addChild(self._nav_item("Animations", 3))
 
         yaml_item = QTreeWidgetItem(["Advanced YAML"])
-        yaml_item.setData(0, Qt.UserRole, 3)
+        yaml_item.setData(0, Qt.UserRole, 4)
 
         results_item = QTreeWidgetItem(["Results"])
-        results_item.setData(0, Qt.UserRole, 4)
-        results_item.addChild(self._nav_item("Console", 4))
-        results_item.addChild(self._nav_item("Summary", 4))
-        results_item.addChild(self._nav_item("Artifacts", 4))
+        results_item.setData(0, Qt.UserRole, 5)
+        results_item.addChild(self._nav_item("Console", 5))
+        results_item.addChild(self._nav_item("Summary", 5))
+        results_item.addChild(self._nav_item("Artifacts", 5))
 
         tree.addTopLevelItem(scenario_item)
         tree.addTopLevelItem(objects_item)
+        tree.addTopLevelItem(mc_item)
         tree.addTopLevelItem(outputs_item)
         tree.addTopLevelItem(yaml_item)
         tree.addTopLevelItem(results_item)
@@ -339,6 +347,7 @@ class MainWindow(QMainWindow):
             self.reference_object_edit,
             self.mc_baseline_summary_json,
             self.save_path_edit,
+            self.mc_variations_editor,
             self.yaml_editor,
         ]
         for widget in line_edits:
@@ -369,6 +378,8 @@ class MainWindow(QMainWindow):
         check_boxes = [
             self.mc_enabled_check,
             self.mc_parallel_check,
+            self.orbit_substep_enabled_check,
+            self.attitude_substep_enabled_check,
             self.attitude_enabled_check,
             self.orbit_j2_check,
             self.orbit_j3_check,
@@ -412,6 +423,7 @@ class MainWindow(QMainWindow):
             self.attitude_substep_spin,
             self.mc_iterations_spin,
             self.mc_workers_spin,
+            self.mc_base_seed_spin,
             self.target_mass,
             self.target_a,
             self.target_ecc,
@@ -440,6 +452,7 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QFormLayout(tab)
         self.scenario_name_edit = QLineEdit()
+        self.scenario_name_edit.setMinimumWidth(320)
         self.duration_spin = QDoubleSpinBox()
         self.duration_spin.setRange(0.001, 1.0e9)
         self.duration_spin.setDecimals(3)
@@ -451,13 +464,10 @@ class MainWindow(QMainWindow):
         self.output_mode_combo = QComboBox()
         self.output_mode_combo.addItems(OUTPUT_MODES)
         self.output_dir_edit = QLineEdit()
-        self.mc_enabled_check = QCheckBox("Enable Monte Carlo")
-        self.mc_iterations_spin = QSpinBox()
-        self.mc_iterations_spin.setRange(1, 1000000)
-        self.mc_parallel_check = QCheckBox("Parallel")
-        self.mc_workers_spin = QSpinBox()
-        self.mc_workers_spin.setRange(0, 1024)
+        self.output_dir_edit.setMinimumWidth(320)
+        self.orbit_substep_enabled_check = QCheckBox("Orbit Substep")
         self.orbit_substep_spin = self._make_free_spinbox()
+        self.attitude_substep_enabled_check = QCheckBox("Attitude Substep")
         self.attitude_substep_spin = self._make_free_spinbox()
         self.attitude_enabled_check = QCheckBox("Enable Attitude Dynamics")
         self.orbit_j2_check = QCheckBox("J2")
@@ -477,8 +487,22 @@ class MainWindow(QMainWindow):
         layout.addRow("dt (s)", self.dt_spin)
         layout.addRow("Output Mode", self.output_mode_combo)
         layout.addRow("Output Directory", self.output_dir_edit)
-        layout.addRow("Orbit Substep (s, 0=default)", self.orbit_substep_spin)
-        layout.addRow("Attitude Substep (s, 0=default)", self.attitude_substep_spin)
+        orbit_substep_row = QWidget()
+        orbit_substep_layout = QHBoxLayout(orbit_substep_row)
+        orbit_substep_layout.setContentsMargins(0, 0, 0, 0)
+        orbit_substep_layout.setSpacing(4)
+        orbit_substep_layout.addWidget(self.orbit_substep_enabled_check)
+        orbit_substep_layout.addWidget(self.orbit_substep_spin)
+        orbit_substep_layout.addStretch(1)
+        layout.addRow(orbit_substep_row)
+        attitude_substep_row = QWidget()
+        attitude_substep_layout = QHBoxLayout(attitude_substep_row)
+        attitude_substep_layout.setContentsMargins(0, 0, 0, 0)
+        attitude_substep_layout.setSpacing(4)
+        attitude_substep_layout.addWidget(self.attitude_substep_enabled_check)
+        attitude_substep_layout.addWidget(self.attitude_substep_spin)
+        attitude_substep_layout.addStretch(1)
+        layout.addRow(attitude_substep_row)
         layout.addRow(self.attitude_enabled_check)
         orbit_perturbations = QWidget()
         orbit_perturbations_layout = QGridLayout(orbit_perturbations)
@@ -499,10 +523,36 @@ class MainWindow(QMainWindow):
         attitude_disturbances_layout.addWidget(self.att_drag_check, 1, 0)
         attitude_disturbances_layout.addWidget(self.att_srp_check, 1, 1)
         layout.addRow("Attitude Disturbances", attitude_disturbances)
-        layout.addRow(self.mc_enabled_check)
-        layout.addRow("MC Iterations", self.mc_iterations_spin)
-        layout.addRow(self.mc_parallel_check)
-        layout.addRow("MC Workers (0=auto)", self.mc_workers_spin)
+        return tab
+
+    def _build_monte_carlo_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        form = QFormLayout()
+        self.mc_enabled_check = QCheckBox("Enable Monte Carlo")
+        self.mc_iterations_spin = QSpinBox()
+        self.mc_iterations_spin.setRange(1, 1000000)
+        self.mc_parallel_check = QCheckBox("Parallel")
+        self.mc_workers_spin = QSpinBox()
+        self.mc_workers_spin.setRange(0, 1024)
+        self.mc_base_seed_spin = QSpinBox()
+        self.mc_base_seed_spin.setRange(0, 2**31 - 1)
+        form.addRow(self.mc_enabled_check)
+        form.addRow("Iterations", self.mc_iterations_spin)
+        form.addRow(self.mc_parallel_check)
+        form.addRow("Workers (0=auto)", self.mc_workers_spin)
+        form.addRow("Base Seed", self.mc_base_seed_spin)
+        layout.addLayout(form)
+
+        layout.addWidget(QLabel("Variations (YAML list)"))
+        self.mc_variations_editor = QPlainTextEdit()
+        self.mc_variations_editor.setPlaceholderText(
+            "- parameter_path: chaser.initial_state.deploy_dv_body_m_s[0]\n"
+            "  mode: normal\n"
+            "  mean: 10.0\n"
+            "  std: 0.5"
+        )
+        layout.addWidget(self.mc_variations_editor, 1)
         return tab
 
     def _build_objects_tab(self) -> QWidget:
@@ -598,6 +648,10 @@ class MainWindow(QMainWindow):
         self.rocket_launch_lon = self._make_free_spinbox()
         self.rocket_launch_alt = self._make_free_spinbox()
         self.rocket_launch_az = self._make_free_spinbox()
+        self.rocket_launch_lat.setMaximumWidth(self.rocket_payload.maximumWidth())
+        self.rocket_launch_lon.setMaximumWidth(self.rocket_payload.maximumWidth())
+        self.rocket_launch_alt.setMaximumWidth(self.rocket_payload.maximumWidth())
+        self.rocket_launch_az.setMaximumWidth(self.rocket_payload.maximumWidth())
         rocket_form.addRow(self.rocket_enabled)
         rocket_form.addRow("Stack Preset", self.rocket_preset)
         rocket_form.addRow("Payload Mass (kg)", self.rocket_payload)
@@ -798,6 +852,9 @@ class MainWindow(QMainWindow):
         widget.setDecimals(6)
         return widget
 
+    def _configure_compact_spinbox(self, widget: QDoubleSpinBox, width: int = 84) -> None:
+        widget.setMaximumWidth(width)
+
     def _make_pointer_combo(self, options: list[tuple[str, dict | None]]) -> QComboBox:
         combo = QComboBox()
         combo.setMinimumContentsLength(12)
@@ -931,12 +988,18 @@ class MainWindow(QMainWindow):
         self.mc_iterations_spin.setValue(int(mc.get("iterations", 1)))
         self.mc_parallel_check.setChecked(bool(mc.get("parallel_enabled", False)))
         self.mc_workers_spin.setValue(int(mc.get("parallel_workers", 0)))
+        self.mc_base_seed_spin.setValue(int(mc.get("base_seed", 0)))
+        self.mc_variations_editor.setPlainText(yaml.safe_dump(list(mc.get("variations", []) or []), sort_keys=False, allow_unicode=False))
         dynamics = dict(sim.get("dynamics", {}) or {})
         orbit_dyn = dict(dynamics.get("orbit", {}) or {})
         att_dyn = dict(dynamics.get("attitude", {}) or {})
         disturbance_torques = dict(att_dyn.get("disturbance_torques", {}) or {})
-        self.orbit_substep_spin.setValue(float(orbit_dyn.get("orbit_substep_s", 0.0) or 0.0))
-        self.attitude_substep_spin.setValue(float(att_dyn.get("attitude_substep_s", 0.0) or 0.0))
+        orbit_substep_val = orbit_dyn.get("orbit_substep_s")
+        attitude_substep_val = att_dyn.get("attitude_substep_s")
+        self.orbit_substep_enabled_check.setChecked(orbit_substep_val is not None)
+        self.attitude_substep_enabled_check.setChecked(attitude_substep_val is not None)
+        self.orbit_substep_spin.setValue(float(orbit_substep_val or 0.0))
+        self.attitude_substep_spin.setValue(float(attitude_substep_val or 0.0))
         self.attitude_enabled_check.setChecked(bool(att_dyn.get("enabled", True)))
         self.orbit_j2_check.setChecked(bool(orbit_dyn.get("j2", False)))
         self.orbit_j3_check.setChecked(bool(orbit_dyn.get("j3", False)))
@@ -949,6 +1012,7 @@ class MainWindow(QMainWindow):
         self.att_magnetic_check.setChecked(bool(disturbance_torques.get("magnetic", False)))
         self.att_drag_check.setChecked(bool(disturbance_torques.get("drag", False)))
         self.att_srp_check.setChecked(bool(disturbance_torques.get("srp", False)))
+        self._refresh_substep_visibility()
 
         target_specs = dict(target.get("specs", {}) or {})
         target_coes = dict(target.get("initial_state", {}).get("coes", {}) or {})
@@ -1063,8 +1127,8 @@ class MainWindow(QMainWindow):
 
         orbit_substep = float(self.orbit_substep_spin.value())
         attitude_substep = float(self.attitude_substep_spin.value())
-        orbit_dyn["orbit_substep_s"] = orbit_substep if orbit_substep > 0.0 else None
-        att_dyn["attitude_substep_s"] = attitude_substep if attitude_substep > 0.0 else None
+        orbit_dyn["orbit_substep_s"] = orbit_substep if (self.orbit_substep_enabled_check.isChecked() and orbit_substep > 0.0) else None
+        att_dyn["attitude_substep_s"] = attitude_substep if (self.attitude_substep_enabled_check.isChecked() and attitude_substep > 0.0) else None
         att_dyn["enabled"] = bool(self.attitude_enabled_check.isChecked())
         orbit_dyn["j2"] = bool(self.orbit_j2_check.isChecked())
         orbit_dyn["j3"] = bool(self.orbit_j3_check.isChecked())
@@ -1084,6 +1148,13 @@ class MainWindow(QMainWindow):
         mc["iterations"] = int(self.mc_iterations_spin.value())
         mc["parallel_enabled"] = bool(self.mc_parallel_check.isChecked())
         mc["parallel_workers"] = int(self.mc_workers_spin.value())
+        mc["base_seed"] = int(self.mc_base_seed_spin.value())
+        variations_raw = yaml.safe_load(self.mc_variations_editor.toPlainText() or "[]")
+        if variations_raw is None:
+            variations_raw = []
+        if not isinstance(variations_raw, list):
+            raise ValueError("Monte Carlo variations editor must contain a YAML list.")
+        mc["variations"] = variations_raw
 
         target["enabled"] = bool(self.target_enabled.isChecked())
         target.setdefault("specs", {})["preset_satellite"] = self.target_preset.currentText().strip()
@@ -1751,3 +1822,7 @@ class MainWindow(QMainWindow):
             self.outputs_mode_label.setText(
                 "Monte Carlo is disabled. Configure single-run plots, stats, and animations here."
             )
+
+    def _refresh_substep_visibility(self) -> None:
+        self.orbit_substep_spin.setVisible(bool(self.orbit_substep_enabled_check.isChecked()))
+        self.attitude_substep_spin.setVisible(bool(self.attitude_substep_enabled_check.isChecked()))
