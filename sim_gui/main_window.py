@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import importlib
 import json
 from pathlib import Path
 import tempfile
@@ -64,8 +65,6 @@ GUIDANCE_OPTIONS = {
         ("Max Q Throttle Limiter", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "MaxQThrottleLimiterGuidance", "params": {}}),
         ("Orbit Insertion Cutoff", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "OrbitInsertionCutoffGuidance", "params": {}}),
     ],
-    "chaser": [("Zero Controller", ZERO_POINTER)],
-    "target": [("Zero Controller", ZERO_POINTER)],
 }
 
 ORBIT_CONTROL_OPTIONS = {
@@ -199,6 +198,100 @@ MC_PARAMETER_CATEGORIES = {
     ],
 }
 
+PARAMETER_FORM_SCHEMAS = {
+    "OpenLoopPitchProgramGuidance": [
+        {"key": "vertical_hold_s", "label": "Vertical Hold (s)", "kind": "float"},
+        {"key": "pitch_start_s", "label": "Pitch Start (s)", "kind": "float"},
+        {"key": "pitch_end_s", "label": "Pitch End (s)", "kind": "float"},
+        {"key": "pitch_final_deg", "label": "Pitch Final (deg)", "kind": "float"},
+        {"key": "max_throttle", "label": "Max Throttle", "kind": "float"},
+        {"key": "min_throttle", "label": "Min Throttle", "kind": "float"},
+    ],
+    "HCWLQRController": [
+        {"key": "mean_motion_rad_s", "label": "Mean Motion (rad/s)", "kind": "float"},
+        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
+        {"key": "design_dt_s", "label": "Design dt (s)", "kind": "float"},
+        {"key": "state_signs", "label": "State Signs", "kind": "vector", "length": 6},
+        {"key": "q_weights", "label": "Q Weights", "kind": "vector", "length": 6},
+        {"key": "r_weights", "label": "R Weights", "kind": "vector", "length": 3},
+        {"key": "riccati_max_iter", "label": "Riccati Max Iter", "kind": "int"},
+        {"key": "riccati_tol", "label": "Riccati Tolerance", "kind": "float"},
+    ],
+    "RelativeOrbitMPCController": [
+        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
+        {"key": "horizon_steps", "label": "Horizon Steps", "kind": "int"},
+        {"key": "step_dt_s", "label": "Step dt (s)", "kind": "float"},
+        {"key": "gradient_method", "label": "Gradient Method", "kind": "choice", "options": ["spsa", "finite_difference"]},
+        {"key": "max_iterations", "label": "Max Iterations", "kind": "int"},
+        {"key": "target_rel_ric_rect", "label": "Target Rel RIC Rect", "kind": "vector", "length": 6},
+        {"key": "q_weights", "label": "Q Weights", "kind": "vector", "length": 6},
+        {"key": "terminal_weights", "label": "Terminal Weights", "kind": "vector", "length": 6},
+        {"key": "r_weights", "label": "R Weights", "kind": "vector", "length": 3},
+        {"key": "rd_weights", "label": "Rd Weights", "kind": "vector", "length": 3},
+    ],
+    "HCWRelativeOrbitMPCController": [
+        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
+        {"key": "horizon_time_s", "label": "Horizon Time (s)", "kind": "float"},
+        {"key": "default_model_dt_s", "label": "Default Model dt (s)", "kind": "float"},
+        {"key": "model_dt_s", "label": "Model dt (s)", "kind": "optional_float"},
+        {"key": "gradient_method", "label": "Gradient Method", "kind": "choice", "options": ["spsa", "finite_difference"]},
+        {"key": "max_iterations", "label": "Max Iterations", "kind": "int"},
+        {"key": "target_rel_ric_rect", "label": "Target Rel RIC Rect", "kind": "vector", "length": 6},
+        {"key": "q_weights", "label": "Q Weights", "kind": "vector", "length": 6},
+        {"key": "terminal_weights", "label": "Terminal Weights", "kind": "vector", "length": 6},
+        {"key": "r_weights", "label": "R Weights", "kind": "vector", "length": 3},
+        {"key": "rd_weights", "label": "Rd Weights", "kind": "vector", "length": 3},
+    ],
+    "QuaternionPDController": [
+        {"key": "kp", "label": "Kp", "kind": "float"},
+        {"key": "kd", "label": "Kd", "kind": "float"},
+        {"key": "max_torque_nm", "label": "Max Torque (Nm)", "kind": "float"},
+    ],
+    "SurrogateSnapECIController": [
+        {"key": "desired_attitude_quat_bn", "label": "Desired Quaternion BN", "kind": "vector", "length": 4},
+        {"key": "cancel_rate_mag_rad_s2", "label": "Cancel Rate Mag (rad/s^2)", "kind": "float"},
+        {"key": "rate_tolerance_rad_s", "label": "Rate Tolerance (rad/s)", "kind": "float"},
+        {"key": "slew_time_180_s", "label": "180 deg Slew Time (s)", "kind": "float"},
+        {"key": "pointing_sigma_deg", "label": "Pointing Sigma (deg)", "kind": "float"},
+        {"key": "default_dt_s", "label": "Default dt (s)", "kind": "float"},
+        {"key": "rng_seed", "label": "RNG Seed", "kind": "int"},
+    ],
+    "SurrogateSnapRICController": [
+        {"key": "desired_attitude_quat_br", "label": "Desired Quaternion BR", "kind": "vector", "length": 4},
+        {"key": "cancel_rate_mag_rad_s2", "label": "Cancel Rate Mag (rad/s^2)", "kind": "float"},
+        {"key": "rate_tolerance_rad_s", "label": "Rate Tolerance (rad/s)", "kind": "float"},
+        {"key": "slew_time_180_s", "label": "180 deg Slew Time (s)", "kind": "float"},
+        {"key": "pointing_sigma_deg", "label": "Pointing Sigma (deg)", "kind": "float"},
+        {"key": "default_dt_s", "label": "Default dt (s)", "kind": "float"},
+        {"key": "rng_seed", "label": "RNG Seed", "kind": "int"},
+    ],
+    "RocketMissionModule": [
+        {"key": "launch_mode", "label": "Launch Mode", "kind": "choice", "options": ["go_now", "go_when_possible", "wait_optimal_window"]},
+        {"key": "orbital_goal", "label": "Orbital Goal", "kind": "choice", "options": ["pursuit", "predefined_orbit"]},
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "go_when_possible_margin_m_s", "label": "Go Margin (m/s)", "kind": "float"},
+        {"key": "window_period_s", "label": "Window Period (s)", "kind": "float"},
+        {"key": "window_open_duration_s", "label": "Window Open Duration (s)", "kind": "float"},
+        {"key": "predef_target_alt_km", "label": "Predef Target Alt (km)", "kind": "float"},
+        {"key": "predef_target_ecc", "label": "Predef Target Ecc", "kind": "float"},
+    ],
+    "SatelliteMissionModule": [
+        {"key": "orbital_mode", "label": "Orbital Mode", "kind": "choice", "options": ["coast", "pursuit_knowledge", "evade_knowledge", "pursuit_blind", "evade_blind"]},
+        {"key": "attitude_mode", "label": "Attitude Mode", "kind": "choice", "options": ["hold_eci", "hold_ric", "spotlight", "sun_track", "pursuit", "evade", "sensing"]},
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
+        {"key": "blind_direction_eci", "label": "Blind Direction ECI", "kind": "vector", "length": 3},
+        {"key": "hold_quat_bn", "label": "Hold Quaternion BN", "kind": "vector", "length": 4},
+        {"key": "hold_quat_br", "label": "Hold Quaternion BR", "kind": "vector", "length": 4},
+        {"key": "boresight_body", "label": "Boresight Body", "kind": "vector", "length": 3},
+        {"key": "spotlight_lat_deg", "label": "Spotlight Lat (deg)", "kind": "float"},
+        {"key": "spotlight_lon_deg", "label": "Spotlight Lon (deg)", "kind": "float"},
+        {"key": "spotlight_alt_km", "label": "Spotlight Alt (km)", "kind": "float"},
+        {"key": "spotlight_ric_direction", "label": "Spotlight RIC Direction", "kind": "vector", "length": 3},
+        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge For Targeting", "kind": "bool"},
+    ],
+}
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -207,6 +300,7 @@ class MainWindow(QMainWindow):
         self.loaded_config_path = get_default_config_path()
         self.current_config = load_config(self.loaded_config_path)
         self.mc_variations: list[dict] = []
+        self._collapse_validation_on_startup = True
         self.process: QProcess | None = None
         self.preview_image_path: Path | None = None
         self.preview_zoom_factor = 1.0
@@ -224,11 +318,9 @@ class MainWindow(QMainWindow):
         self.orbit_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         self.attitude_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         for combo in (
-            self.target_guidance_combo,
             self.target_orbit_control_combo,
             self.target_attitude_control_combo,
             self.target_mission_combo,
-            self.chaser_guidance_combo,
             self.chaser_orbit_control_combo,
             self.chaser_attitude_control_combo,
             self.chaser_mission_combo,
@@ -321,7 +413,7 @@ class MainWindow(QMainWindow):
         validation_layout = QVBoxLayout(validation_box)
         validation_layout.setContentsMargins(6, 6, 6, 6)
         validation_layout.setSpacing(4)
-        self.validation_toggle = QPushButton("Hide Details")
+        self.validation_toggle = QPushButton("Show Details")
         self.validation_toggle.clicked.connect(self._toggle_validation_panel)
         validation_layout.addWidget(self.validation_toggle)
         self.validation_label = QLabel("No validation issues.")
@@ -330,6 +422,7 @@ class MainWindow(QMainWindow):
         self.validation_panel = QPlainTextEdit()
         self.validation_panel.setReadOnly(True)
         self.validation_panel.setMaximumHeight(120)
+        self.validation_panel.hide()
         validation_layout.addWidget(self.validation_panel)
         workspace_layout.addWidget(validation_box)
 
@@ -419,11 +512,9 @@ class MainWindow(QMainWindow):
             self.target_preset,
             self.chaser_preset,
             self.rocket_preset,
-            self.target_guidance_combo,
             self.target_orbit_control_combo,
             self.target_attitude_control_combo,
             self.target_mission_combo,
-            self.chaser_guidance_combo,
             self.chaser_orbit_control_combo,
             self.chaser_attitude_control_combo,
             self.chaser_mission_combo,
@@ -459,7 +550,6 @@ class MainWindow(QMainWindow):
             self.stats_save_json,
             self.stats_save_csv,
             self.plots_enabled,
-            self.animations_enabled,
             self.mc_save_iteration_summaries,
             self.mc_save_aggregate_summary,
             self.mc_save_histograms,
@@ -609,13 +699,29 @@ class MainWindow(QMainWindow):
         execution_row.addStretch(1)
         layout.addLayout(execution_row)
 
-        layout.addWidget(QLabel("Variations"))
         variations_split = QHBoxLayout()
+        group_box_style = (
+            "QGroupBox {"
+            " font-weight: normal;"
+            " margin-top: 18px;"
+            "}"
+            "QGroupBox::title {"
+            " subcontrol-origin: margin;"
+            " subcontrol-position: top left;"
+            " padding: 0 4px;"
+            " top: -3px;"
+            "}"
+        )
+        variations_box = QGroupBox("Variations")
+        variations_box.setStyleSheet(group_box_style)
+        variations_box_layout = QVBoxLayout(variations_box)
         self.mc_variations_list = QListWidget()
         self.mc_variations_list.currentRowChanged.connect(self._on_mc_variation_selected)
-        variations_split.addWidget(self.mc_variations_list, 2)
+        variations_box_layout.addWidget(self.mc_variations_list)
+        variations_split.addWidget(variations_box, 2)
 
         editor_box = QGroupBox("Variation Editor")
+        editor_box.setStyleSheet(group_box_style)
         editor_box_layout = QHBoxLayout(editor_box)
         editor_box_layout.setContentsMargins(8, 16, 8, 8)
         editor_box_layout.setSpacing(4)
@@ -720,17 +826,21 @@ class MainWindow(QMainWindow):
         target_form.addRow(self.target_enabled)
         target_form.addRow("Preset", self.target_preset)
         target_form.addRow("Mass (kg)", self.target_mass)
-        target_form.addRow("a_km", self.target_a)
-        target_form.addRow("ecc", self.target_ecc)
-        target_form.addRow("inc_deg", self.target_inc)
-        target_form.addRow("raan_deg", self.target_raan)
-        target_form.addRow("argp_deg", self.target_argp)
-        target_form.addRow("true_anomaly_deg", self.target_ta)
-        self.target_guidance_combo = self._make_pointer_combo(GUIDANCE_OPTIONS["target"])
+        self.target_initial_state_button = self._make_section_toggle_button("target")
+        target_form.addRow("Initial State", self.target_initial_state_button)
+        self.target_initial_state_container = QWidget()
+        target_initial_state_form = QFormLayout(self.target_initial_state_container)
+        target_initial_state_form.setContentsMargins(0, 0, 0, 0)
+        target_initial_state_form.addRow("a_km", self.target_a)
+        target_initial_state_form.addRow("ecc", self.target_ecc)
+        target_initial_state_form.addRow("inc_deg", self.target_inc)
+        target_initial_state_form.addRow("raan_deg", self.target_raan)
+        target_initial_state_form.addRow("argp_deg", self.target_argp)
+        target_initial_state_form.addRow("true_anomaly_deg", self.target_ta)
+        target_form.addRow(self.target_initial_state_container)
         self.target_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["target"])
         self.target_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["target"])
         self.target_mission_combo = self._make_pointer_combo(MISSION_OPTIONS["target"])
-        target_form.addRow("Guidance", self._make_pointer_editor_row(self.target_guidance_combo, "target", "guidance"))
         target_form.addRow("Orbit Control", self._make_pointer_editor_row(self.target_orbit_control_combo, "target", "orbit_control"))
         target_form.addRow("Attitude Control", self._make_pointer_editor_row(self.target_attitude_control_combo, "target", "attitude_control"))
         target_form.addRow("Mission", self._make_pointer_editor_row(self.target_mission_combo, "target", "mission"))
@@ -752,15 +862,19 @@ class MainWindow(QMainWindow):
         chaser_form.addRow(self.chaser_enabled)
         chaser_form.addRow("Preset", self.chaser_preset)
         chaser_form.addRow("Mass (kg)", self.chaser_mass)
-        chaser_form.addRow("Init Mode", self.chaser_init_mode)
-        chaser_form.addRow("Deploy Time (s)", self.chaser_deploy_time)
+        self.chaser_initial_state_button = self._make_section_toggle_button("chaser")
+        chaser_form.addRow("Initial State", self.chaser_initial_state_button)
+        self.chaser_initial_state_container = QWidget()
+        chaser_initial_state_form = QFormLayout(self.chaser_initial_state_container)
+        chaser_initial_state_form.setContentsMargins(0, 0, 0, 0)
+        chaser_initial_state_form.addRow("Init Mode", self.chaser_init_mode)
+        chaser_initial_state_form.addRow("Deploy Time (s)", self.chaser_deploy_time)
         for i, widget in enumerate(self.chaser_init_values):
-            chaser_form.addRow(f"Init[{i}]", widget)
-        self.chaser_guidance_combo = self._make_pointer_combo(GUIDANCE_OPTIONS["chaser"])
+            chaser_initial_state_form.addRow(f"Init[{i}]", widget)
+        chaser_form.addRow(self.chaser_initial_state_container)
         self.chaser_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["chaser"])
         self.chaser_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["chaser"])
         self.chaser_mission_combo = self._make_pointer_combo(MISSION_OPTIONS["chaser"])
-        chaser_form.addRow("Guidance", self._make_pointer_editor_row(self.chaser_guidance_combo, "chaser", "guidance"))
         chaser_form.addRow("Orbit Control", self._make_pointer_editor_row(self.chaser_orbit_control_combo, "chaser", "orbit_control"))
         chaser_form.addRow("Attitude Control", self._make_pointer_editor_row(self.chaser_attitude_control_combo, "chaser", "attitude_control"))
         chaser_form.addRow("Mission", self._make_pointer_editor_row(self.chaser_mission_combo, "chaser", "mission"))
@@ -786,10 +900,16 @@ class MainWindow(QMainWindow):
         rocket_form.addRow(self.rocket_enabled)
         rocket_form.addRow("Stack Preset", self.rocket_preset)
         rocket_form.addRow("Payload Mass (kg)", self.rocket_payload)
-        rocket_form.addRow("Launch Lat (deg)", self.rocket_launch_lat)
-        rocket_form.addRow("Launch Lon (deg)", self.rocket_launch_lon)
-        rocket_form.addRow("Launch Alt (km)", self.rocket_launch_alt)
-        rocket_form.addRow("Launch Azimuth (deg)", self.rocket_launch_az)
+        self.rocket_initial_state_button = self._make_section_toggle_button("rocket")
+        rocket_form.addRow("Initial State", self.rocket_initial_state_button)
+        self.rocket_initial_state_container = QWidget()
+        rocket_initial_state_form = QFormLayout(self.rocket_initial_state_container)
+        rocket_initial_state_form.setContentsMargins(0, 0, 0, 0)
+        rocket_initial_state_form.addRow("Launch Lat (deg)", self.rocket_launch_lat)
+        rocket_initial_state_form.addRow("Launch Lon (deg)", self.rocket_launch_lon)
+        rocket_initial_state_form.addRow("Launch Alt (km)", self.rocket_launch_alt)
+        rocket_initial_state_form.addRow("Launch Azimuth (deg)", self.rocket_launch_az)
+        rocket_form.addRow(self.rocket_initial_state_container)
         self.rocket_guidance_combo = self._make_pointer_combo(GUIDANCE_OPTIONS["rocket"])
         self.rocket_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["rocket"])
         self.rocket_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["rocket"])
@@ -799,6 +919,9 @@ class MainWindow(QMainWindow):
         rocket_form.addRow("Attitude Control", self._make_pointer_editor_row(self.rocket_attitude_control_combo, "rocket", "attitude_control"))
         rocket_form.addRow("Mission", self._make_pointer_editor_row(self.rocket_mission_combo, "rocket", "mission"))
         layout.addWidget(rocket_box, 0, 2)
+        self._set_initial_state_section_visible("target", False)
+        self._set_initial_state_section_visible("chaser", False)
+        self._set_initial_state_section_visible("rocket", False)
         return tab
 
     def _build_outputs_tab(self) -> QWidget:
@@ -812,7 +935,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.outputs_stack, 1)
 
         single_run_page = QWidget()
-        single_run_layout = QFormLayout(single_run_page)
+        single_run_layout = QVBoxLayout(single_run_page)
+        single_run_layout.setContentsMargins(0, 0, 0, 0)
+        single_run_layout.setSpacing(8)
         self.stats_enabled = QCheckBox("Enable Stats")
         self.stats_print_summary = QCheckBox("Print Summary")
         self.stats_save_json = QCheckBox("Save JSON")
@@ -821,7 +946,6 @@ class MainWindow(QMainWindow):
         self.plots_dpi = QSpinBox()
         self.plots_dpi.setRange(50, 2000)
         self.reference_object_edit = QLineEdit()
-        self.animations_enabled = QCheckBox("Enable Animations")
         self.figure_id_checks: dict[str, QCheckBox] = {}
         figure_ids_widget = QWidget()
         figure_ids_layout = QGridLayout(figure_ids_widget)
@@ -830,6 +954,29 @@ class MainWindow(QMainWindow):
             check = QCheckBox(figure_id)
             self.figure_id_checks[figure_id] = check
             figure_ids_layout.addWidget(check, idx // 3, idx % 3)
+        figure_ids_scroll = QScrollArea()
+        figure_ids_scroll.setWidgetResizable(True)
+        figure_ids_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        figure_ids_scroll.setWidget(figure_ids_widget)
+        figure_ids_scroll.setMaximumHeight(140)
+        figure_ids_panel = QWidget()
+        figure_ids_panel_layout = QVBoxLayout(figure_ids_panel)
+        figure_ids_panel_layout.setContentsMargins(0, 0, 0, 0)
+        figure_ids_panel_layout.setSpacing(4)
+        figure_ids_header = QHBoxLayout()
+        figure_ids_header.setContentsMargins(0, 0, 0, 0)
+        figure_ids_header.addWidget(QLabel("Figure IDs"))
+        figure_ids_header.addStretch(1)
+        plot_dpi_widget = QWidget()
+        plot_dpi_layout = QVBoxLayout(plot_dpi_widget)
+        plot_dpi_layout.setContentsMargins(0, 0, 0, 0)
+        plot_dpi_layout.setSpacing(4)
+        plot_dpi_layout.addWidget(QLabel("Plot DPI"))
+        plot_dpi_layout.addWidget(self.plots_dpi)
+        plot_dpi_layout.addStretch(1)
+        figure_ids_header.addWidget(plot_dpi_widget)
+        figure_ids_panel_layout.addLayout(figure_ids_header)
+        figure_ids_panel_layout.addWidget(figure_ids_scroll, 1)
         self.animation_type_checks: dict[str, QCheckBox] = {}
         animation_types_widget = QWidget()
         animation_types_layout = QGridLayout(animation_types_widget)
@@ -838,16 +985,33 @@ class MainWindow(QMainWindow):
             check = QCheckBox(anim_type)
             self.animation_type_checks[anim_type] = check
             animation_types_layout.addWidget(check, idx // 2, idx % 2)
-        single_run_layout.addRow(self.stats_enabled)
-        single_run_layout.addRow(self.stats_print_summary)
-        single_run_layout.addRow(self.stats_save_json)
-        single_run_layout.addRow(self.stats_save_csv)
-        single_run_layout.addRow(self.plots_enabled)
-        single_run_layout.addRow("Plot DPI", self.plots_dpi)
-        single_run_layout.addRow("Figure IDs", figure_ids_widget)
-        single_run_layout.addRow("RIC Reference Object", self.reference_object_edit)
-        single_run_layout.addRow(self.animations_enabled)
-        single_run_layout.addRow("Animation Types", animation_types_widget)
+        animation_types_scroll = QScrollArea()
+        animation_types_scroll.setWidgetResizable(True)
+        animation_types_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        animation_types_scroll.setWidget(animation_types_widget)
+        animation_types_scroll.setMaximumHeight(100)
+        left_controls = QWidget()
+        left_controls_layout = QVBoxLayout(left_controls)
+        left_controls_layout.setContentsMargins(0, 0, 0, 0)
+        left_controls_layout.setSpacing(4)
+        left_controls_layout.addWidget(self.stats_enabled)
+        left_controls_layout.addWidget(self.stats_print_summary)
+        left_controls_layout.addWidget(self.stats_save_json)
+        left_controls_layout.addWidget(self.stats_save_csv)
+        left_controls_layout.addWidget(self.plots_enabled)
+        left_controls_layout.addWidget(figure_ids_panel)
+        single_run_layout.addWidget(left_controls, 0, Qt.AlignTop)
+
+        lower_fields = QWidget()
+        lower_fields_layout = QVBoxLayout(lower_fields)
+        lower_fields_layout.setContentsMargins(0, 0, 0, 0)
+        lower_fields_layout.setSpacing(6)
+        lower_fields_layout.addWidget(QLabel("RIC Reference Object"))
+        lower_fields_layout.addWidget(self.reference_object_edit, 0, Qt.AlignLeft)
+        lower_fields_layout.addWidget(QLabel("Animation Types"))
+        lower_fields_layout.addWidget(animation_types_scroll, 0, Qt.AlignLeft)
+        single_run_layout.addWidget(lower_fields, 0, Qt.AlignLeft)
+        single_run_layout.addStretch(1)
         self.outputs_stack.addWidget(single_run_page)
 
         mc_page = QWidget()
@@ -903,11 +1067,6 @@ class MainWindow(QMainWindow):
     def _build_results_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        self.command_label = QLabel("")
-        self.command_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.command_label.setWordWrap(True)
-        layout.addWidget(QLabel("Run"))
-        layout.addWidget(self.command_label)
 
         self.results_tabs = QTabWidget()
         layout.addWidget(self.results_tabs, 1)
@@ -1000,6 +1159,12 @@ class MainWindow(QMainWindow):
         combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         combo.setMaximumWidth(126)
 
+    def _make_section_toggle_button(self, object_key: str) -> QPushButton:
+        button = QPushButton("+")
+        button.setFixedWidth(28)
+        button.clicked.connect(lambda: self._toggle_initial_state_section(object_key))
+        return button
+
     def _make_pointer_editor_row(self, combo: QComboBox, object_key: str, pointer_kind: str) -> QWidget:
         row = QWidget()
         row_layout = QHBoxLayout(row)
@@ -1070,6 +1235,13 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No pointer selected for parameter editing.", 5000)
             return
         params = dict(pointer.get("params", {}) or {})
+        if self._edit_pointer_params_structured(pointer, combo, object_key, pointer_kind):
+            self._on_mc_catalog_source_changed()
+            return
+        self._edit_pointer_params_yaml(pointer, combo, object_key, pointer_kind, params)
+        self._on_mc_catalog_source_changed()
+
+    def _edit_pointer_params_yaml(self, pointer: dict, combo: QComboBox, object_key: str, pointer_kind: str, params: dict) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Edit Params: {object_key}.{pointer_kind}")
         dialog.resize(520, 420)
@@ -1101,12 +1273,161 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._show_error("Invalid Params YAML", str(exc))
             return
-        self._on_mc_catalog_source_changed()
 
     def _on_mc_catalog_source_changed(self) -> None:
         self._rebuild_mc_category_combo()
         self._refresh_mc_parameter_options()
         self._refresh_mc_variations_list()
+
+    def _pointer_form_schema(self, pointer: dict) -> list[dict] | None:
+        class_name = str(pointer.get("class_name", "") or "")
+        return PARAMETER_FORM_SCHEMAS.get(class_name)
+
+    def _pointer_display_name(self, pointer: dict) -> str:
+        return f"{pointer.get('module', '')}.{pointer.get('class_name', '') or pointer.get('function', '')}".strip(".")
+
+    def _default_params_for_pointer(self, pointer: dict) -> dict:
+        module_name = str(pointer.get("module", "") or "")
+        class_name = str(pointer.get("class_name", "") or "")
+        if not module_name or not class_name:
+            return {}
+        try:
+            module = importlib.import_module(module_name)
+            cls = getattr(module, class_name)
+            instance = cls()
+            return copy.deepcopy(getattr(instance, "__dict__", {}) or {})
+        except Exception:
+            return {}
+
+    def _normalize_form_value(self, field_spec: dict, params: dict, defaults: dict) -> object:
+        key = field_spec["key"]
+        if key in params:
+            return params.get(key)
+        return defaults.get(key)
+
+    def _format_vector_text(self, value: object, length: int | None = None) -> str:
+        if value is None:
+            values = [0.0] * int(length or 0)
+        else:
+            values = list(value) if isinstance(value, (list, tuple)) else [value]
+        if length is not None and len(values) < length:
+            values = values + [0.0] * (length - len(values))
+        return ", ".join(str(v) for v in values)
+
+    def _parse_vector_text(self, text: str, length: int | None = None) -> list[float]:
+        raw = text.strip()
+        if not raw:
+            values: list[float] = [0.0] * int(length or 0)
+        else:
+            parsed = yaml.safe_load(f"[{raw}]") if "[" not in raw else yaml.safe_load(raw)
+            if not isinstance(parsed, list):
+                raise ValueError("Vector values must be a comma-separated list.")
+            values = [float(v) for v in parsed]
+        if length is not None and len(values) != length:
+            raise ValueError(f"Expected {length} values.")
+        return values
+
+    def _edit_pointer_params_structured(self, pointer: dict, combo: QComboBox, object_key: str, pointer_kind: str) -> bool:
+        schema = self._pointer_form_schema(pointer)
+        if not schema:
+            return False
+        params = dict(pointer.get("params", {}) or {})
+        defaults = self._default_params_for_pointer(pointer)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Edit Params: {object_key}.{pointer_kind}")
+        dialog.resize(560, 480)
+        layout = QVBoxLayout(dialog)
+        header = QLabel(self._pointer_display_name(pointer))
+        header.setWordWrap(True)
+        layout.addWidget(header)
+        form_widget = QWidget()
+        form = QFormLayout(form_widget)
+        form.setContentsMargins(0, 0, 0, 0)
+        editors: dict[str, QWidget] = {}
+        for field_spec in schema:
+            key = field_spec["key"]
+            kind = field_spec["kind"]
+            value = self._normalize_form_value(field_spec, params, defaults)
+            if kind == "float":
+                widget = self._make_free_spinbox()
+                widget.setValue(float(value or 0.0))
+            elif kind == "optional_float":
+                widget = QLineEdit("" if value is None else str(value))
+                widget.setPlaceholderText("Leave blank for default/None")
+            elif kind == "int":
+                widget = QSpinBox()
+                widget.setRange(-10**9, 10**9)
+                widget.setValue(int(value or 0))
+            elif kind == "bool":
+                widget = QCheckBox()
+                widget.setChecked(bool(value))
+            elif kind == "string":
+                widget = QLineEdit("" if value is None else str(value))
+            elif kind == "choice":
+                widget = QComboBox()
+                for option in field_spec.get("options", []):
+                    widget.addItem(str(option))
+                current_text = "" if value is None else str(value)
+                idx = widget.findText(current_text)
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
+                elif current_text:
+                    widget.addItem(current_text)
+                    widget.setCurrentIndex(widget.count() - 1)
+            elif kind == "vector":
+                widget = QLineEdit(self._format_vector_text(value, field_spec.get("length")))
+                widget.setPlaceholderText("comma-separated values")
+            else:
+                continue
+            editors[key] = widget
+            form.addRow(field_spec["label"], widget)
+        layout.addWidget(form_widget, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return True
+        try:
+            new_params: dict[str, object] = {}
+            for field_spec in schema:
+                key = field_spec["key"]
+                kind = field_spec["kind"]
+                widget = editors[key]
+                if kind == "float":
+                    new_params[key] = float(widget.value())  # type: ignore[attr-defined]
+                elif kind == "optional_float":
+                    raw = widget.text().strip()  # type: ignore[attr-defined]
+                    new_params[key] = None if not raw else float(raw)
+                elif kind == "int":
+                    new_params[key] = int(widget.value())  # type: ignore[attr-defined]
+                elif kind == "bool":
+                    new_params[key] = bool(widget.isChecked())  # type: ignore[attr-defined]
+                elif kind == "string":
+                    raw = widget.text().strip()  # type: ignore[attr-defined]
+                    new_params[key] = raw or None
+                elif kind == "choice":
+                    new_params[key] = widget.currentText()  # type: ignore[attr-defined]
+                elif kind == "vector":
+                    new_params[key] = self._parse_vector_text(widget.text(), field_spec.get("length"))  # type: ignore[attr-defined]
+            pointer["params"] = new_params
+            current_index = combo.currentIndex()
+            combo.setItemData(current_index, pointer)
+            self._mark_dirty()
+            self.statusBar().showMessage(f"Updated params for {object_key}.{pointer_kind}.", 5000)
+        except Exception as exc:
+            self._show_error("Invalid Params", str(exc))
+        return True
+
+    def _set_initial_state_section_visible(self, object_key: str, visible: bool) -> None:
+        container = getattr(self, f"{object_key}_initial_state_container")
+        button = getattr(self, f"{object_key}_initial_state_button")
+        container.setVisible(bool(visible))
+        button.setText("-" if visible else "+")
+
+    def _toggle_initial_state_section(self, object_key: str) -> None:
+        container = getattr(self, f"{object_key}_initial_state_container")
+        self._set_initial_state_section_visible(object_key, not container.isVisible())
 
     def _rebuild_mc_category_combo(self) -> None:
         current_text = self.mc_category_combo.currentText() if hasattr(self, "mc_category_combo") else ""
@@ -1131,11 +1452,9 @@ class MainWindow(QMainWindow):
             cfg = copy.deepcopy(self.current_config)
         options: list[tuple[str, str]] = []
         pointer_paths = [
-            ("target", "guidance", cfg.get("target", {}).get("guidance")),
             ("target", "orbit_control", cfg.get("target", {}).get("orbit_control")),
             ("target", "attitude_control", cfg.get("target", {}).get("attitude_control")),
             ("target", "mission_objectives[0]", (cfg.get("target", {}).get("mission_objectives") or [None])[0]),
-            ("chaser", "guidance", cfg.get("chaser", {}).get("guidance")),
             ("chaser", "orbit_control", cfg.get("chaser", {}).get("orbit_control")),
             ("chaser", "attitude_control", cfg.get("chaser", {}).get("attitude_control")),
             ("chaser", "mission_objectives[0]", (cfg.get("chaser", {}).get("mission_objectives") or [None])[0]),
@@ -1433,7 +1752,6 @@ class MainWindow(QMainWindow):
         self.target_raan.setValue(float(target_coes.get("raan_deg", 0.0) or 0.0))
         self.target_argp.setValue(float(target_coes.get("argp_deg", 0.0) or 0.0))
         self.target_ta.setValue(float(target_coes.get("true_anomaly_deg", 0.0) or 0.0))
-        self._set_pointer_combo_value(self.target_guidance_combo, dict(target.get("guidance", {}) or {}) if target.get("guidance") else None)
         self._set_pointer_combo_value(self.target_orbit_control_combo, dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
         self._set_pointer_combo_value(self.target_attitude_control_combo, dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
         target_mission = list(target.get("mission_objectives", []) or [])
@@ -1456,7 +1774,6 @@ class MainWindow(QMainWindow):
         self.chaser_deploy_time.setValue(float(chaser_init.get("deploy_time_s", 900.0) or 0.0))
         for i, widget in enumerate(self.chaser_init_values):
             widget.setValue(float(values[i] if i < len(values) else 0.0))
-        self._set_pointer_combo_value(self.chaser_guidance_combo, dict(chaser.get("guidance", {}) or {}) if chaser.get("guidance") else None)
         self._set_pointer_combo_value(self.chaser_orbit_control_combo, dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
         self._set_pointer_combo_value(self.chaser_attitude_control_combo, dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
         chaser_mission = list(chaser.get("mission_objectives", []) or [])
@@ -1493,7 +1810,6 @@ class MainWindow(QMainWindow):
             if figure_id in self.figure_id_checks:
                 self.figure_id_checks[figure_id].setChecked(True)
         self.reference_object_edit.setText(str(plots.get("reference_object_id", "") or ""))
-        self.animations_enabled.setChecked(bool(animations.get("enabled", False)))
         for check in self.animation_type_checks.values():
             check.setChecked(False)
         for anim_type in list(animations.get("types", []) or []):
@@ -1570,7 +1886,7 @@ class MainWindow(QMainWindow):
             "argp_deg": float(self.target_argp.value()),
             "true_anomaly_deg": float(self.target_ta.value()),
         }
-        target["guidance"] = self._combo_pointer_value(self.target_guidance_combo, existing=dict(target.get("guidance", {}) or {}) if target.get("guidance") else None)
+        target.pop("guidance", None)
         target["orbit_control"] = self._combo_pointer_value(self.target_orbit_control_combo, existing=dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
         target["attitude_control"] = self._combo_pointer_value(self.target_attitude_control_combo, existing=dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
         target_mission_pointer = self._combo_pointer_value(self.target_mission_combo, existing=dict((target.get("mission_objectives", []) or [{}])[0] or {}) if target.get("mission_objectives") else None)
@@ -1588,7 +1904,7 @@ class MainWindow(QMainWindow):
         else:
             chaser_initial_state[init_mode] = [float(widget.value()) for widget in self.chaser_init_values]
         chaser["initial_state"] = chaser_initial_state
-        chaser["guidance"] = self._combo_pointer_value(self.chaser_guidance_combo, existing=dict(chaser.get("guidance", {}) or {}) if chaser.get("guidance") else None)
+        chaser.pop("guidance", None)
         chaser["orbit_control"] = self._combo_pointer_value(self.chaser_orbit_control_combo, existing=dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
         chaser["attitude_control"] = self._combo_pointer_value(self.chaser_attitude_control_combo, existing=dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
         chaser_mission_pointer = self._combo_pointer_value(self.chaser_mission_combo, existing=dict((chaser.get("mission_objectives", []) or [{}])[0] or {}) if chaser.get("mission_objectives") else None)
@@ -1626,8 +1942,9 @@ class MainWindow(QMainWindow):
             plots["reference_object_id"] = ref_obj
         else:
             plots.pop("reference_object_id", None)
-        animations["enabled"] = bool(self.animations_enabled.isChecked())
-        animations["types"] = [anim_type for anim_type, check in self.animation_type_checks.items() if check.isChecked()]
+        animation_types = [anim_type for anim_type, check in self.animation_type_checks.items() if check.isChecked()]
+        animations["enabled"] = bool(animation_types)
+        animations["types"] = animation_types
         mc_outputs["save_iteration_summaries"] = bool(self.mc_save_iteration_summaries.isChecked())
         mc_outputs["save_aggregate_summary"] = bool(self.mc_save_aggregate_summary.isChecked())
         mc_outputs["save_histograms"] = bool(self.mc_save_histograms.isChecked())
@@ -1970,10 +2287,6 @@ class MainWindow(QMainWindow):
             if str(cfg_dict.get("outputs", {}).get("mode", "")).strip().lower() == "interactive":
                 run_config_path = self._build_preview_run_config(cfg_dict, save_path)
             cmd = build_cli_run_command(run_config_path)
-            scenario_name = str(cfg_dict.get("scenario_name", "") or save_path.stem)
-            mode_name = "Monte Carlo" if bool(cfg_dict.get("monte_carlo", {}).get("enabled", False)) else "Single Run"
-            self.command_label.setText(f"{scenario_name} | {mode_name}")
-            self.command_label.setToolTip(" ".join(cmd))
             self.console.clear()
             self.output_files.clear()
             self.process = QProcess(self)
@@ -2196,12 +2509,18 @@ class MainWindow(QMainWindow):
             self.validation_panel.setPlainText("")
             self.validation_panel.hide()
             self.validation_toggle.setText("Show Details")
+            self._collapse_validation_on_startup = False
             return
         if valid:
             self.validation_label.setText(f"Config valid with {len(issues)} warning(s).")
         else:
             self.validation_label.setText("Config invalid.")
         self.validation_panel.setPlainText("\n".join(issues))
+        if self._collapse_validation_on_startup:
+            self.validation_panel.hide()
+            self.validation_toggle.setText("Show Details")
+            self._collapse_validation_on_startup = False
+            return
         self.validation_panel.show()
         self.validation_toggle.setText("Hide Details")
 

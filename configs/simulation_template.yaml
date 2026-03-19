@@ -87,11 +87,6 @@ chaser:
     #   state: [2.0, -8.0, 1.2, 0.0008, -0.0012, 0.0004]  # [R,I,C,dR,dI,dC] (km, km/s)
     attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
     angular_rate_body_rad_s: [0.0, 0.0, 0.0]
-  guidance:
-    kind: "python"
-    module: "sim.control.orbit.zero_controller"
-    class_name: "ZeroController"
-    params: {}
   orbit_control:
     kind: "python"
     module: "sim.control.orbit.lqr"
@@ -162,11 +157,6 @@ target:
       true_anomaly_deg: 0.0
     attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
     angular_rate_body_rad_s: [0.0, 0.0, 0.0]
-  guidance:
-    kind: "python"
-    module: "sim.control.orbit.zero_controller"
-    class_name: "ZeroController"
-    params: {}
   orbit_control:
     kind: "python"
     module: "sim.control.orbit.zero_controller"

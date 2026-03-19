@@ -140,6 +140,11 @@ def _parse_agent_section(value: Any, role: str) -> AgentSection:
     objectives = d.get("mission_objectives", []) or []
     if not isinstance(objectives, list):
         raise ValueError(f"Section '{role}.mission_objectives' must be a list.")
+    if role != "rocket" and d.get("guidance") is not None:
+        raise ValueError(
+            f"Section '{role}.guidance' is no longer supported. "
+            "Use mission_objectives for mission logic and orbit_control/attitude_control for controllers."
+        )
     default_enabled_by_role = {
         "rocket": False,
         "chaser": False,

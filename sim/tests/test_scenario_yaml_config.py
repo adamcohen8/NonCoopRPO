@@ -68,6 +68,22 @@ class TestScenarioYamlConfig(unittest.TestCase):
         self.assertFalse(cfg.chaser.enabled)
         self.assertTrue(cfg.target.enabled)
 
+    def test_satellite_guidance_field_is_rejected(self):
+        with self.assertRaises(ValueError):
+            scenario_config_from_dict(
+                {
+                    "scenario_name": "stale_guidance",
+                    "chaser": {
+                        "enabled": True,
+                        "guidance": {
+                            "module": "sim.control.orbit.zero_controller",
+                            "class_name": "ZeroController",
+                        },
+                    },
+                    "simulator": {"duration_s": 10.0, "dt_s": 1.0},
+                }
+            )
+
     def test_simulator_nested_defaults_are_preserved(self):
         cfg = scenario_config_from_dict(
             {

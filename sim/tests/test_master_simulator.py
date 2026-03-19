@@ -365,9 +365,6 @@ chaser:
     relative_to_target_ric:
       frame: "curv"
       state: [0.0, -3.0, 0.0, 0.0, 0.0, 0.0]
-  guidance:
-    module: "sim.control.orbit.zero_controller"
-    class_name: "ZeroController"
   orbit_control:
     module: "sim.control.orbit.lqr"
     class_name: "HCWLQRController"
@@ -394,9 +391,6 @@ target:
       raan_deg: 0.0
       argp_deg: 0.0
       true_anomaly_deg: 0.0
-  guidance:
-    module: "sim.control.orbit.zero_controller"
-    class_name: "ZeroController"
   orbit_control:
     module: "sim.control.orbit.zero_controller"
     class_name: "ZeroController"

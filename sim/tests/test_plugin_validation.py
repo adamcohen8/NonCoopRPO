@@ -23,7 +23,6 @@ class TestPluginValidation(unittest.TestCase):
                 },
                 "chaser": {
                     "enabled": True,
-                    "guidance": {"module": "sim.control.orbit.zero_controller", "class_name": "ZeroController", "params": {}},
                     "orbit_control": {"module": "sim.control.orbit.zero_controller", "class_name": "ZeroController", "params": {}},
                     "attitude_control": {
                         "module": "sim.control.attitude.zero_torque",
@@ -37,6 +36,24 @@ class TestPluginValidation(unittest.TestCase):
         )
         errs = validate_scenario_plugins(cfg)
         self.assertEqual(errs, [])
+
+    def test_satellite_guidance_is_rejected_at_parse_time(self):
+        with self.assertRaises(ValueError):
+            scenario_config_from_dict(
+                {
+                    "rocket": {"enabled": False},
+                    "chaser": {
+                        "enabled": True,
+                        "guidance": {
+                            "module": "sim.control.orbit.zero_controller",
+                            "class_name": "ZeroController",
+                            "params": {},
+                        },
+                    },
+                    "target": {"enabled": False},
+                    "simulator": {"duration_s": 20.0, "dt_s": 1.0},
+                }
+            )
 
     def test_invalid_plugins_fail(self):
         cfg = scenario_config_from_dict(

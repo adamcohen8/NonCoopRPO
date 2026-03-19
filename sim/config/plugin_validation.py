@@ -14,7 +14,6 @@ class PluginContract:
 
 _CONTRACTS = {
     "guidance": PluginContract(methods_all=("command",), allow_function=False),
-    "guidance_generic": PluginContract(methods_all=(), methods_any=("command", "act"), allow_function=False),
     "orbit_control": PluginContract(methods_all=("act",), allow_function=False),
     "attitude_control": PluginContract(methods_all=("act",), allow_function=False),
     "bridge": PluginContract(methods_all=(), methods_any=("step", "start", "send_command", "receive_command"), allow_function=True),
@@ -95,7 +94,6 @@ def validate_scenario_plugins(cfg: Any) -> list[str]:
 
     # Chaser
     if getattr(cfg.chaser, "enabled", False):
-        errs.extend(_validate_pointer(getattr(cfg.chaser, "guidance", None), _CONTRACTS["guidance_generic"], "chaser.guidance"))
         errs.extend(
             _validate_pointer(getattr(cfg.chaser, "orbit_control", None), _CONTRACTS["orbit_control"], "chaser.orbit_control")
         )
@@ -112,7 +110,6 @@ def validate_scenario_plugins(cfg: Any) -> list[str]:
 
     # Target
     if getattr(cfg.target, "enabled", False):
-        errs.extend(_validate_pointer(getattr(cfg.target, "guidance", None), _CONTRACTS["guidance_generic"], "target.guidance"))
         errs.extend(
             _validate_pointer(getattr(cfg.target, "orbit_control", None), _CONTRACTS["orbit_control"], "target.orbit_control")
         )

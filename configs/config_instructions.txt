@@ -30,7 +30,7 @@ Top-Level Sections
 - monte_carlo: Optional campaign settings and parameter variations.
 
 Algorithm Pointer Format
-- Any guidance/orbit_control/attitude_control/mission_objectives entry can use:
+- Any rocket.guidance/orbit_control/attitude_control/mission_objectives entry can use:
   kind: "python"
   module: "python.module.path"
   class_name: "ClassName"
@@ -40,7 +40,7 @@ Algorithm Pointer Format
     key: value
 
 Notes:
-- Use module + class_name for class-based controllers/guidance.
+- Use module + class_name for class-based controllers, rocket guidance, or mission modules.
 - Use module + function for function-based handlers.
 - params is a freeform dict passed later by scenario wiring code.
 
@@ -158,7 +158,7 @@ Agent Sections (rocket/chaser/target)
       - this is target-centered (chaser wrt target).
       - when present, this relative initialization overrides chaser absolute ECI/COE startup state
         (except rocket_deployment mode).
-- guidance: rocket guidance or agent-level guidance pointer
+- guidance: rocket guidance pointer only
 - orbit_control: orbit controller pointer
 - attitude_control: attitude controller pointer
 - mission_objectives: list of objective pointers
@@ -297,7 +297,7 @@ Plugin Contract Validation (strict mode)
 - rocket/chaser/target orbit_control: must construct and implement act(belief, t_s, budget_ms)
 - rocket/chaser/target attitude_control: must construct and implement act(...)
 - bridge (if enabled): must provide at least one of step/start/send_command/receive_command
-- mission_objective pointers: must provide a callable function or class method in {evaluate, update, check, act}
+- mission_objective pointers: runtime mission modules are executed via update(...)
 
 Important Current Scope
 - The loader validates and parses the YAML into typed config objects.
