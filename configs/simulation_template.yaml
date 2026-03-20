@@ -41,14 +41,16 @@ rocket:
     module: "sim.control.attitude.zero_torque"
     class_name: "ZeroTorqueController"
     params: {}
-  mission_objectives:
-    - kind: "python"
-      module: "sim.mission.modules"
-      class_name: "RocketMissionModule"
-      params:
-        launch_mode: "go_now"
-        orbital_goal: "pursuit"
-        target_id: "target"
+  mission_strategy:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "RocketMissionStrategy"
+    params:
+      launch_mode: "go_now"
+      orbital_goal: "pursuit"
+      target_id: "target"
+  mission_execution: null
+  mission_objectives: []
   bridge:
     enabled: false
     mode: "sil"
@@ -109,17 +111,24 @@ chaser:
       pointing_sigma_deg: 0.05
       default_dt_s: 1.0
       rng_seed: 2
-  mission_objectives:
-    - kind: "python"
-      module: "sim.mission.modules"
-      class_name: "SatelliteMissionModule"
-      params:
-        orbital_mode: "pursuit_knowledge"
-        attitude_mode: "pursuit"
-        target_id: "target"
-        max_accel_km_s2: 2.0e-6
-        boresight_body: [1.0, 0.0, 0.0]
-        use_knowledge_for_targeting: true
+  mission_strategy:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "PursuitMissionStrategy"
+    params:
+      target_id: "target"
+      use_knowledge_for_targeting: true
+      max_accel_km_s2: 2.0e-6
+      align_to_thrust: true
+  mission_execution:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "ControllerPointingExecution"
+    params:
+      thruster_direction_body: [1.0, 0.0, 0.0]
+      alignment_tolerance_deg: 10.0
+      require_attitude_alignment: true
+  mission_objectives: []
   bridge:
     enabled: false
     mode: "hil"
@@ -174,14 +183,22 @@ target:
       pointing_sigma_deg: 0.05
       default_dt_s: 1.0
       rng_seed: 3
-  mission_objectives:
-    - kind: "python"
-      module: "sim.mission.modules"
-      class_name: "SatelliteMissionModule"
-      params:
-        orbital_mode: "coast"
-        attitude_mode: "hold_eci"
-        hold_quat_bn: [1.0, 0.0, 0.0, 0.0]
+  mission_strategy:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "HoldMissionStrategy"
+    params:
+      attitude_mode: "hold_eci"
+      hold_quat_bn: [1.0, 0.0, 0.0, 0.0]
+  mission_execution:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "ControllerPointingExecution"
+    params:
+      thruster_direction_body: [1.0, 0.0, 0.0]
+      alignment_tolerance_deg: 10.0
+      require_attitude_alignment: false
+  mission_objectives: []
   bridge:
     enabled: false
     mode: "sil"

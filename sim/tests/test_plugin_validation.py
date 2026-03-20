@@ -23,6 +23,16 @@ class TestPluginValidation(unittest.TestCase):
                 },
                 "chaser": {
                     "enabled": True,
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "PursuitMissionStrategy",
+                        "params": {},
+                    },
+                    "mission_execution": {
+                        "module": "sim.mission.modules",
+                        "class_name": "ControllerPointingExecution",
+                        "params": {},
+                    },
                     "orbit_control": {"module": "sim.control.orbit.zero_controller", "class_name": "ZeroController", "params": {}},
                     "attitude_control": {
                         "module": "sim.control.attitude.zero_torque",

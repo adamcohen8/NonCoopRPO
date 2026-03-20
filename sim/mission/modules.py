@@ -11,7 +11,7 @@ from sim.control.attitude.pose_commands import PoseCommandGenerator
 from sim.core.models import Command, StateBelief, StateTruth
 from sim.dynamics.orbit.two_body import propagate_two_body_rk4
 from sim.rocket.models import RocketState, RocketVehicleConfig
-from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
+from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_state_to_eci, ric_rect_to_curv
 from sim.utils.quaternion import dcm_to_quaternion_bn, normalize_quaternion, quaternion_to_dcm_bn
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,994 @@ def _resolve_angle_tolerance_rad(rad_value: float, deg_value: float | None) -> f
     if deg_value is not None:
         return float(max(np.deg2rad(float(deg_value)), 0.0))
     return float(max(rad_value, 0.0))
+
+
+def _resolve_target_state(
+    *,
+    target_id: str | None,
+    use_knowledge_for_targeting: bool,
+    own_knowledge: dict[str, StateBelief],
+    world_truth: dict[str, StateTruth],
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if target_id is None:
+        return None
+    if use_knowledge_for_targeting and target_id in own_knowledge:
+        kb = own_knowledge[target_id]
+        if kb.state.size >= 6:
+            return np.array(kb.state[:3], dtype=float), np.array(kb.state[3:6], dtype=float)
+    tgt = world_truth.get(target_id)
+    if tgt is None:
+        return None
+    return np.array(tgt.position_eci_km, dtype=float), np.array(tgt.velocity_eci_km_s, dtype=float)
+
+
+def _set_orbit_controller_target(controller: Any | None, desired_state_eci_6: np.ndarray) -> None:
+    if controller is None:
+        return
+    x = np.array(desired_state_eci_6, dtype=float).reshape(-1)
+    if x.size != 6:
+        return
+    if hasattr(controller, "set_target_state"):
+        try:
+            controller.set_target_state(x)
+            return
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.warning("Failed to set orbit target state via set_target_state: %s", exc)
+    if hasattr(controller, "target_state"):
+        try:
+            controller.target_state = x
+            return
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.warning("Failed to set orbit target state via target_state assignment: %s", exc)
+
+
+def _apply_orbit_controller_intent(controller: Any | None, intent: dict[str, Any]) -> None:
+    if controller is None:
+        return
+    rel_rect = intent.get("desired_relative_ric_rect_6")
+    if rel_rect is not None and hasattr(controller, "target_rel_ric_rect"):
+        try:
+            controller.target_rel_ric_rect = np.array(rel_rect, dtype=float).reshape(6)
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.warning("Failed to set orbit controller relative target: %s", exc)
+    desired_eci = intent.get("desired_state_eci_6")
+    if desired_eci is not None:
+        _set_orbit_controller_target(controller, np.array(desired_eci, dtype=float).reshape(6))
+
+
+def _relative_pd_accel_eci(
+    *,
+    truth: StateTruth,
+    target_state_eci: tuple[np.ndarray, np.ndarray] | None,
+    desired_relative_ric_rect: np.ndarray,
+    kp_pos: float,
+    kd_vel: float,
+    max_accel_km_s2: float,
+) -> np.ndarray:
+    if target_state_eci is None:
+        return np.zeros(3, dtype=float)
+    x_self = np.hstack((np.array(truth.position_eci_km, dtype=float), np.array(truth.velocity_eci_km_s, dtype=float)))
+    x_tgt = np.hstack((target_state_eci[0], target_state_eci[1]))
+    rel_err = eci_relative_to_ric_rect(x_dep_eci=x_self, x_chief_eci=x_tgt) - np.array(desired_relative_ric_rect, dtype=float).reshape(6)
+    a_cmd_ric = -(float(kp_pos) * rel_err[:3] + float(kd_vel) * rel_err[3:6])
+    nrm = float(np.linalg.norm(a_cmd_ric))
+    amax = float(max(max_accel_km_s2, 0.0))
+    if nrm > amax > 0.0:
+        a_cmd_ric *= amax / nrm
+    c_ir = ric_dcm_ir_from_rv(target_state_eci[0], target_state_eci[1])
+    return c_ir @ a_cmd_ric
+
+
+def _desired_attitude_for_thrust(
+    *,
+    truth: StateTruth,
+    thrust_eci_km_s2: np.ndarray,
+    thruster_direction_body: np.ndarray,
+) -> np.ndarray:
+    q_req = OrbitalAttitudeManeuverCoordinator().maneuverer.required_attitude_for_delta_v(
+        truth=truth,
+        delta_v_eci_km_s=np.array(thrust_eci_km_s2, dtype=float),
+        thruster_direction_body=np.array(thruster_direction_body, dtype=float),
+    )
+    if q_req is None:
+        return np.array(truth.attitude_quat_bn, dtype=float)
+    return np.array(q_req, dtype=float)
+
+
+@dataclass
+class PursuitMissionStrategy:
+    target_id: str | None = None
+    use_knowledge_for_targeting: bool = True
+    max_accel_km_s2: float = 0.0
+    blind_direction_eci: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    align_to_thrust: bool = True
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        tgt = _resolve_target_state(
+            target_id=self.target_id,
+            use_knowledge_for_targeting=self.use_knowledge_for_targeting,
+            own_knowledge=own_knowledge,
+            world_truth=world_truth,
+        )
+        if tgt is None:
+            direction = _unit(np.array(self.blind_direction_eci, dtype=float))
+        else:
+            direction = _unit(tgt[0] - np.array(truth.position_eci_km, dtype=float))
+        return {
+            "strategy_name": "pursuit",
+            "target_id": self.target_id,
+            "fallback_thrust_eci_km_s2": float(max(self.max_accel_km_s2, 0.0)) * direction,
+            "align_to_thrust": bool(self.align_to_thrust),
+            "mission_mode": {"strategy": "pursuit"},
+        }
+
+
+@dataclass
+class EvadeMissionStrategy:
+    target_id: str | None = None
+    use_knowledge_for_targeting: bool = True
+    max_accel_km_s2: float = 0.0
+    blind_direction_eci: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    align_to_thrust: bool = True
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        tgt = _resolve_target_state(
+            target_id=self.target_id,
+            use_knowledge_for_targeting=self.use_knowledge_for_targeting,
+            own_knowledge=own_knowledge,
+            world_truth=world_truth,
+        )
+        if tgt is None:
+            direction = _unit(np.array(self.blind_direction_eci, dtype=float))
+        else:
+            direction = -_unit(tgt[0] - np.array(truth.position_eci_km, dtype=float))
+        return {
+            "strategy_name": "evade",
+            "target_id": self.target_id,
+            "fallback_thrust_eci_km_s2": float(max(self.max_accel_km_s2, 0.0)) * direction,
+            "align_to_thrust": bool(self.align_to_thrust),
+            "mission_mode": {"strategy": "evade"},
+        }
+
+
+@dataclass
+class HoldMissionStrategy:
+    attitude_mode: str = "hold_eci"  # hold_eci|hold_ric|sun_track|spotlight|sensing
+    target_id: str | None = None
+    use_knowledge_for_targeting: bool = True
+    hold_quat_bn: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0, 0.0], dtype=float))
+    hold_quat_br: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0, 0.0], dtype=float))
+    boresight_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    spotlight_lat_deg: float = 0.0
+    spotlight_lon_deg: float = 0.0
+    spotlight_alt_km: float = 0.0
+    spotlight_ric_direction: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        env: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        mode = str(self.attitude_mode).lower()
+        if mode == "hold_eci":
+            q_cmd = normalize_quaternion(np.array(self.hold_quat_bn, dtype=float))
+        elif mode == "hold_ric":
+            c_ir = ric_dcm_ir_from_rv(truth.position_eci_km, truth.velocity_eci_km_s)
+            c_br = quaternion_to_dcm_bn(np.array(self.hold_quat_br, dtype=float))
+            q_cmd = dcm_to_quaternion_bn(c_br @ c_ir.T)
+        elif mode == "sun_track":
+            sun_dir = np.array(env.get("sun_dir_eci", np.array([1.0, 0.0, 0.0])), dtype=float)
+            q_cmd = PoseCommandGenerator.sun_track(
+                truth=truth,
+                sun_dir_eci=sun_dir,
+                panel_normal_body=np.array(self.boresight_body, dtype=float),
+            )
+        elif mode == "spotlight":
+            q_cmd = PoseCommandGenerator.spotlight_latlon(
+                truth=truth,
+                latitude_deg=float(self.spotlight_lat_deg),
+                longitude_deg=float(self.spotlight_lon_deg),
+                altitude_km=float(self.spotlight_alt_km),
+                boresight_body=np.array(self.boresight_body, dtype=float),
+            )
+        elif mode == "sensing":
+            q_cmd = PoseCommandGenerator.spotlight_ric_direction(
+                truth=truth,
+                ric_direction=np.array(self.spotlight_ric_direction, dtype=float),
+                boresight_body=np.array(self.boresight_body, dtype=float),
+            )
+        else:
+            tgt = _resolve_target_state(
+                target_id=self.target_id,
+                use_knowledge_for_targeting=self.use_knowledge_for_targeting,
+                own_knowledge=own_knowledge,
+                world_truth=world_truth,
+            )
+            if tgt is None:
+                q_cmd = normalize_quaternion(np.array(truth.attitude_quat_bn, dtype=float))
+            else:
+                q_cmd = PoseCommandGenerator.sun_track(
+                    truth=truth,
+                    sun_dir_eci=_unit(tgt[0] - np.array(truth.position_eci_km, dtype=float)),
+                    panel_normal_body=np.array(self.boresight_body, dtype=float),
+                )
+        return {
+            "strategy_name": "hold",
+            "desired_attitude_quat_bn": np.array(q_cmd, dtype=float),
+            "mission_mode": {"strategy": "hold", "attitude": self.attitude_mode},
+        }
+
+
+@dataclass
+class StationKeepMissionStrategy:
+    target_id: str | None = None
+    use_knowledge_for_targeting: bool = True
+    desired_relative_ric_rect: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=float))
+    kp_pos: float = 1.0e-5
+    kd_vel: float = 5.0e-4
+    max_accel_km_s2: float = 5.0e-5
+    align_to_thrust: bool = True
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        desired_rel = np.array(self.desired_relative_ric_rect, dtype=float).reshape(6)
+        tgt = _resolve_target_state(
+            target_id=self.target_id,
+            use_knowledge_for_targeting=self.use_knowledge_for_targeting,
+            own_knowledge=own_knowledge,
+            world_truth=world_truth,
+        )
+        desired_state_eci = None
+        fallback_accel = np.zeros(3, dtype=float)
+        if tgt is not None:
+            desired_state_eci = ric_rect_state_to_eci(desired_rel, tgt[0], tgt[1])
+            fallback_accel = _relative_pd_accel_eci(
+                truth=truth,
+                target_state_eci=tgt,
+                desired_relative_ric_rect=desired_rel,
+                kp_pos=float(self.kp_pos),
+                kd_vel=float(self.kd_vel),
+                max_accel_km_s2=float(self.max_accel_km_s2),
+            )
+        return {
+            "strategy_name": "stationkeep",
+            "target_id": self.target_id,
+            "use_knowledge_for_targeting": bool(self.use_knowledge_for_targeting),
+            "desired_relative_ric_rect_6": desired_rel,
+            "desired_state_eci_6": desired_state_eci,
+            "fallback_thrust_eci_km_s2": fallback_accel,
+            "align_to_thrust": bool(self.align_to_thrust),
+            "mission_mode": {"strategy": "stationkeep"},
+        }
+
+
+@dataclass
+class InspectMissionStrategy:
+    target_id: str | None = None
+    use_knowledge_for_targeting: bool = True
+    desired_relative_ric_rect: np.ndarray = field(default_factory=lambda: np.array([0.0, -1.0, 0.0, 0.0, 0.0, 0.0], dtype=float))
+    boresight_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    kp_pos: float = 1.0e-5
+    kd_vel: float = 5.0e-4
+    max_accel_km_s2: float = 5.0e-5
+    align_to_thrust: bool = True
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        desired_rel = np.array(self.desired_relative_ric_rect, dtype=float).reshape(6)
+        tgt = _resolve_target_state(
+            target_id=self.target_id,
+            use_knowledge_for_targeting=self.use_knowledge_for_targeting,
+            own_knowledge=own_knowledge,
+            world_truth=world_truth,
+        )
+        desired_state_eci = None
+        desired_attitude = np.array(truth.attitude_quat_bn, dtype=float)
+        fallback_accel = np.zeros(3, dtype=float)
+        if tgt is not None:
+            desired_state_eci = ric_rect_state_to_eci(desired_rel, tgt[0], tgt[1])
+            fallback_accel = _relative_pd_accel_eci(
+                truth=truth,
+                target_state_eci=tgt,
+                desired_relative_ric_rect=desired_rel,
+                kp_pos=float(self.kp_pos),
+                kd_vel=float(self.kd_vel),
+                max_accel_km_s2=float(self.max_accel_km_s2),
+            )
+            los_eci = _unit(tgt[0] - np.array(truth.position_eci_km, dtype=float))
+            if float(np.linalg.norm(los_eci)) > 0.0:
+                desired_attitude = PoseCommandGenerator.sun_track(
+                    truth=truth,
+                    sun_dir_eci=los_eci,
+                    panel_normal_body=np.array(self.boresight_body, dtype=float),
+                )
+        return {
+            "strategy_name": "inspect",
+            "target_id": self.target_id,
+            "use_knowledge_for_targeting": bool(self.use_knowledge_for_targeting),
+            "desired_relative_ric_rect_6": desired_rel,
+            "desired_state_eci_6": desired_state_eci,
+            "desired_attitude_quat_bn": np.array(desired_attitude, dtype=float),
+            "fallback_thrust_eci_km_s2": fallback_accel,
+            "align_to_thrust": bool(self.align_to_thrust),
+            "mission_mode": {"strategy": "inspect"},
+        }
+
+
+@dataclass
+class SafeHoldMissionStrategy:
+    attitude_mode: str = "hold_current"  # hold_current|hold_eci|sun_track
+    hold_quat_bn: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0, 0.0], dtype=float))
+    boresight_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        env: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        mode = str(self.attitude_mode).lower()
+        if mode == "hold_eci":
+            q_cmd = normalize_quaternion(np.array(self.hold_quat_bn, dtype=float))
+        elif mode == "sun_track":
+            sun_dir = np.array(env.get("sun_dir_eci", np.array([1.0, 0.0, 0.0])), dtype=float)
+            q_cmd = PoseCommandGenerator.sun_track(
+                truth=truth,
+                sun_dir_eci=sun_dir,
+                panel_normal_body=np.array(self.boresight_body, dtype=float),
+            )
+        else:
+            q_cmd = normalize_quaternion(np.array(truth.attitude_quat_bn, dtype=float))
+        return {
+            "strategy_name": "safe_hold",
+            "desired_attitude_quat_bn": np.array(q_cmd, dtype=float),
+            "fallback_thrust_eci_km_s2": np.zeros(3, dtype=float),
+            "command_torque_body_nm": np.zeros(3, dtype=float),
+            "mission_mode": {"strategy": "safe_hold", "attitude": mode},
+        }
+
+
+@dataclass
+class RocketMissionStrategy:
+    launch_mode: str = "go_now"  # go_now|go_when_possible|wait_optimal_window
+    orbital_goal: str = "pursuit"  # pursuit|predefined_orbit
+    target_id: str | None = None
+    go_when_possible_margin_m_s: float = 0.0
+    window_period_s: float = 5400.0
+    window_open_duration_s: float = 300.0
+    predef_target_alt_km: float = 400.0
+    predef_target_ecc: float = 0.02
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        world_truth: dict[str, StateTruth],
+        t_s: float,
+        rocket_state: RocketState | None = None,
+        rocket_vehicle_cfg: RocketVehicleConfig | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        launch_authorized = True
+        if self.launch_mode == "wait_optimal_window":
+            period = max(float(self.window_period_s), 1.0)
+            open_dt = float(np.clip(self.window_open_duration_s, 0.0, period))
+            launch_authorized = (float(t_s) % period) <= open_dt
+        elif self.launch_mode == "go_when_possible":
+            target_truth = world_truth.get(self.target_id) if self.target_id else None
+            dv_needed = _estimate_needed_delta_v_m_s(truth, target_truth)
+            dv_avail = _estimate_stack_delta_v_m_s(rocket_state, rocket_vehicle_cfg) if (rocket_state is not None and rocket_vehicle_cfg is not None) else np.inf
+            launch_authorized = bool(np.isfinite(dv_avail) and dv_avail >= (dv_needed + float(self.go_when_possible_margin_m_s)))
+
+        out: dict[str, Any] = {
+            "strategy_name": "rocket_launch",
+            "launch_authorized": bool(launch_authorized),
+            "mission_mode": {"strategy": "rocket_launch", "orbital_goal": self.orbital_goal},
+        }
+        if self.orbital_goal == "predefined_orbit":
+            out["predefined_orbit_goal"] = {
+                "target_alt_km": float(self.predef_target_alt_km),
+                "target_ecc": float(self.predef_target_ecc),
+            }
+        return out
+
+
+@dataclass
+class ControllerPointingExecution:
+    align_thruster_to_thrust: bool = True
+    thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    require_attitude_alignment: bool = True
+    alignment_tolerance_rad: float = np.deg2rad(5.0)
+    alignment_tolerance_deg: float | None = None
+    use_strategy_fallback_thrust: bool = True
+    detumble_enter_rate_rad_s: float | None = None
+    detumble_exit_rate_rad_s: float | None = None
+    detumble_mode_name: str = "detumble"
+    nominal_mode_name: str = "nominal"
+    _detumble_latched: bool = False
+
+    def _maybe_update_mode(self, truth: StateTruth, att_belief: StateBelief | None, attitude_controller: Any | None) -> None:
+        if self.detumble_enter_rate_rad_s is None or attitude_controller is None or not hasattr(attitude_controller, "set_mode"):
+            return
+        if att_belief is not None and att_belief.state.size >= 13:
+            w = np.array(att_belief.state[10:13], dtype=float)
+        else:
+            w = np.array(truth.angular_rate_body_rad_s, dtype=float)
+        w_norm = float(np.linalg.norm(w))
+        enter = float(max(self.detumble_enter_rate_rad_s, 0.0))
+        exit_rate = float(max(self.detumble_exit_rate_rad_s if self.detumble_exit_rate_rad_s is not None else enter, 0.0))
+        if self._detumble_latched:
+            if w_norm <= exit_rate:
+                self._detumble_latched = False
+        elif w_norm >= enter:
+            self._detumble_latched = True
+        mode = self.detumble_mode_name if self._detumble_latched else self.nominal_mode_name
+        try:
+            attitude_controller.set_mode(mode)
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.warning("Unable to set attitude controller mode '%s': %s", mode, exc)
+
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        truth: StateTruth,
+        t_s: float,
+        orbit_controller: Any | None = None,
+        attitude_controller: Any | None = None,
+        orb_belief: StateBelief | None = None,
+        att_belief: StateBelief | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self._maybe_update_mode(truth=truth, att_belief=att_belief, attitude_controller=attitude_controller)
+        _apply_orbit_controller_intent(orbit_controller, intent)
+        c_orb = orbit_controller.act(orb_belief, t_s, 2.0) if (orbit_controller is not None and orb_belief is not None) else Command.zero()
+        thrust_cmd = np.array(c_orb.thrust_eci_km_s2, dtype=float).reshape(3)
+        if self.use_strategy_fallback_thrust and float(np.linalg.norm(thrust_cmd)) <= 1e-15 and "fallback_thrust_eci_km_s2" in intent:
+            thrust_cmd = np.array(intent.get("fallback_thrust_eci_km_s2"), dtype=float).reshape(3)
+
+        q_des = None
+        if "desired_attitude_quat_bn" in intent:
+            q_des = np.array(intent.get("desired_attitude_quat_bn"), dtype=float).reshape(-1)
+        elif bool(intent.get("align_to_thrust", self.align_thruster_to_thrust)) and float(np.linalg.norm(thrust_cmd)) > 1e-15:
+            q_des = PoseCommandGenerator.sun_track(
+                truth=truth,
+                sun_dir_eci=_unit(thrust_cmd),
+                panel_normal_body=np.array(self.thruster_direction_body, dtype=float),
+            )
+        if q_des is not None and q_des.size == 4 and attitude_controller is not None and hasattr(attitude_controller, "set_target"):
+            try:
+                attitude_controller.set_target(q_des)
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set mission execution target quaternion: %s", exc)
+
+        c_att = attitude_controller.act(att_belief, t_s, 2.0) if (attitude_controller is not None and att_belief is not None) else Command.zero()
+
+        tol_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
+        alignment_error_rad = float("nan")
+        if float(np.linalg.norm(thrust_cmd)) > 1e-15:
+            b_dir = _unit(np.array(self.thruster_direction_body, dtype=float))
+            b_to_eci = quaternion_to_dcm_bn(np.array(truth.attitude_quat_bn, dtype=float)).T
+            thrust_axis_eci = _unit(b_to_eci @ b_dir)
+            thrust_dir = _unit(thrust_cmd)
+            alignment_error_rad = float(np.arccos(np.clip(np.dot(thrust_axis_eci, thrust_dir), -1.0, 1.0)))
+            if self.require_attitude_alignment and alignment_error_rad > tol_rad:
+                thrust_cmd = np.zeros(3, dtype=float)
+
+        mode_flags = dict(c_orb.mode_flags or {})
+        if np.isfinite(alignment_error_rad):
+            mode_flags["alignment_error_rad"] = float(alignment_error_rad)
+            mode_flags["attitude_alignment_satisfied"] = bool(alignment_error_rad <= tol_rad)
+        mode_flags["execution"] = "controller_pointing"
+        return {
+            "mission_use_integrated_command": True,
+            "thrust_eci_km_s2": thrust_cmd,
+            "torque_body_nm": np.array(c_att.torque_body_nm, dtype=float).reshape(3),
+            "command_mode_flags": mode_flags,
+            "desired_attitude_quat_bn": (np.array(q_des, dtype=float).reshape(4) if q_des is not None and q_des.size == 4 else intent.get("desired_attitude_quat_bn")),
+            "mission_mode": {
+                **dict(intent.get("mission_mode", {}) or {}),
+                "execution": "controller_pointing",
+            },
+        }
+
+
+@dataclass
+class PredictiveBurnExecution:
+    target_id: str | None = None
+    use_knowledge_for_targeting: bool = True
+    lead_time_s: float = 30.0
+    predict_dt_s: float = 1.0
+    alignment_tolerance_rad: float = np.deg2rad(5.0)
+    alignment_tolerance_deg: float | None = None
+    thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    min_burn_accel_km_s2: float = 1e-12
+    mu_km3_s2: float = 398600.4418
+    orbit_controller_budget_ms: float = 2.0
+    attitude_controller_budget_ms: float = 2.0
+    planning_period_s: float | None = None
+    skip_orbit_planning_in_detumble_mode: bool = True
+    attitude_mode_attr: str = "mode"
+    detumble_mode_tokens: tuple[str, ...] = ("detumble",)
+    detumble_enter_rate_rad_s: float | None = None
+    detumble_exit_rate_rad_s: float | None = None
+    detumble_mode_name: str = "detumble"
+    nominal_mode_name: str = "nominal"
+    _detumble_latched: bool = field(default=False, init=False, repr=False)
+    _countdown_s: float = field(default=-1.0, init=False, repr=False)
+    _last_plan_t_s: float | None = field(default=None, init=False, repr=False)
+    _planned_accel_eci_km_s2: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float), init=False, repr=False)
+    _planned_attitude_quat_bn: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0, 0.0], dtype=float), init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.alignment_tolerance_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
+
+    def _target_state(
+        self,
+        *,
+        intent: dict[str, Any],
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        target_id = intent.get("target_id", self.target_id)
+        use_knowledge = bool(intent.get("use_knowledge_for_targeting", self.use_knowledge_for_targeting))
+        return _resolve_target_state(
+            target_id=(None if target_id is None else str(target_id)),
+            use_knowledge_for_targeting=use_knowledge,
+            own_knowledge=own_knowledge,
+            world_truth=world_truth,
+        )
+
+    def _predict_eci(self, x_eci: np.ndarray, horizon_s: float, dt_s: float) -> np.ndarray:
+        x = np.array(x_eci, dtype=float).reshape(6)
+        n_steps = int(max(np.floor(horizon_s / dt_s), 0))
+        rem = float(max(horizon_s - n_steps * dt_s, 0.0))
+        for _ in range(n_steps):
+            x = propagate_two_body_rk4(x_eci=x, dt_s=dt_s, mu_km3_s2=self.mu_km3_s2, accel_cmd_eci_km_s2=np.zeros(3))
+        if rem > 1e-9:
+            x = propagate_two_body_rk4(x_eci=x, dt_s=rem, mu_km3_s2=self.mu_km3_s2, accel_cmd_eci_km_s2=np.zeros(3))
+        return x
+
+    def _predict_orb_belief_for_controller(
+        self,
+        *,
+        orbit_controller: Any | None,
+        self_truth: StateTruth,
+        target_state_eci: tuple[np.ndarray, np.ndarray] | None,
+        lead_time_s: float,
+    ) -> StateBelief:
+        x_self = np.hstack((np.array(self_truth.position_eci_km, dtype=float), np.array(self_truth.velocity_eci_km_s, dtype=float)))
+        horizon = float(max(lead_time_s, 0.0))
+        hdt = float(max(min(self.predict_dt_s, max(horizon, 1e-6)), 1e-6))
+        x_self_p = self._predict_eci(x_self, horizon_s=horizon, dt_s=hdt)
+        if target_state_eci is None:
+            return StateBelief(state=x_self_p, covariance=np.eye(6) * 1e-4, last_update_t_s=float(self_truth.t_s))
+        x_tgt = np.hstack((target_state_eci[0], target_state_eci[1]))
+        x_tgt_p = self._predict_eci(x_tgt, horizon_s=horizon, dt_s=hdt)
+        if orbit_controller is not None and hasattr(orbit_controller, "ric_curv_state_slice"):
+            r_c = x_tgt_p[:3]
+            v_c = x_tgt_p[3:6]
+            r_s = x_self_p[:3]
+            v_s = x_self_p[3:6]
+            x_rect = eci_relative_to_ric_rect(x_dep_eci=np.hstack((r_s, v_s)), x_chief_eci=np.hstack((r_c, v_c)))
+            x_curv = ric_rect_to_curv(x_rect, r0_km=float(np.linalg.norm(r_c)))
+            x = np.hstack((x_curv, np.hstack((r_c, v_c))))
+            return StateBelief(state=x, covariance=np.eye(12) * 1e-4, last_update_t_s=float(self_truth.t_s))
+        return StateBelief(state=x_self_p, covariance=np.eye(6) * 1e-4, last_update_t_s=float(self_truth.t_s))
+
+    def _alignment(self, truth: StateTruth, accel_eci_km_s2: np.ndarray) -> tuple[bool, float]:
+        a = np.array(accel_eci_km_s2, dtype=float).reshape(3)
+        if float(np.linalg.norm(a)) <= 0.0:
+            return True, 0.0
+        c_bn = quaternion_to_dcm_bn(truth.attitude_quat_bn)
+        t_body = _unit(np.array(self.thruster_direction_body, dtype=float))
+        if float(np.linalg.norm(t_body)) <= 0.0:
+            return False, float(np.pi)
+        thrust_axis_eci = c_bn.T @ t_body
+        target_axis_eci = -_unit(a)
+        cosang = float(np.clip(np.dot(thrust_axis_eci, target_axis_eci), -1.0, 1.0))
+        ang = float(np.arccos(cosang))
+        return ang <= float(max(self.alignment_tolerance_rad, 0.0)), ang
+
+    def _attitude_controller_in_detumble_mode(self, attitude_controller: Any | None) -> tuple[bool, str]:
+        if attitude_controller is None:
+            return False, ""
+        attr = str(self.attitude_mode_attr).strip()
+        if not attr:
+            return False, ""
+        try:
+            mode_obj = getattr(attitude_controller, attr, "")
+        except AttributeError:
+            mode_obj = ""
+        mode_str = str(mode_obj).strip().lower()
+        if not mode_str:
+            return False, ""
+        tokens = [str(t).strip().lower() for t in tuple(self.detumble_mode_tokens or ()) if str(t).strip()]
+        return any(tok in mode_str for tok in tokens), mode_str
+
+    def _effective_planning_period_s(self, dt_s: float) -> float:
+        if self.planning_period_s is not None:
+            return float(max(self.planning_period_s, 1e-9))
+        return float(max(dt_s, 1e-9))
+
+    def _maybe_update_mode(self, truth: StateTruth, att_belief: StateBelief | None, attitude_controller: Any | None) -> None:
+        if self.detumble_enter_rate_rad_s is None or attitude_controller is None or not hasattr(attitude_controller, "set_mode"):
+            return
+        if att_belief is not None and att_belief.state.size >= 13:
+            w = np.array(att_belief.state[10:13], dtype=float)
+        else:
+            w = np.array(truth.angular_rate_body_rad_s, dtype=float)
+        w_norm = float(np.linalg.norm(w))
+        enter = float(max(self.detumble_enter_rate_rad_s, 0.0))
+        exit_rate = float(max(self.detumble_exit_rate_rad_s if self.detumble_exit_rate_rad_s is not None else enter, 0.0))
+        if self._detumble_latched:
+            if w_norm <= exit_rate:
+                self._detumble_latched = False
+        elif w_norm >= enter:
+            self._detumble_latched = True
+        mode = self.detumble_mode_name if self._detumble_latched else self.nominal_mode_name
+        try:
+            attitude_controller.set_mode(mode)
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.warning("Unable to set attitude controller mode '%s': %s", mode, exc)
+
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        orbit_controller: Any | None = None,
+        attitude_controller: Any | None = None,
+        att_belief: StateBelief | None = None,
+        t_s: float,
+        dt_s: float,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        env = dict(kwargs.get("env", {}) or {})
+        attitude_disabled = bool(env.get("attitude_disabled", False))
+        out: dict[str, Any] = {}
+
+        self._maybe_update_mode(truth=truth, att_belief=att_belief, attitude_controller=attitude_controller)
+        in_detumble_mode, mode_str = self._attitude_controller_in_detumble_mode(attitude_controller)
+        planning_blocked_by_detumble = bool(self.skip_orbit_planning_in_detumble_mode and in_detumble_mode)
+        plan_period_s = self._effective_planning_period_s(float(dt_s))
+        target_state = self._target_state(intent=intent, own_knowledge=own_knowledge, world_truth=world_truth)
+        _apply_orbit_controller_intent(orbit_controller, intent)
+        plan_due = bool(self._last_plan_t_s is None or (float(t_s) - float(self._last_plan_t_s)) >= (plan_period_s - 1e-12))
+        planned_this_step = False
+        lead_time_s = float(max(intent.get("lead_time_s", self.lead_time_s), 0.0))
+
+        if planning_blocked_by_detumble:
+            self._countdown_s = -1.0
+            self._planned_accel_eci_km_s2 = np.zeros(3, dtype=float)
+            self._planned_attitude_quat_bn = np.array(truth.attitude_quat_bn, dtype=float)
+        elif self._countdown_s < 0.0 and plan_due:
+            b_pred = self._predict_orb_belief_for_controller(
+                orbit_controller=orbit_controller,
+                self_truth=truth,
+                target_state_eci=target_state,
+                lead_time_s=lead_time_s,
+            )
+            c_orb_pred = (
+                orbit_controller.act(b_pred, float(t_s), float(max(self.orbit_controller_budget_ms, 1e-9)))
+                if orbit_controller is not None
+                else Command.zero()
+            )
+            self._planned_accel_eci_km_s2 = np.array(c_orb_pred.thrust_eci_km_s2, dtype=float).reshape(3)
+            if not np.all(np.isfinite(self._planned_accel_eci_km_s2)):
+                self._planned_accel_eci_km_s2 = np.zeros(3, dtype=float)
+            if float(np.linalg.norm(self._planned_accel_eci_km_s2)) <= 1e-15 and "fallback_thrust_eci_km_s2" in intent:
+                self._planned_accel_eci_km_s2 = np.array(intent.get("fallback_thrust_eci_km_s2"), dtype=float).reshape(3)
+            dv_pred = self._planned_accel_eci_km_s2 * float(max(self.predict_dt_s, 1e-6))
+            q_req = OrbitalAttitudeManeuverCoordinator().maneuverer.required_attitude_for_delta_v(
+                truth=truth,
+                delta_v_eci_km_s=dv_pred,
+                thruster_direction_body=np.array(self.thruster_direction_body, dtype=float),
+            )
+            self._planned_attitude_quat_bn = np.array(q_req if q_req is not None else truth.attitude_quat_bn, dtype=float)
+            self._countdown_s = lead_time_s
+            self._last_plan_t_s = float(t_s)
+            planned_this_step = True
+
+        if (not attitude_disabled) and attitude_controller is not None and hasattr(attitude_controller, "set_target"):
+            try:
+                attitude_controller.set_target(np.array(self._planned_attitude_quat_bn, dtype=float))
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set predictive burn attitude target: %s", exc)
+        att_belief_eff = att_belief
+        if (not attitude_disabled) and att_belief_eff is None and attitude_controller is not None:
+            att_belief_eff = StateBelief(
+                state=np.hstack((np.array(truth.attitude_quat_bn, dtype=float), np.array(truth.angular_rate_body_rad_s, dtype=float))),
+                covariance=np.eye(7) * 1e-6,
+                last_update_t_s=float(truth.t_s),
+            )
+        c_att = (
+            attitude_controller.act(att_belief_eff, float(t_s), float(max(self.attitude_controller_budget_ms, 1e-9)))
+            if (not attitude_disabled) and attitude_controller is not None and att_belief_eff is not None
+            else Command.zero()
+        )
+
+        fire = False
+        align_ok, align_angle = self._alignment(truth=truth, accel_eci_km_s2=self._planned_accel_eci_km_s2)
+        if attitude_disabled:
+            align_ok = True
+            align_angle = 0.0
+        if planning_blocked_by_detumble:
+            fire = False
+        else:
+            if lead_time_s <= 0.0:
+                fire = bool(align_ok and float(np.linalg.norm(self._planned_accel_eci_km_s2)) > float(max(self.min_burn_accel_km_s2, 0.0)))
+                self._countdown_s = 0.0
+            elif self._countdown_s < 0.0:
+                fire = False
+            elif self._countdown_s <= float(max(dt_s, 1e-9)):
+                if align_ok and float(np.linalg.norm(self._planned_accel_eci_km_s2)) > float(max(self.min_burn_accel_km_s2, 0.0)):
+                    fire = True
+                self._countdown_s = -1.0
+            else:
+                self._countdown_s -= float(max(dt_s, 1e-9))
+
+        out["mission_use_integrated_command"] = True
+        out["torque_body_nm"] = np.array(c_att.torque_body_nm, dtype=float).reshape(3)
+        out["command_mode_flags"] = dict(c_att.mode_flags or {})
+        out["desired_attitude_quat_bn"] = np.array(self._planned_attitude_quat_bn, dtype=float)
+        out["thrust_eci_km_s2"] = self._planned_accel_eci_km_s2.copy() if fire else np.zeros(3, dtype=float)
+        out["mission_mode"] = {
+            **dict(intent.get("mission_mode", {}) or {}),
+            "execution": "predictive_burn",
+            "countdown_s": float(self._countdown_s),
+            "fire": bool(fire),
+            "alignment_ok": bool(align_ok),
+            "alignment_angle_rad": float(align_angle),
+            "orbit_controller_budget_ms": float(self.orbit_controller_budget_ms),
+            "attitude_controller_budget_ms": float(self.attitude_controller_budget_ms),
+            "planning_blocked_by_detumble": bool(planning_blocked_by_detumble),
+            "attitude_controller_mode": str(mode_str),
+            "plan_due": bool(plan_due),
+            "planned_this_step": bool(planned_this_step),
+            "planning_period_s": float(plan_period_s),
+        }
+        return out
+
+
+@dataclass
+class DirectIntegratedExecution:
+    align_thruster_to_thrust: bool = True
+    thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    use_strategy_fallback_thrust: bool = True
+    use_orbit_controller: bool = False
+    orbit_controller_budget_ms: float = 2.0
+    attitude_controller_budget_ms: float = 2.0
+
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        truth: StateTruth,
+        t_s: float,
+        orbit_controller: Any | None = None,
+        attitude_controller: Any | None = None,
+        orb_belief: StateBelief | None = None,
+        att_belief: StateBelief | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        _apply_orbit_controller_intent(orbit_controller, intent)
+        thrust_cmd = np.array(intent.get("command_thrust_eci_km_s2", np.zeros(3)), dtype=float).reshape(3)
+        if float(np.linalg.norm(thrust_cmd)) <= 1e-15 and self.use_orbit_controller and orbit_controller is not None and orb_belief is not None:
+            c_orb = orbit_controller.act(orb_belief, float(t_s), float(max(self.orbit_controller_budget_ms, 1e-9)))
+            thrust_cmd = np.array(c_orb.thrust_eci_km_s2, dtype=float).reshape(3)
+        if float(np.linalg.norm(thrust_cmd)) <= 1e-15 and self.use_strategy_fallback_thrust and "fallback_thrust_eci_km_s2" in intent:
+            thrust_cmd = np.array(intent.get("fallback_thrust_eci_km_s2"), dtype=float).reshape(3)
+
+        q_des = intent.get("desired_attitude_quat_bn")
+        if q_des is None and bool(intent.get("align_to_thrust", self.align_thruster_to_thrust)) and float(np.linalg.norm(thrust_cmd)) > 1e-15:
+            q_des = _desired_attitude_for_thrust(
+                truth=truth,
+                thrust_eci_km_s2=thrust_cmd,
+                thruster_direction_body=np.array(self.thruster_direction_body, dtype=float),
+            )
+        q_des_arr = None if q_des is None else np.array(q_des, dtype=float).reshape(4)
+
+        if q_des_arr is not None and attitude_controller is not None and hasattr(attitude_controller, "set_target"):
+            try:
+                attitude_controller.set_target(q_des_arr)
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set direct execution attitude target: %s", exc)
+        c_att = (
+            attitude_controller.act(att_belief, float(t_s), float(max(self.attitude_controller_budget_ms, 1e-9)))
+            if (attitude_controller is not None and att_belief is not None)
+            else Command.zero()
+        )
+
+        torque_cmd = np.array(intent.get("command_torque_body_nm", c_att.torque_body_nm), dtype=float).reshape(3)
+        return {
+            "mission_use_integrated_command": True,
+            "thrust_eci_km_s2": thrust_cmd,
+            "torque_body_nm": torque_cmd,
+            "desired_attitude_quat_bn": q_des_arr,
+            "command_mode_flags": {"execution": "direct_integrated"},
+            "mission_mode": {
+                **dict(intent.get("mission_mode", {}) or {}),
+                "execution": "direct_integrated",
+            },
+        }
+
+
+@dataclass
+class ImpulsiveExecution:
+    align_thruster_to_thrust: bool = True
+    thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    require_attitude_alignment: bool = True
+    alignment_tolerance_rad: float = np.deg2rad(5.0)
+    alignment_tolerance_deg: float | None = None
+    use_strategy_fallback_thrust: bool = True
+    pulse_period_s: float = 60.0
+    pulse_width_s: float = 5.0
+    pulse_phase_s: float = 0.0
+    min_burn_accel_km_s2: float = 1e-12
+    orbit_controller_budget_ms: float = 2.0
+    attitude_controller_budget_ms: float = 2.0
+
+    def __post_init__(self) -> None:
+        self.alignment_tolerance_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
+
+    def _pulse_active(self, t_s: float) -> bool:
+        period = float(max(self.pulse_period_s, 1e-9))
+        width = float(np.clip(self.pulse_width_s, 0.0, period))
+        phase = float(self.pulse_phase_s)
+        tau = (float(t_s) - phase) % period
+        return tau <= width
+
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        truth: StateTruth,
+        t_s: float,
+        orbit_controller: Any | None = None,
+        attitude_controller: Any | None = None,
+        orb_belief: StateBelief | None = None,
+        att_belief: StateBelief | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        _apply_orbit_controller_intent(orbit_controller, intent)
+        c_orb = (
+            orbit_controller.act(orb_belief, float(t_s), float(max(self.orbit_controller_budget_ms, 1e-9)))
+            if (orbit_controller is not None and orb_belief is not None)
+            else Command.zero()
+        )
+        thrust_cmd = np.array(c_orb.thrust_eci_km_s2, dtype=float).reshape(3)
+        if float(np.linalg.norm(thrust_cmd)) <= 1e-15 and self.use_strategy_fallback_thrust and "fallback_thrust_eci_km_s2" in intent:
+            thrust_cmd = np.array(intent.get("fallback_thrust_eci_km_s2"), dtype=float).reshape(3)
+
+        q_des = intent.get("desired_attitude_quat_bn")
+        if q_des is None and bool(intent.get("align_to_thrust", self.align_thruster_to_thrust)) and float(np.linalg.norm(thrust_cmd)) > 1e-15:
+            q_des = _desired_attitude_for_thrust(
+                truth=truth,
+                thrust_eci_km_s2=thrust_cmd,
+                thruster_direction_body=np.array(self.thruster_direction_body, dtype=float),
+            )
+        q_des_arr = None if q_des is None else np.array(q_des, dtype=float).reshape(4)
+        if q_des_arr is not None and attitude_controller is not None and hasattr(attitude_controller, "set_target"):
+            try:
+                attitude_controller.set_target(q_des_arr)
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set impulsive execution attitude target: %s", exc)
+        c_att = (
+            attitude_controller.act(att_belief, float(t_s), float(max(self.attitude_controller_budget_ms, 1e-9)))
+            if (attitude_controller is not None and att_belief is not None)
+            else Command.zero()
+        )
+
+        tol_rad = float(max(self.alignment_tolerance_rad, 0.0))
+        alignment_ok = True
+        alignment_angle_rad = 0.0
+        if float(np.linalg.norm(thrust_cmd)) > float(max(self.min_burn_accel_km_s2, 0.0)):
+            alignment_ok, alignment_angle_rad = PredictiveBurnExecution._alignment(self, truth=truth, accel_eci_km_s2=thrust_cmd)
+        pulse_active = self._pulse_active(float(t_s))
+        fire = bool(
+            pulse_active
+            and float(np.linalg.norm(thrust_cmd)) > float(max(self.min_burn_accel_km_s2, 0.0))
+            and ((not self.require_attitude_alignment) or alignment_ok)
+        )
+        if self.require_attitude_alignment and alignment_angle_rad > tol_rad:
+            fire = False
+
+        return {
+            "mission_use_integrated_command": True,
+            "thrust_eci_km_s2": thrust_cmd if fire else np.zeros(3, dtype=float),
+            "torque_body_nm": np.array(c_att.torque_body_nm, dtype=float).reshape(3),
+            "desired_attitude_quat_bn": q_des_arr,
+            "command_mode_flags": {
+                **dict(c_att.mode_flags or {}),
+                "execution": "impulsive",
+                "pulse_active": bool(pulse_active),
+                "alignment_ok": bool(alignment_ok),
+            },
+            "mission_mode": {
+                **dict(intent.get("mission_mode", {}) or {}),
+                "execution": "impulsive",
+                "pulse_active": bool(pulse_active),
+                "fire": bool(fire),
+                "alignment_ok": bool(alignment_ok),
+                "alignment_angle_rad": float(alignment_angle_rad),
+            },
+        }
+
+
+@dataclass
+class SafeHoldExecution:
+    attitude_controller_budget_ms: float = 2.0
+
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        truth: StateTruth,
+        t_s: float,
+        attitude_controller: Any | None = None,
+        att_belief: StateBelief | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        q_des = intent.get("desired_attitude_quat_bn", np.array(truth.attitude_quat_bn, dtype=float))
+        q_des_arr = np.array(q_des, dtype=float).reshape(4)
+        if attitude_controller is not None and hasattr(attitude_controller, "set_target"):
+            try:
+                attitude_controller.set_target(q_des_arr)
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set safe-hold attitude target: %s", exc)
+        c_att = (
+            attitude_controller.act(att_belief, float(t_s), float(max(self.attitude_controller_budget_ms, 1e-9)))
+            if (attitude_controller is not None and att_belief is not None)
+            else Command.zero()
+        )
+        return {
+            "mission_use_integrated_command": True,
+            "thrust_eci_km_s2": np.zeros(3, dtype=float),
+            "torque_body_nm": np.array(c_att.torque_body_nm, dtype=float).reshape(3),
+            "desired_attitude_quat_bn": q_des_arr,
+            "command_mode_flags": {
+                **dict(c_att.mode_flags or {}),
+                "execution": "safe_hold",
+            },
+            "mission_mode": {
+                **dict(intent.get("mission_mode", {}) or {}),
+                "execution": "safe_hold",
+            },
+        }
 
 
 @dataclass

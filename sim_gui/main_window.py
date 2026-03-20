@@ -117,6 +117,49 @@ MISSION_OPTIONS = {
         ("Attitude Detumble Gate", {"kind": "python", "module": "sim.mission.modules", "class_name": "AttitudeDetumbleGateMissionModule", "params": {}}),
     ],
 }
+MISSION_STRATEGY_OPTIONS = {
+    "rocket": [
+        ("None", None),
+        ("Rocket Launch Strategy", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketMissionStrategy", "params": {}}),
+    ],
+    "chaser": [
+        ("None", None),
+        ("Pursuit", {"kind": "python", "module": "sim.mission.modules", "class_name": "PursuitMissionStrategy", "params": {}}),
+        ("Evade", {"kind": "python", "module": "sim.mission.modules", "class_name": "EvadeMissionStrategy", "params": {}}),
+        ("Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "HoldMissionStrategy", "params": {}}),
+        ("Station Keep", {"kind": "python", "module": "sim.mission.modules", "class_name": "StationKeepMissionStrategy", "params": {}}),
+        ("Inspect", {"kind": "python", "module": "sim.mission.modules", "class_name": "InspectMissionStrategy", "params": {}}),
+        ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldMissionStrategy", "params": {}}),
+    ],
+    "target": [
+        ("None", None),
+        ("Pursuit", {"kind": "python", "module": "sim.mission.modules", "class_name": "PursuitMissionStrategy", "params": {}}),
+        ("Evade", {"kind": "python", "module": "sim.mission.modules", "class_name": "EvadeMissionStrategy", "params": {}}),
+        ("Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "HoldMissionStrategy", "params": {}}),
+        ("Station Keep", {"kind": "python", "module": "sim.mission.modules", "class_name": "StationKeepMissionStrategy", "params": {}}),
+        ("Inspect", {"kind": "python", "module": "sim.mission.modules", "class_name": "InspectMissionStrategy", "params": {}}),
+        ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldMissionStrategy", "params": {}}),
+    ],
+}
+MISSION_EXECUTION_OPTIONS = {
+    "rocket": [("None", None)],
+    "chaser": [
+        ("None", None),
+        ("Controller Pointing", {"kind": "python", "module": "sim.mission.modules", "class_name": "ControllerPointingExecution", "params": {}}),
+        ("Predictive Burn", {"kind": "python", "module": "sim.mission.modules", "class_name": "PredictiveBurnExecution", "params": {}}),
+        ("Direct Integrated", {"kind": "python", "module": "sim.mission.modules", "class_name": "DirectIntegratedExecution", "params": {}}),
+        ("Impulsive", {"kind": "python", "module": "sim.mission.modules", "class_name": "ImpulsiveExecution", "params": {}}),
+        ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldExecution", "params": {}}),
+    ],
+    "target": [
+        ("None", None),
+        ("Controller Pointing", {"kind": "python", "module": "sim.mission.modules", "class_name": "ControllerPointingExecution", "params": {}}),
+        ("Predictive Burn", {"kind": "python", "module": "sim.mission.modules", "class_name": "PredictiveBurnExecution", "params": {}}),
+        ("Direct Integrated", {"kind": "python", "module": "sim.mission.modules", "class_name": "DirectIntegratedExecution", "params": {}}),
+        ("Impulsive", {"kind": "python", "module": "sim.mission.modules", "class_name": "ImpulsiveExecution", "params": {}}),
+        ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldExecution", "params": {}}),
+    ],
+}
 SATELLITE_PRESET_OPTIONS = ["BASIC_SATELLITE"]
 ROCKET_PRESET_OPTIONS = ["BASIC_TWO_STAGE_STACK"]
 FIGURE_ID_OPTIONS = [
@@ -290,6 +333,119 @@ PARAMETER_FORM_SCHEMAS = {
         {"key": "spotlight_ric_direction", "label": "Spotlight RIC Direction", "kind": "vector", "length": 3},
         {"key": "use_knowledge_for_targeting", "label": "Use Knowledge For Targeting", "kind": "bool"},
     ],
+    "PursuitMissionStrategy": [
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
+        {"key": "max_accel_km_s2", "label": "Fallback Max Accel (km/s^2)", "kind": "float"},
+        {"key": "blind_direction_eci", "label": "Blind Direction ECI", "kind": "vector", "length": 3},
+        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
+    ],
+    "EvadeMissionStrategy": [
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
+        {"key": "max_accel_km_s2", "label": "Fallback Max Accel (km/s^2)", "kind": "float"},
+        {"key": "blind_direction_eci", "label": "Blind Direction ECI", "kind": "vector", "length": 3},
+        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
+    ],
+    "HoldMissionStrategy": [
+        {"key": "attitude_mode", "label": "Attitude Mode", "kind": "choice", "options": ["hold_eci", "hold_ric", "sun_track", "spotlight", "sensing"]},
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
+        {"key": "hold_quat_bn", "label": "Hold Quaternion BN", "kind": "vector", "length": 4},
+        {"key": "hold_quat_br", "label": "Hold Quaternion BR", "kind": "vector", "length": 4},
+        {"key": "boresight_body", "label": "Boresight Body", "kind": "vector", "length": 3},
+        {"key": "spotlight_lat_deg", "label": "Spotlight Lat (deg)", "kind": "float"},
+        {"key": "spotlight_lon_deg", "label": "Spotlight Lon (deg)", "kind": "float"},
+        {"key": "spotlight_alt_km", "label": "Spotlight Alt (km)", "kind": "float"},
+        {"key": "spotlight_ric_direction", "label": "Spotlight RIC Direction", "kind": "vector", "length": 3},
+    ],
+    "StationKeepMissionStrategy": [
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
+        {"key": "desired_relative_ric_rect", "label": "Desired RIC Rect State", "kind": "vector", "length": 6},
+        {"key": "kp_pos", "label": "Kp Pos", "kind": "float"},
+        {"key": "kd_vel", "label": "Kd Vel", "kind": "float"},
+        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
+        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
+    ],
+    "InspectMissionStrategy": [
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
+        {"key": "desired_relative_ric_rect", "label": "Desired RIC Rect State", "kind": "vector", "length": 6},
+        {"key": "boresight_body", "label": "Boresight Body", "kind": "vector", "length": 3},
+        {"key": "kp_pos", "label": "Kp Pos", "kind": "float"},
+        {"key": "kd_vel", "label": "Kd Vel", "kind": "float"},
+        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
+        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
+    ],
+    "SafeHoldMissionStrategy": [
+        {"key": "attitude_mode", "label": "Attitude Mode", "kind": "choice", "options": ["hold_current", "hold_eci", "sun_track"]},
+        {"key": "hold_quat_bn", "label": "Hold Quaternion BN", "kind": "vector", "length": 4},
+        {"key": "boresight_body", "label": "Boresight Body", "kind": "vector", "length": 3},
+    ],
+    "RocketMissionStrategy": [
+        {"key": "launch_mode", "label": "Launch Mode", "kind": "choice", "options": ["go_now", "go_when_possible", "wait_optimal_window"]},
+        {"key": "orbital_goal", "label": "Orbital Goal", "kind": "choice", "options": ["pursuit", "predefined_orbit"]},
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "go_when_possible_margin_m_s", "label": "Go Margin (m/s)", "kind": "float"},
+        {"key": "window_period_s", "label": "Window Period (s)", "kind": "float"},
+        {"key": "window_open_duration_s", "label": "Window Open Duration (s)", "kind": "float"},
+        {"key": "predef_target_alt_km", "label": "Target Alt (km)", "kind": "float"},
+        {"key": "predef_target_ecc", "label": "Target Ecc", "kind": "float"},
+    ],
+    "ControllerPointingExecution": [
+        {"key": "align_thruster_to_thrust", "label": "Align Thruster To Thrust", "kind": "bool"},
+        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
+        {"key": "require_attitude_alignment", "label": "Require Alignment", "kind": "bool"},
+        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
+        {"key": "use_strategy_fallback_thrust", "label": "Use Strategy Fallback", "kind": "bool"},
+        {"key": "detumble_enter_rate_rad_s", "label": "Detumble Enter Rate", "kind": "optional_float"},
+        {"key": "detumble_exit_rate_rad_s", "label": "Detumble Exit Rate", "kind": "optional_float"},
+        {"key": "detumble_mode_name", "label": "Detumble Mode", "kind": "string"},
+        {"key": "nominal_mode_name", "label": "Nominal Mode", "kind": "string"},
+    ],
+    "PredictiveBurnExecution": [
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
+        {"key": "lead_time_s", "label": "Lead Time (s)", "kind": "float"},
+        {"key": "predict_dt_s", "label": "Predict dt (s)", "kind": "float"},
+        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
+        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
+        {"key": "min_burn_accel_km_s2", "label": "Min Burn Accel", "kind": "float"},
+        {"key": "mu_km3_s2", "label": "Mu (km^3/s^2)", "kind": "float"},
+        {"key": "orbit_controller_budget_ms", "label": "Orbit Budget (ms)", "kind": "float"},
+        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
+        {"key": "planning_period_s", "label": "Planning Period (s)", "kind": "optional_float"},
+        {"key": "skip_orbit_planning_in_detumble_mode", "label": "Skip In Detumble", "kind": "bool"},
+        {"key": "detumble_enter_rate_rad_s", "label": "Detumble Enter Rate", "kind": "optional_float"},
+        {"key": "detumble_exit_rate_rad_s", "label": "Detumble Exit Rate", "kind": "optional_float"},
+        {"key": "detumble_mode_name", "label": "Detumble Mode", "kind": "string"},
+        {"key": "nominal_mode_name", "label": "Nominal Mode", "kind": "string"},
+    ],
+    "DirectIntegratedExecution": [
+        {"key": "align_thruster_to_thrust", "label": "Align Thruster To Thrust", "kind": "bool"},
+        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
+        {"key": "use_strategy_fallback_thrust", "label": "Use Strategy Fallback", "kind": "bool"},
+        {"key": "use_orbit_controller", "label": "Use Orbit Controller", "kind": "bool"},
+        {"key": "orbit_controller_budget_ms", "label": "Orbit Budget (ms)", "kind": "float"},
+        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
+    ],
+    "ImpulsiveExecution": [
+        {"key": "align_thruster_to_thrust", "label": "Align Thruster To Thrust", "kind": "bool"},
+        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
+        {"key": "require_attitude_alignment", "label": "Require Alignment", "kind": "bool"},
+        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
+        {"key": "use_strategy_fallback_thrust", "label": "Use Strategy Fallback", "kind": "bool"},
+        {"key": "pulse_period_s", "label": "Pulse Period (s)", "kind": "float"},
+        {"key": "pulse_width_s", "label": "Pulse Width (s)", "kind": "float"},
+        {"key": "pulse_phase_s", "label": "Pulse Phase (s)", "kind": "float"},
+        {"key": "min_burn_accel_km_s2", "label": "Min Burn Accel", "kind": "float"},
+        {"key": "orbit_controller_budget_ms", "label": "Orbit Budget (ms)", "kind": "float"},
+        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
+    ],
+    "SafeHoldExecution": [
+        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
+    ],
 }
 
 
@@ -318,12 +474,18 @@ class MainWindow(QMainWindow):
         self.orbit_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         self.attitude_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         for combo in (
+            self.target_strategy_combo,
+            self.target_execution_combo,
             self.target_orbit_control_combo,
             self.target_attitude_control_combo,
             self.target_mission_combo,
+            self.chaser_strategy_combo,
+            self.chaser_execution_combo,
             self.chaser_orbit_control_combo,
             self.chaser_attitude_control_combo,
             self.chaser_mission_combo,
+            self.rocket_strategy_combo,
+            self.rocket_execution_combo,
             self.rocket_guidance_combo,
             self.rocket_orbit_control_combo,
             self.rocket_attitude_control_combo,
@@ -512,12 +674,18 @@ class MainWindow(QMainWindow):
             self.target_preset,
             self.chaser_preset,
             self.rocket_preset,
+            self.target_strategy_combo,
+            self.target_execution_combo,
             self.target_orbit_control_combo,
             self.target_attitude_control_combo,
             self.target_mission_combo,
+            self.chaser_strategy_combo,
+            self.chaser_execution_combo,
             self.chaser_orbit_control_combo,
             self.chaser_attitude_control_combo,
             self.chaser_mission_combo,
+            self.rocket_strategy_combo,
+            self.rocket_execution_combo,
             self.rocket_guidance_combo,
             self.rocket_orbit_control_combo,
             self.rocket_attitude_control_combo,
@@ -838,12 +1006,16 @@ class MainWindow(QMainWindow):
         target_initial_state_form.addRow("argp_deg", self.target_argp)
         target_initial_state_form.addRow("true_anomaly_deg", self.target_ta)
         target_form.addRow(self.target_initial_state_container)
+        self.target_strategy_combo = self._make_pointer_combo(MISSION_STRATEGY_OPTIONS["target"])
+        self.target_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["target"])
         self.target_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["target"])
         self.target_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["target"])
         self.target_mission_combo = self._make_pointer_combo(MISSION_OPTIONS["target"])
+        target_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.target_strategy_combo, "target", "mission_strategy"))
+        target_form.addRow("Mission Execution", self._make_pointer_editor_row(self.target_execution_combo, "target", "mission_execution"))
         target_form.addRow("Orbit Control", self._make_pointer_editor_row(self.target_orbit_control_combo, "target", "orbit_control"))
         target_form.addRow("Attitude Control", self._make_pointer_editor_row(self.target_attitude_control_combo, "target", "attitude_control"))
-        target_form.addRow("Mission", self._make_pointer_editor_row(self.target_mission_combo, "target", "mission"))
+        target_form.addRow("Mission (Legacy)", self._make_pointer_editor_row(self.target_mission_combo, "target", "mission"))
         layout.addWidget(target_box, 0, 0)
 
         chaser_box = QGroupBox("Chaser")
@@ -872,12 +1044,16 @@ class MainWindow(QMainWindow):
         for i, widget in enumerate(self.chaser_init_values):
             chaser_initial_state_form.addRow(f"Init[{i}]", widget)
         chaser_form.addRow(self.chaser_initial_state_container)
+        self.chaser_strategy_combo = self._make_pointer_combo(MISSION_STRATEGY_OPTIONS["chaser"])
+        self.chaser_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["chaser"])
         self.chaser_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["chaser"])
         self.chaser_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["chaser"])
         self.chaser_mission_combo = self._make_pointer_combo(MISSION_OPTIONS["chaser"])
+        chaser_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.chaser_strategy_combo, "chaser", "mission_strategy"))
+        chaser_form.addRow("Mission Execution", self._make_pointer_editor_row(self.chaser_execution_combo, "chaser", "mission_execution"))
         chaser_form.addRow("Orbit Control", self._make_pointer_editor_row(self.chaser_orbit_control_combo, "chaser", "orbit_control"))
         chaser_form.addRow("Attitude Control", self._make_pointer_editor_row(self.chaser_attitude_control_combo, "chaser", "attitude_control"))
-        chaser_form.addRow("Mission", self._make_pointer_editor_row(self.chaser_mission_combo, "chaser", "mission"))
+        chaser_form.addRow("Mission (Legacy)", self._make_pointer_editor_row(self.chaser_mission_combo, "chaser", "mission"))
         layout.addWidget(chaser_box, 0, 1)
 
         rocket_box = QGroupBox("Rocket")
@@ -910,14 +1086,18 @@ class MainWindow(QMainWindow):
         rocket_initial_state_form.addRow("Launch Alt (km)", self.rocket_launch_alt)
         rocket_initial_state_form.addRow("Launch Azimuth (deg)", self.rocket_launch_az)
         rocket_form.addRow(self.rocket_initial_state_container)
+        self.rocket_strategy_combo = self._make_pointer_combo(MISSION_STRATEGY_OPTIONS["rocket"])
+        self.rocket_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["rocket"])
         self.rocket_guidance_combo = self._make_pointer_combo(GUIDANCE_OPTIONS["rocket"])
         self.rocket_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["rocket"])
         self.rocket_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["rocket"])
         self.rocket_mission_combo = self._make_pointer_combo(MISSION_OPTIONS["rocket"])
+        rocket_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.rocket_strategy_combo, "rocket", "mission_strategy"))
+        rocket_form.addRow("Mission Execution", self._make_pointer_editor_row(self.rocket_execution_combo, "rocket", "mission_execution"))
         rocket_form.addRow("Guidance", self._make_pointer_editor_row(self.rocket_guidance_combo, "rocket", "guidance"))
         rocket_form.addRow("Orbit Control", self._make_pointer_editor_row(self.rocket_orbit_control_combo, "rocket", "orbit_control"))
         rocket_form.addRow("Attitude Control", self._make_pointer_editor_row(self.rocket_attitude_control_combo, "rocket", "attitude_control"))
-        rocket_form.addRow("Mission", self._make_pointer_editor_row(self.rocket_mission_combo, "rocket", "mission"))
+        rocket_form.addRow("Mission (Legacy)", self._make_pointer_editor_row(self.rocket_mission_combo, "rocket", "mission"))
         layout.addWidget(rocket_box, 0, 2)
         self._set_initial_state_section_visible("target", False)
         self._set_initial_state_section_visible("chaser", False)
@@ -1452,12 +1632,18 @@ class MainWindow(QMainWindow):
             cfg = copy.deepcopy(self.current_config)
         options: list[tuple[str, str]] = []
         pointer_paths = [
+            ("target", "mission_strategy", cfg.get("target", {}).get("mission_strategy")),
+            ("target", "mission_execution", cfg.get("target", {}).get("mission_execution")),
             ("target", "orbit_control", cfg.get("target", {}).get("orbit_control")),
             ("target", "attitude_control", cfg.get("target", {}).get("attitude_control")),
             ("target", "mission_objectives[0]", (cfg.get("target", {}).get("mission_objectives") or [None])[0]),
+            ("chaser", "mission_strategy", cfg.get("chaser", {}).get("mission_strategy")),
+            ("chaser", "mission_execution", cfg.get("chaser", {}).get("mission_execution")),
             ("chaser", "orbit_control", cfg.get("chaser", {}).get("orbit_control")),
             ("chaser", "attitude_control", cfg.get("chaser", {}).get("attitude_control")),
             ("chaser", "mission_objectives[0]", (cfg.get("chaser", {}).get("mission_objectives") or [None])[0]),
+            ("rocket", "mission_strategy", cfg.get("rocket", {}).get("mission_strategy")),
+            ("rocket", "mission_execution", cfg.get("rocket", {}).get("mission_execution")),
             ("rocket", "guidance", cfg.get("rocket", {}).get("guidance")),
             ("rocket", "orbit_control", cfg.get("rocket", {}).get("orbit_control")),
             ("rocket", "attitude_control", cfg.get("rocket", {}).get("attitude_control")),
@@ -1752,6 +1938,8 @@ class MainWindow(QMainWindow):
         self.target_raan.setValue(float(target_coes.get("raan_deg", 0.0) or 0.0))
         self.target_argp.setValue(float(target_coes.get("argp_deg", 0.0) or 0.0))
         self.target_ta.setValue(float(target_coes.get("true_anomaly_deg", 0.0) or 0.0))
+        self._set_pointer_combo_value(self.target_strategy_combo, dict(target.get("mission_strategy", {}) or {}) if target.get("mission_strategy") else None)
+        self._set_pointer_combo_value(self.target_execution_combo, dict(target.get("mission_execution", {}) or {}) if target.get("mission_execution") else None)
         self._set_pointer_combo_value(self.target_orbit_control_combo, dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
         self._set_pointer_combo_value(self.target_attitude_control_combo, dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
         target_mission = list(target.get("mission_objectives", []) or [])
@@ -1774,6 +1962,8 @@ class MainWindow(QMainWindow):
         self.chaser_deploy_time.setValue(float(chaser_init.get("deploy_time_s", 900.0) or 0.0))
         for i, widget in enumerate(self.chaser_init_values):
             widget.setValue(float(values[i] if i < len(values) else 0.0))
+        self._set_pointer_combo_value(self.chaser_strategy_combo, dict(chaser.get("mission_strategy", {}) or {}) if chaser.get("mission_strategy") else None)
+        self._set_pointer_combo_value(self.chaser_execution_combo, dict(chaser.get("mission_execution", {}) or {}) if chaser.get("mission_execution") else None)
         self._set_pointer_combo_value(self.chaser_orbit_control_combo, dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
         self._set_pointer_combo_value(self.chaser_attitude_control_combo, dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
         chaser_mission = list(chaser.get("mission_objectives", []) or [])
@@ -1788,6 +1978,8 @@ class MainWindow(QMainWindow):
         self.rocket_launch_lon.setValue(float(rocket_init.get("launch_lon_deg", -80.6) or 0.0))
         self.rocket_launch_alt.setValue(float(rocket_init.get("launch_alt_km", 0.0) or 0.0))
         self.rocket_launch_az.setValue(float(rocket_init.get("launch_azimuth_deg", 90.0) or 0.0))
+        self._set_pointer_combo_value(self.rocket_strategy_combo, dict(rocket.get("mission_strategy", {}) or {}) if rocket.get("mission_strategy") else None)
+        self._set_pointer_combo_value(self.rocket_execution_combo, dict(rocket.get("mission_execution", {}) or {}) if rocket.get("mission_execution") else None)
         self._set_pointer_combo_value(self.rocket_guidance_combo, dict(rocket.get("guidance", {}) or {}) if rocket.get("guidance") else None)
         self._set_pointer_combo_value(self.rocket_orbit_control_combo, dict(rocket.get("orbit_control", {}) or {}) if rocket.get("orbit_control") else None)
         self._set_pointer_combo_value(self.rocket_attitude_control_combo, dict(rocket.get("attitude_control", {}) or {}) if rocket.get("attitude_control") else None)
@@ -1886,6 +2078,8 @@ class MainWindow(QMainWindow):
             "argp_deg": float(self.target_argp.value()),
             "true_anomaly_deg": float(self.target_ta.value()),
         }
+        target["mission_strategy"] = self._combo_pointer_value(self.target_strategy_combo, existing=dict(target.get("mission_strategy", {}) or {}) if target.get("mission_strategy") else None)
+        target["mission_execution"] = self._combo_pointer_value(self.target_execution_combo, existing=dict(target.get("mission_execution", {}) or {}) if target.get("mission_execution") else None)
         target.pop("guidance", None)
         target["orbit_control"] = self._combo_pointer_value(self.target_orbit_control_combo, existing=dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
         target["attitude_control"] = self._combo_pointer_value(self.target_attitude_control_combo, existing=dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
@@ -1904,6 +2098,8 @@ class MainWindow(QMainWindow):
         else:
             chaser_initial_state[init_mode] = [float(widget.value()) for widget in self.chaser_init_values]
         chaser["initial_state"] = chaser_initial_state
+        chaser["mission_strategy"] = self._combo_pointer_value(self.chaser_strategy_combo, existing=dict(chaser.get("mission_strategy", {}) or {}) if chaser.get("mission_strategy") else None)
+        chaser["mission_execution"] = self._combo_pointer_value(self.chaser_execution_combo, existing=dict(chaser.get("mission_execution", {}) or {}) if chaser.get("mission_execution") else None)
         chaser.pop("guidance", None)
         chaser["orbit_control"] = self._combo_pointer_value(self.chaser_orbit_control_combo, existing=dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
         chaser["attitude_control"] = self._combo_pointer_value(self.chaser_attitude_control_combo, existing=dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
@@ -1919,6 +2115,8 @@ class MainWindow(QMainWindow):
             "launch_alt_km": float(self.rocket_launch_alt.value()),
             "launch_azimuth_deg": float(self.rocket_launch_az.value()),
         }
+        rocket["mission_strategy"] = self._combo_pointer_value(self.rocket_strategy_combo, existing=dict(rocket.get("mission_strategy", {}) or {}) if rocket.get("mission_strategy") else None)
+        rocket["mission_execution"] = self._combo_pointer_value(self.rocket_execution_combo, existing=dict(rocket.get("mission_execution", {}) or {}) if rocket.get("mission_execution") else None)
         rocket["guidance"] = self._combo_pointer_value(self.rocket_guidance_combo, existing=dict(rocket.get("guidance", {}) or {}) if rocket.get("guidance") else None)
         rocket["orbit_control"] = self._combo_pointer_value(self.rocket_orbit_control_combo, existing=dict(rocket.get("orbit_control", {}) or {}) if rocket.get("orbit_control") else None)
         rocket["attitude_control"] = self._combo_pointer_value(self.rocket_attitude_control_combo, existing=dict(rocket.get("attitude_control", {}) or {}) if rocket.get("attitude_control") else None)

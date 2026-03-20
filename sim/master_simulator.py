@@ -691,6 +691,8 @@ class AgentRuntime:
     dynamics: OrbitalAttitudeDynamics | None
     knowledge_base: ObjectKnowledgeBase | None
     bridge: Any | None
+    mission_strategy: Any | None
+    mission_execution: Any | None
     rocket_sim: RocketAscentSimulator | None
     rocket_state: RocketState | None
     rocket_guidance: Any | None
@@ -773,6 +775,8 @@ def _create_satellite_runtime(
         orbit_propagator=_build_orbit_propagator(cfg),
     )
     bridge = _module_obj(agent_cfg.bridge) if (agent_cfg.bridge is not None and agent_cfg.bridge.enabled) else None
+    mission_strategy = _module_obj(getattr(agent_cfg, "mission_strategy", None))
+    mission_execution = _module_obj(getattr(agent_cfg, "mission_execution", None))
     missions = [_module_obj(p) for p in list(agent_cfg.mission_objectives or [])]
     missions = [m for m in missions if m is not None]
     sat_isp_s = _resolve_satellite_isp_s(specs)
@@ -798,6 +802,8 @@ def _create_satellite_runtime(
         dynamics=dyn,
         knowledge_base=None,
         bridge=bridge,
+        mission_strategy=mission_strategy,
+        mission_execution=mission_execution,
         rocket_sim=None,
         rocket_state=None,
         rocket_guidance=None,
@@ -918,6 +924,8 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
     rt = _rocket_state_to_truth(rs)
     belief = StateBelief(state=np.hstack((rt.position_eci_km, rt.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=0.0)
     bridge = _module_obj(rc.bridge) if (rc.bridge is not None and rc.bridge.enabled) else None
+    mission_strategy = _module_obj(getattr(rc, "mission_strategy", None))
+    mission_execution = _module_obj(getattr(rc, "mission_execution", None))
     missions = [_module_obj(p) for p in list(rc.mission_objectives or [])]
     missions = [m for m in missions if m is not None]
     return AgentRuntime(
@@ -934,6 +942,8 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         dynamics=None,
         knowledge_base=None,
         bridge=bridge,
+        mission_strategy=mission_strategy,
+        mission_execution=mission_execution,
         rocket_sim=rsim,
         rocket_state=rs,
         rocket_guidance=guidance,
@@ -1048,6 +1058,104 @@ def _run_mission_modules(
         if isinstance(ret, dict):
             out.update(ret)
     return out
+
+
+def _run_mission_strategy(
+    *,
+    agent: AgentRuntime,
+    world_truth: dict[str, StateTruth],
+    t_s: float,
+    dt_s: float,
+    env: dict[str, Any],
+    orbit_controller: Any | None = None,
+    attitude_controller: Any | None = None,
+    orb_belief: StateBelief | None = None,
+    att_belief: StateBelief | None = None,
+) -> dict[str, Any]:
+    strategy = agent.mission_strategy
+    if strategy is None:
+        return {}
+    own_knowledge = agent.knowledge_base.snapshot() if agent.knowledge_base is not None else {}
+    truth = world_truth.get(agent.object_id)
+    if truth is None:
+        return {}
+    for method_name in ("update", "plan", "decide"):
+        if not hasattr(strategy, method_name):
+            continue
+        method = getattr(strategy, method_name)
+        try:
+            ret = method(
+                object_id=agent.object_id,
+                truth=truth,
+                belief=agent.belief,
+                own_knowledge=own_knowledge,
+                world_truth=world_truth,
+                env=env,
+                t_s=t_s,
+                dt_s=dt_s,
+                orbit_controller=orbit_controller,
+                attitude_controller=attitude_controller,
+                orb_belief=orb_belief,
+                att_belief=att_belief,
+                rocket_state=agent.rocket_state,
+                rocket_vehicle_cfg=(agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
+            )
+        except TypeError:
+            ret = method(truth=truth, t_s=t_s)
+        if isinstance(ret, dict):
+            return ret
+        return {}
+    return {}
+
+
+def _run_mission_execution(
+    *,
+    agent: AgentRuntime,
+    intent: dict[str, Any],
+    world_truth: dict[str, StateTruth],
+    t_s: float,
+    dt_s: float,
+    env: dict[str, Any],
+    orbit_controller: Any | None = None,
+    attitude_controller: Any | None = None,
+    orb_belief: StateBelief | None = None,
+    att_belief: StateBelief | None = None,
+) -> dict[str, Any]:
+    execution = agent.mission_execution
+    if execution is None:
+        return {}
+    own_knowledge = agent.knowledge_base.snapshot() if agent.knowledge_base is not None else {}
+    truth = world_truth.get(agent.object_id)
+    if truth is None:
+        return {}
+    for method_name in ("update", "execute", "act"):
+        if not hasattr(execution, method_name):
+            continue
+        method = getattr(execution, method_name)
+        try:
+            ret = method(
+                intent=dict(intent or {}),
+                object_id=agent.object_id,
+                truth=truth,
+                belief=agent.belief,
+                own_knowledge=own_knowledge,
+                world_truth=world_truth,
+                env=env,
+                t_s=t_s,
+                dt_s=dt_s,
+                orbit_controller=orbit_controller,
+                attitude_controller=attitude_controller,
+                orb_belief=orb_belief,
+                att_belief=att_belief,
+                rocket_state=agent.rocket_state,
+                rocket_vehicle_cfg=(agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
+            )
+        except TypeError:
+            ret = method(intent=dict(intent or {}), truth=truth, t_s=t_s)
+        if isinstance(ret, dict):
+            return ret
+        return {}
+    return {}
 
 
 def _plot_outputs(
@@ -2269,6 +2377,23 @@ def _run_single_config(
                     dt_s=dt,
                     env=env_common,
                 )
+                strategy_out = _run_mission_strategy(
+                    agent=a,
+                    world_truth=world_truth_live,
+                    t_s=t_next,
+                    dt_s=dt,
+                    env=env_common,
+                )
+                mission_out.update(strategy_out)
+                execution_out = _run_mission_execution(
+                    agent=a,
+                    intent=mission_out,
+                    world_truth=world_truth_live,
+                    t_s=t_next,
+                    dt_s=dt,
+                    env=env_common,
+                )
+                mission_out.update(execution_out)
                 launch_auth = bool(mission_out.get("launch_authorized", True))
                 a.waiting_for_launch = not launch_auth
                 if not launch_auth:
@@ -2384,6 +2509,31 @@ def _run_single_config(
                         orb_belief=orb_belief,
                         att_belief=att_belief,
                     )
+                    strategy_out = _run_mission_strategy(
+                        agent=a,
+                        world_truth=world_truth_inner,
+                        t_s=t_eval,
+                        dt_s=h,
+                        env=env_inner_common,
+                        orbit_controller=a.orbit_controller,
+                        attitude_controller=(a.attitude_controller if attitude_enabled else None),
+                        orb_belief=orb_belief,
+                        att_belief=att_belief,
+                    )
+                    mission_out.update(strategy_out)
+                    execution_out = _run_mission_execution(
+                        agent=a,
+                        intent=mission_out,
+                        world_truth=world_truth_inner,
+                        t_s=t_eval,
+                        dt_s=h,
+                        env=env_inner_common,
+                        orbit_controller=a.orbit_controller,
+                        attitude_controller=(a.attitude_controller if attitude_enabled else None),
+                        orb_belief=orb_belief,
+                        att_belief=att_belief,
+                    )
+                    mission_out.update(execution_out)
                     # Mission module can set attitude targets on compatible controllers.
                     if attitude_enabled and "desired_attitude_quat_bn" in mission_out and a.attitude_controller is not None:
                         q_des = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)

@@ -30,7 +30,7 @@ Top-Level Sections
 - monte_carlo: Optional campaign settings and parameter variations.
 
 Algorithm Pointer Format
-- Any rocket.guidance/orbit_control/attitude_control/mission_objectives entry can use:
+- Any rocket.guidance/orbit_control/attitude_control/mission_strategy/mission_execution/mission_objectives entry can use:
   kind: "python"
   module: "python.module.path"
   class_name: "ClassName"
@@ -40,12 +40,102 @@ Algorithm Pointer Format
     key: value
 
 Notes:
-- Use module + class_name for class-based controllers, rocket guidance, or mission modules.
+- Use module + class_name for class-based controllers, rocket guidance, mission strategies, mission executions, or legacy mission modules.
 - Use module + function for function-based handlers.
 - params is a freeform dict passed later by scenario wiring code.
 
+Mission Architecture
+- Preferred path:
+  - mission_strategy decides intent (pursuit, evade, hold, launch, etc.)
+  - mission_execution realizes that intent through orbit/attitude controllers and actuator-facing commands
+- Legacy path:
+  - mission_objectives are executed each master_sim step when provided.
+
+Mission Strategy Pointers
+- Pursuit strategy:
+  module: "sim.mission.modules"
+  class_name: "PursuitMissionStrategy"
+  params:
+    target_id: "<object_id>"
+    use_knowledge_for_targeting: true|false
+    max_accel_km_s2: <float>
+- Evade strategy:
+  module: "sim.mission.modules"
+  class_name: "EvadeMissionStrategy"
+  params:
+    target_id: "<object_id>"
+    use_knowledge_for_targeting: true|false
+    max_accel_km_s2: <float>
+- Hold strategy:
+  module: "sim.mission.modules"
+  class_name: "HoldMissionStrategy"
+  params:
+    attitude_mode: "hold_eci" | "hold_ric" | "sun_track" | "spotlight" | "sensing"
+- Station-keep strategy:
+  module: "sim.mission.modules"
+  class_name: "StationKeepMissionStrategy"
+  params:
+    target_id: "<object_id>"
+    desired_relative_ric_rect: [R,I,C,dR,dI,dC]
+    max_accel_km_s2: <float>
+- Inspect strategy:
+  module: "sim.mission.modules"
+  class_name: "InspectMissionStrategy"
+  params:
+    target_id: "<object_id>"
+    desired_relative_ric_rect: [R,I,C,dR,dI,dC]
+    boresight_body: [x,y,z]
+    max_accel_km_s2: <float>
+- Safe-hold strategy:
+  module: "sim.mission.modules"
+  class_name: "SafeHoldMissionStrategy"
+  params:
+    attitude_mode: "hold_current" | "hold_eci" | "sun_track"
+- Rocket launch strategy:
+  module: "sim.mission.modules"
+  class_name: "RocketMissionStrategy"
+  params:
+    launch_mode: "go_now" | "go_when_possible" | "wait_optimal_window"
+    orbital_goal: "pursuit" | "predefined_orbit"
+
+Mission Execution Pointers
+- Controller-pointing execution:
+  module: "sim.mission.modules"
+  class_name: "ControllerPointingExecution"
+  params:
+    thruster_direction_body: [x,y,z]
+    alignment_tolerance_deg: <float>
+    require_attitude_alignment: true|false
+    detumble_enter_rate_rad_s: <float|null>
+    detumble_exit_rate_rad_s: <float|null>
+- Predictive-burn execution:
+  module: "sim.mission.modules"
+  class_name: "PredictiveBurnExecution"
+  params:
+    lead_time_s: <float>
+    planning_period_s: <float|null>
+    alignment_tolerance_deg: <float>
+- Direct-integrated execution:
+  module: "sim.mission.modules"
+  class_name: "DirectIntegratedExecution"
+  params:
+    use_strategy_fallback_thrust: true|false
+    use_orbit_controller: true|false
+- Impulsive execution:
+  module: "sim.mission.modules"
+  class_name: "ImpulsiveExecution"
+  params:
+    pulse_period_s: <float>
+    pulse_width_s: <float>
+    pulse_phase_s: <float>
+    alignment_tolerance_deg: <float>
+- Safe-hold execution:
+  module: "sim.mission.modules"
+  class_name: "SafeHoldExecution"
+  params:
+    attitude_controller_budget_ms: <float>
+
 Mission Module Pointers
-- mission_objectives are executed each master_sim step when provided.
 - Satellite mission module:
   module: "sim.mission.modules"
   class_name: "SatelliteMissionModule"
@@ -161,8 +251,10 @@ Agent Sections (rocket/chaser/target)
 - guidance: rocket guidance pointer only
 - orbit_control: orbit controller pointer
 - attitude_control: attitude controller pointer
+- mission_strategy: top-level mission/intent pointer
+- mission_execution: execution-layer pointer that calls controllers and arbitrates commands
 - mission_objectives: list of objective pointers
-  - these can act as mission modules that drive thrust/attitude/launch timing.
+  - legacy mission module path retained for compatibility.
 - bridge: SIL/HIL pointer
 - knowledge: refresh/conditions/noise/estimation settings
 
@@ -297,6 +389,8 @@ Plugin Contract Validation (strict mode)
 - rocket/chaser/target orbit_control: must construct and implement act(belief, t_s, budget_ms)
 - rocket/chaser/target attitude_control: must construct and implement act(...)
 - bridge (if enabled): must provide at least one of step/start/send_command/receive_command
+- mission_strategy (if set): should provide update(...), plan(...), or decide(...)
+- mission_execution (if set): should provide update(...), execute(...), or act(...)
 - mission_objective pointers: runtime mission modules are executed via update(...)
 
 Important Current Scope

@@ -34,6 +34,8 @@ class AgentSection:
     guidance: AlgorithmPointer | None = None
     orbit_control: AlgorithmPointer | None = None
     attitude_control: AlgorithmPointer | None = None
+    mission_strategy: AlgorithmPointer | None = None
+    mission_execution: AlgorithmPointer | None = None
     mission_objectives: list[AlgorithmPointer] = field(default_factory=list)
     bridge: BridgePointer | None = None
     knowledge: dict[str, Any] = field(default_factory=dict)
@@ -159,6 +161,8 @@ def _parse_agent_section(value: Any, role: str) -> AgentSection:
         guidance=_parse_algorithm_pointer(d.get("guidance")),
         orbit_control=_parse_algorithm_pointer(d.get("orbit_control")),
         attitude_control=_parse_algorithm_pointer(d.get("attitude_control")),
+        mission_strategy=_parse_algorithm_pointer(d.get("mission_strategy")),
+        mission_execution=_parse_algorithm_pointer(d.get("mission_execution")),
         mission_objectives=[p for p in (_parse_algorithm_pointer(x) for x in objectives) if p is not None],
         bridge=_parse_bridge_pointer(d.get("bridge")),
         knowledge=dict(d.get("knowledge", {}) or {}),

@@ -53,6 +53,345 @@ class TimeSplitThrustMission:
 
 
 class TestMasterSimulator(unittest.TestCase):
+    def test_strategy_and_execution_layers_drive_satellite_command_stack(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "strategy_execution_stack",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "curv", "state": [0.1, -1.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "PursuitMissionStrategy",
+                        "params": {"target_id": "target", "max_accel_km_s2": 2.0e-5},
+                    },
+                    "mission_execution": {
+                        "module": "sim.mission.modules",
+                        "class_name": "ControllerPointingExecution",
+                        "params": {"alignment_tolerance_deg": 180.0},
+                    },
+                    "orbit_control": {
+                        "module": "sim.control.orbit.lqr",
+                        "class_name": "HCWLQRController",
+                        "params": {
+                            "mean_motion_rad_s": 0.001078,
+                            "max_accel_km_s2": 2.0e-5,
+                            "design_dt_s": 1.0,
+                            "ric_curv_state_slice": [0, 6],
+                            "chief_eci_state_slice": [6, 12],
+                        },
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                },
+                "simulator": {
+                    "duration_s": 1.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_strategy_execution_stack",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float)
+        self.assertGreater(float(np.linalg.norm(thrust_hist[-1, :])), 0.0)
+        summary = dict(payload["summary"])
+        self.assertGreater(float(summary["thrust_stats"]["chaser"]["total_dv_m_s"]), 0.0)
+
+    def test_predictive_burn_execution_fires_with_pursuit_strategy(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "predictive_burn_execution",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "curv", "state": [0.0, -3.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "PursuitMissionStrategy",
+                        "params": {"target_id": "target", "max_accel_km_s2": 2.0e-5},
+                    },
+                    "mission_execution": {
+                        "module": "sim.mission.modules",
+                        "class_name": "PredictiveBurnExecution",
+                        "params": {"target_id": "target", "lead_time_s": 0.0, "alignment_tolerance_deg": 180.0},
+                    },
+                    "orbit_control": {
+                        "module": "sim.control.orbit.lqr",
+                        "class_name": "HCWLQRController",
+                        "params": {
+                            "mean_motion_rad_s": 0.001078,
+                            "max_accel_km_s2": 2.0e-5,
+                            "design_dt_s": 1.0,
+                            "ric_curv_state_slice": [0, 6],
+                            "chief_eci_state_slice": [6, 12],
+                        },
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                },
+                "simulator": {
+                    "duration_s": 2.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_predictive_burn_execution",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float)
+        thrust_norm = np.linalg.norm(np.nan_to_num(thrust_hist, nan=0.0), axis=1)
+        self.assertGreater(float(np.max(thrust_norm)), 0.0)
+
+    def test_stationkeep_strategy_drives_orbit_targeting_through_execution(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "stationkeep_execution",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "rect", "state": [1.0, -2.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "StationKeepMissionStrategy",
+                        "params": {
+                            "target_id": "target",
+                            "desired_relative_ric_rect": [0.0, -0.5, 0.0, 0.0, 0.0, 0.0],
+                            "max_accel_km_s2": 2.0e-5,
+                        },
+                    },
+                    "mission_execution": {
+                        "module": "sim.mission.modules",
+                        "class_name": "ControllerPointingExecution",
+                        "params": {"alignment_tolerance_deg": 180.0},
+                    },
+                    "orbit_control": {
+                        "module": "sim.control.orbit.baseline",
+                        "class_name": "StationkeepingController",
+                        "params": {
+                            "target_state": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                            "kp_pos": 1.0e-5,
+                            "kd_vel": 5.0e-4,
+                            "max_accel_km_s2": 2.0e-5,
+                        },
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                },
+                "simulator": {
+                    "duration_s": 1.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_stationkeep_execution",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float)
+        self.assertGreater(float(np.linalg.norm(thrust_hist[-1, :])), 0.0)
+
+    def test_safe_hold_strategy_and_execution_hold_zero_thrust(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "safe_hold_execution",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "rect", "state": [0.5, -1.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "SafeHoldMissionStrategy",
+                        "params": {"attitude_mode": "hold_current"},
+                    },
+                    "mission_execution": {
+                        "module": "sim.mission.modules",
+                        "class_name": "SafeHoldExecution",
+                        "params": {},
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                },
+                "simulator": {
+                    "duration_s": 2.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_safe_hold_execution",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float)
+        self.assertTrue(np.allclose(np.nan_to_num(thrust_hist, nan=0.0), 0.0))
+
+    def test_impulsive_execution_pulses_burns(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "impulsive_execution",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "rect", "state": [0.0, -2.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "StationKeepMissionStrategy",
+                        "params": {
+                            "target_id": "target",
+                            "desired_relative_ric_rect": [0.0, -0.5, 0.0, 0.0, 0.0, 0.0],
+                            "max_accel_km_s2": 2.0e-5,
+                        },
+                    },
+                    "mission_execution": {
+                        "module": "sim.mission.modules",
+                        "class_name": "ImpulsiveExecution",
+                        "params": {
+                            "alignment_tolerance_deg": 180.0,
+                            "pulse_period_s": 2.0,
+                            "pulse_width_s": 0.25,
+                            "pulse_phase_s": 0.0,
+                        },
+                    },
+                    "orbit_control": {
+                        "module": "sim.control.orbit.baseline",
+                        "class_name": "StationkeepingController",
+                        "params": {
+                            "target_state": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                            "kp_pos": 1.0e-5,
+                            "kd_vel": 5.0e-4,
+                            "max_accel_km_s2": 2.0e-5,
+                        },
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                },
+                "simulator": {
+                    "duration_s": 3.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_impulsive_execution",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.linalg.norm(np.nan_to_num(np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float), nan=0.0), axis=1)
+        self.assertGreater(float(np.max(thrust_hist)), 0.0)
+        self.assertTrue(np.any(np.isclose(thrust_hist, 0.0)))
+
     def test_master_runner_updates_knowledge_and_world_truth_after_propagation(self):
         cfg = scenario_config_from_dict(
             {

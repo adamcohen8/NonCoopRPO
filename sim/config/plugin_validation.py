@@ -16,6 +16,8 @@ _CONTRACTS = {
     "guidance": PluginContract(methods_all=("command",), allow_function=False),
     "orbit_control": PluginContract(methods_all=("act",), allow_function=False),
     "attitude_control": PluginContract(methods_all=("act",), allow_function=False),
+    "mission_strategy": PluginContract(methods_all=(), methods_any=("update", "plan", "decide"), allow_function=True),
+    "mission_execution": PluginContract(methods_all=(), methods_any=("update", "execute", "act"), allow_function=True),
     "bridge": PluginContract(methods_all=(), methods_any=("step", "start", "send_command", "receive_command"), allow_function=True),
     "mission_objective": PluginContract(methods_all=(), methods_any=("evaluate", "update", "check", "act"), allow_function=True),
 }
@@ -86,6 +88,14 @@ def validate_scenario_plugins(cfg: Any) -> list[str]:
                 getattr(cfg.rocket, "attitude_control", None), _CONTRACTS["attitude_control"], "rocket.attitude_control"
             )
         )
+        errs.extend(
+            _validate_pointer(getattr(cfg.rocket, "mission_strategy", None), _CONTRACTS["mission_strategy"], "rocket.mission_strategy")
+        )
+        errs.extend(
+            _validate_pointer(
+                getattr(cfg.rocket, "mission_execution", None), _CONTRACTS["mission_execution"], "rocket.mission_execution"
+            )
+        )
         rb = getattr(cfg.rocket, "bridge", None)
         if rb is not None and getattr(rb, "enabled", False):
             errs.extend(_validate_pointer(rb, _CONTRACTS["bridge"], "rocket.bridge"))
@@ -102,6 +112,14 @@ def validate_scenario_plugins(cfg: Any) -> list[str]:
                 getattr(cfg.chaser, "attitude_control", None), _CONTRACTS["attitude_control"], "chaser.attitude_control"
             )
         )
+        errs.extend(
+            _validate_pointer(getattr(cfg.chaser, "mission_strategy", None), _CONTRACTS["mission_strategy"], "chaser.mission_strategy")
+        )
+        errs.extend(
+            _validate_pointer(
+                getattr(cfg.chaser, "mission_execution", None), _CONTRACTS["mission_execution"], "chaser.mission_execution"
+            )
+        )
         cb = getattr(cfg.chaser, "bridge", None)
         if cb is not None and getattr(cb, "enabled", False):
             errs.extend(_validate_pointer(cb, _CONTRACTS["bridge"], "chaser.bridge"))
@@ -116,6 +134,14 @@ def validate_scenario_plugins(cfg: Any) -> list[str]:
         errs.extend(
             _validate_pointer(
                 getattr(cfg.target, "attitude_control", None), _CONTRACTS["attitude_control"], "target.attitude_control"
+            )
+        )
+        errs.extend(
+            _validate_pointer(getattr(cfg.target, "mission_strategy", None), _CONTRACTS["mission_strategy"], "target.mission_strategy")
+        )
+        errs.extend(
+            _validate_pointer(
+                getattr(cfg.target, "mission_execution", None), _CONTRACTS["mission_execution"], "target.mission_execution"
             )
         )
         tb = getattr(cfg.target, "bridge", None)
