@@ -38,8 +38,8 @@ class SimulationProfilesTests(unittest.TestCase):
 
     def test_high_fidelity_integrator(self):
         p = get_simulation_profile("high_fidelity")
-        self.assertEqual(p.orbit_integrator, "adaptive")
-        self.assertEqual(p.kernel_integrator, "adaptive")
+        self.assertEqual(p.orbit_integrator, "rkf78")
+        self.assertEqual(p.kernel_integrator, "rkf78")
 
     def test_default_env_does_not_pin_static_sun_moon_positions(self):
         env = default_env_for_profile("ops")

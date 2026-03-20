@@ -88,6 +88,15 @@ class TestObjectKnowledge(unittest.TestCase):
         hist = log.knowledge_by_observer["obs"]["tgt"]
         self.assertEqual(hist.shape, (41, 6))
         self.assertTrue(np.any(np.isfinite(hist)))
+        summary = observer.knowledge_base.consistency_summary()
+        self.assertIn("tgt", summary)
+        self.assertGreater(float(summary["tgt"]["measurement_count"]), 0.0)
+        self.assertGreater(float(summary["tgt"]["update_count"]), 0.0)
+        self.assertIsNotNone(summary["tgt"]["nis_mean"])
+        self.assertIsNotNone(summary["tgt"]["nees_mean"])
+        detect = observer.knowledge_base.detection_summary()
+        self.assertEqual(int(detect["tgt"]["status_counts"]["detected"]), int(detect["tgt"]["detected_count"]))
+        self.assertGreater(float(detect["tgt"]["detection_rate"]), 0.0)
 
     def test_observer_has_no_knowledge_when_out_of_range(self):
         dt_s = 1.0
@@ -112,6 +121,107 @@ class TestObjectKnowledge(unittest.TestCase):
         log = SimulationKernel(SimConfig(dt_s=dt_s, steps=20, controller_budget_ms=1.0), [observer, target]).run()
         hist = log.knowledge_by_observer["obs"]["tgt"]
         self.assertTrue(np.isnan(hist).all())
+        summary = observer.knowledge_base.consistency_summary()
+        self.assertEqual(int(summary["tgt"]["measurement_count"]), 0)
+        self.assertEqual(int(summary["tgt"]["update_count"]), 0)
+        detect = observer.knowledge_base.detection_summary()
+        self.assertEqual(int(detect["tgt"]["detected_count"]), 0)
+        self.assertGreater(int(detect["tgt"]["status_counts"]["range"]), 0)
+
+    def test_sensor_solid_angle_blocks_detection_when_boresight_misses(self):
+        dt_s = 1.0
+        observer = _make_sat("obs", phase_rad=0.0, dt_s=dt_s)
+        target = _make_sat("tgt", phase_rad=0.0, dt_s=dt_s)
+        observer.truth.position_eci_km = np.array([7000.0, 0.0, 0.0], dtype=float)
+        target.truth.position_eci_km = np.array([7100.0, 0.0, 0.0], dtype=float)
+        target.truth.velocity_eci_km_s = observer.truth.velocity_eci_km_s.copy()
+        observer.knowledge_base = ObjectKnowledgeBase(
+            observer_id="obs",
+            dt_s=dt_s,
+            rng=np.random.default_rng(3),
+            tracked_objects=[
+                TrackedObjectConfig(
+                    target_id="tgt",
+                    conditions=KnowledgeConditionConfig(
+                        refresh_rate_s=1.0,
+                        max_range_km=5000.0,
+                        require_line_of_sight=False,
+                        sensor_position_body_m=np.array([1.0, 0.0, 0.0], dtype=float),
+                        solid_angle_sr=float(np.pi),
+                    ),
+                    sensor_noise=KnowledgeNoiseConfig(
+                        pos_sigma_km=np.zeros(3),
+                        vel_sigma_km_s=np.zeros(3),
+                    ),
+                )
+            ],
+        )
+        log = SimulationKernel(SimConfig(dt_s=dt_s, steps=2, controller_budget_ms=1.0), [observer, target]).run()
+        self.assertTrue(np.any(np.isfinite(log.knowledge_by_observer["obs"]["tgt"])))
+
+        observer = _make_sat("obs", phase_rad=0.0, dt_s=dt_s)
+        target = _make_sat("tgt", phase_rad=0.0, dt_s=dt_s)
+        observer.truth.position_eci_km = np.array([7000.0, 0.0, 0.0], dtype=float)
+        observer.truth.attitude_quat_bn = np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
+        target.truth.position_eci_km = np.array([7100.0, 0.0, 0.0], dtype=float)
+        target.truth.velocity_eci_km_s = observer.truth.velocity_eci_km_s.copy()
+        observer.knowledge_base = ObjectKnowledgeBase(
+            observer_id="obs",
+            dt_s=dt_s,
+            rng=np.random.default_rng(4),
+            tracked_objects=[
+                TrackedObjectConfig(
+                    target_id="tgt",
+                    conditions=KnowledgeConditionConfig(
+                        refresh_rate_s=1.0,
+                        max_range_km=5000.0,
+                        require_line_of_sight=False,
+                        sensor_position_body_m=np.array([1.0, 0.0, 0.0], dtype=float),
+                        solid_angle_sr=float(np.pi),
+                    ),
+                    sensor_noise=KnowledgeNoiseConfig(
+                        pos_sigma_km=np.zeros(3),
+                        vel_sigma_km_s=np.zeros(3),
+                    ),
+                )
+            ],
+        )
+        log = SimulationKernel(SimConfig(dt_s=dt_s, steps=2, controller_budget_ms=1.0), [observer, target]).run()
+        self.assertTrue(np.isnan(log.knowledge_by_observer["obs"]["tgt"]).all())
+        detect = observer.knowledge_base.detection_summary()
+        self.assertGreater(int(detect["tgt"]["status_counts"]["solid_angle"]), 0)
+
+    def test_solid_angle_4pi_disables_directional_gating(self):
+        dt_s = 1.0
+        observer = _make_sat("obs", phase_rad=0.0, dt_s=dt_s)
+        target = _make_sat("tgt", phase_rad=0.0, dt_s=dt_s)
+        observer.truth.position_eci_km = np.array([7000.0, 0.0, 0.0], dtype=float)
+        observer.truth.attitude_quat_bn = np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
+        target.truth.position_eci_km = np.array([7100.0, 0.0, 0.0], dtype=float)
+        target.truth.velocity_eci_km_s = observer.truth.velocity_eci_km_s.copy()
+        observer.knowledge_base = ObjectKnowledgeBase(
+            observer_id="obs",
+            dt_s=dt_s,
+            rng=np.random.default_rng(5),
+            tracked_objects=[
+                TrackedObjectConfig(
+                    target_id="tgt",
+                    conditions=KnowledgeConditionConfig(
+                        refresh_rate_s=1.0,
+                        max_range_km=5000.0,
+                        require_line_of_sight=False,
+                        sensor_position_body_m=np.array([1.0, 0.0, 0.0], dtype=float),
+                        solid_angle_sr=float(4.0 * np.pi),
+                    ),
+                    sensor_noise=KnowledgeNoiseConfig(
+                        pos_sigma_km=np.zeros(3),
+                        vel_sigma_km_s=np.zeros(3),
+                    ),
+                )
+            ],
+        )
+        log = SimulationKernel(SimConfig(dt_s=dt_s, steps=2, controller_budget_ms=1.0), [observer, target]).run()
+        self.assertTrue(np.any(np.isfinite(log.knowledge_by_observer["obs"]["tgt"])))
 
 
 if __name__ == "__main__":

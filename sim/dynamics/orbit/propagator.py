@@ -190,6 +190,7 @@ class OrbitPropagator:
             return np.hstack((x_local[3:], a))
 
         if self.integrator in ("rkf78", "dopri5", "adaptive"):
+            adaptive_method = "rkf78" if self.integrator in ("rkf78", "adaptive") else "dopri5"
             return integrate_adaptive(
                 deriv_fn=deriv,
                 t_s=t_s,
@@ -197,5 +198,6 @@ class OrbitPropagator:
                 dt_s=dt_s,
                 atol=self.adaptive_atol,
                 rtol=self.adaptive_rtol,
+                method=adaptive_method,
             )
         return rk4_step_state(deriv_fn=deriv, t_s=t_s, x=x_eci, dt_s=dt_s)

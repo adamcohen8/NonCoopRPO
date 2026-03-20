@@ -134,6 +134,43 @@ You have an active HPOP cross-validation workflow:
 
 For spherical harmonics parity, the validator can use HPOP’s `GGM03C.txt` coefficients directly.
 
+## Automated Validation Harness
+
+You can now run a config-driven validation suite that combines:
+
+- plugin/config validation,
+- end-to-end simulation runs, and
+- HPOP cross-validation checks
+
+with tolerance gates and consolidated JSON/Markdown reporting.
+
+Smoke suite:
+
+```bash
+python validation/automated_validation_harness.py --spec configs/validation_harness_smoke.yaml
+```
+
+Default suite:
+
+```bash
+python validation/automated_validation_harness.py --spec configs/validation_harness_default.yaml
+```
+
+The default suite now includes:
+
+- plugin validation,
+- a single-run integrated rendezvous benchmark,
+- Monte Carlo rendezvous validation,
+- high-fidelity orbit-stack Monte Carlo validation, and
+- multiple HPOP parity cases (`two_body`, `j2`, `j3`, `sh8x8`)
+
+If `--spec` is omitted, the harness runs a built-in smoke suite.
+
+Artifacts are written under the suite `output_dir`, including:
+
+- `validation_harness_report.json`
+- `validation_harness_report.md`
+
 ## Quick Start
 
 ### 1) Create and activate venv

@@ -226,6 +226,7 @@ def run_validation(
     density_override_kg_m3: float | None = None,
     sun_dir_eci: np.ndarray | None = None,
     plot_mode: str = "interactive",
+    output_dir: Path | None = None,
 ) -> dict[str, str]:
     sat_states = hpop_root / "SatelliteStates.txt"
     hpop = _parse_hpop_satellite_states(sat_states)
@@ -276,7 +277,7 @@ def run_validation(
     pos_err_norm_m = np.linalg.norm(pos_err_m, axis=1)
     vel_err_norm_mm_s = np.linalg.norm(vel_err_mm_s, axis=1)
 
-    outdir = REPO_ROOT / "outputs" / "validation_hpop"
+    outdir = Path(output_dir) if output_dir is not None else REPO_ROOT / "outputs" / "validation_hpop"
     if plot_mode in ("save", "both"):
         outdir.mkdir(parents=True, exist_ok=True)
 
@@ -404,9 +405,16 @@ if __name__ == "__main__":
     parser.add_argument("--sun-dir-y", type=float, default=0.0, help="ECI sun direction y component for SRP mode.")
     parser.add_argument("--sun-dir-z", type=float, default=0.0, help="ECI sun direction z component for SRP mode.")
     parser.add_argument("--plot-mode", choices=["interactive", "save", "both"], default="interactive")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="",
+        help="Optional artifact directory override for saved plots.",
+    )
     args = parser.parse_args()
 
     hpop_root = Path(args.hpop_root).expanduser().resolve()
+    output_dir = Path(args.output_dir).expanduser().resolve() if str(args.output_dir).strip() else None
     if bool(args.suite):
         suite_models = ["two_body", "j2", "j3", "j4", "sh8x8"]
         all_res: list[dict[str, str]] = []
@@ -421,6 +429,7 @@ if __name__ == "__main__":
                 density_override_kg_m3=None if not np.isfinite(float(args.density_override_kg_m3)) else float(args.density_override_kg_m3),
                 sun_dir_eci=np.array([float(args.sun_dir_x), float(args.sun_dir_y), float(args.sun_dir_z)], dtype=float),
                 plot_mode=str(args.plot_mode),
+                output_dir=output_dir,
             )
             all_res.append(r)
             print(
@@ -437,6 +446,7 @@ if __name__ == "__main__":
             density_override_kg_m3=None if not np.isfinite(float(args.density_override_kg_m3)) else float(args.density_override_kg_m3),
             sun_dir_eci=np.array([float(args.sun_dir_x), float(args.sun_dir_y), float(args.sun_dir_z)], dtype=float),
             plot_mode=str(args.plot_mode),
+            output_dir=output_dir,
         )
         print("HPOP comparison results:")
         for k, v in res.items():

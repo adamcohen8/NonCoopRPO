@@ -54,6 +54,7 @@ from sim.app.services import (
 
 
 OUTPUT_MODES = ["interactive", "save", "both"]
+ORBIT_INTEGRATOR_OPTIONS = ["rk4", "rkf78", "dopri5"]
 ZERO_POINTER = {"kind": "python", "module": "sim.control.orbit.zero_controller", "class_name": "ZeroController", "params": {}}
 ZERO_TORQUE_POINTER = {"kind": "python", "module": "sim.control.attitude.zero_torque", "class_name": "ZeroTorqueController", "params": {}}
 
@@ -774,6 +775,7 @@ class MainWindow(QMainWindow):
             if signal is not None:
                 signal.connect(self._mark_dirty)
         combo_boxes = [
+            self.orbit_integrator_combo,
             self.output_mode_combo,
             self.chaser_init_mode,
             self.target_preset,
@@ -836,6 +838,8 @@ class MainWindow(QMainWindow):
         spin_boxes = [
             self.duration_spin,
             self.dt_spin,
+            self.orbit_adaptive_atol_spin,
+            self.orbit_adaptive_rtol_spin,
             self.orbit_substep_spin,
             self.attitude_substep_spin,
             self.mc_iterations_spin,
@@ -869,10 +873,12 @@ class MainWindow(QMainWindow):
         spin_boxes.extend(self.chaser_init_values)
         for widget in spin_boxes:
             widget.valueChanged.connect(self._mark_dirty)
+        self.orbit_integrator_combo.currentIndexChanged.connect(self._refresh_integrator_visibility)
 
     def _build_scenario_tab(self) -> QWidget:
         tab = QWidget()
         layout = QFormLayout(tab)
+        self.scenario_form_layout = layout
         self.scenario_name_edit = QLineEdit()
         self.scenario_name_edit.setMinimumWidth(320)
         self.duration_spin = QDoubleSpinBox()
@@ -883,6 +889,14 @@ class MainWindow(QMainWindow):
         self.dt_spin.setRange(0.000001, 1.0e6)
         self.dt_spin.setDecimals(6)
         self.dt_spin.setValue(1.0)
+        self.orbit_integrator_combo = QComboBox()
+        self.orbit_integrator_combo.addItems(ORBIT_INTEGRATOR_OPTIONS)
+        self.orbit_adaptive_atol_spin = self._make_free_spinbox(decimals=12)
+        self.orbit_adaptive_atol_spin.setRange(0.0, 1.0)
+        self.orbit_adaptive_atol_spin.setValue(1.0e-9)
+        self.orbit_adaptive_rtol_spin = self._make_free_spinbox(decimals=12)
+        self.orbit_adaptive_rtol_spin.setRange(0.0, 1.0)
+        self.orbit_adaptive_rtol_spin.setValue(1.0e-7)
         self.output_mode_combo = QComboBox()
         self.output_mode_combo.addItems(OUTPUT_MODES)
         self.output_dir_edit = QLineEdit()
@@ -907,8 +921,11 @@ class MainWindow(QMainWindow):
         layout.addRow("Scenario Name", self.scenario_name_edit)
         layout.addRow("Duration (s)", self.duration_spin)
         layout.addRow("dt (s)", self.dt_spin)
+        layout.addRow("Orbit Integrator", self.orbit_integrator_combo)
         layout.addRow("Output Mode", self.output_mode_combo)
         layout.addRow("Output Directory", self.output_dir_edit)
+        layout.addRow("Adaptive Abs Tol", self.orbit_adaptive_atol_spin)
+        layout.addRow("Adaptive Rel Tol", self.orbit_adaptive_rtol_spin)
         orbit_substep_row = QWidget()
         orbit_substep_layout = QHBoxLayout(orbit_substep_row)
         orbit_substep_layout.setContentsMargins(0, 0, 0, 0)
@@ -1457,10 +1474,10 @@ class MainWindow(QMainWindow):
         self.results_tabs.addTab(artifacts_tab, "Artifacts")
         return tab
 
-    def _make_free_spinbox(self) -> QDoubleSpinBox:
+    def _make_free_spinbox(self, decimals: int = 6) -> QDoubleSpinBox:
         widget = QDoubleSpinBox()
         widget.setRange(-1.0e12, 1.0e12)
-        widget.setDecimals(6)
+        widget.setDecimals(int(decimals))
         return widget
 
     def _configure_compact_spinbox(self, widget: QDoubleSpinBox, width: int = 84) -> None:
@@ -2113,6 +2130,9 @@ class MainWindow(QMainWindow):
         disturbance_torques = dict(att_dyn.get("disturbance_torques", {}) or {})
         orbit_substep_val = orbit_dyn.get("orbit_substep_s")
         attitude_substep_val = att_dyn.get("attitude_substep_s")
+        self._set_combo_text_or_append(self.orbit_integrator_combo, str(orbit_dyn.get("integrator", "rk4") or "rk4"))
+        self.orbit_adaptive_atol_spin.setValue(float(orbit_dyn.get("adaptive_atol", 1.0e-9) or 0.0))
+        self.orbit_adaptive_rtol_spin.setValue(float(orbit_dyn.get("adaptive_rtol", 1.0e-7) or 0.0))
         self.orbit_substep_enabled_check.setChecked(orbit_substep_val is not None)
         self.attitude_substep_enabled_check.setChecked(attitude_substep_val is not None)
         self.orbit_substep_spin.setValue(float(orbit_substep_val or 0.0))
@@ -2130,6 +2150,7 @@ class MainWindow(QMainWindow):
         self.att_drag_check.setChecked(bool(disturbance_torques.get("drag", False)))
         self.att_srp_check.setChecked(bool(disturbance_torques.get("srp", False)))
         self._refresh_substep_visibility()
+        self._refresh_integrator_visibility()
 
         target_specs = dict(target.get("specs", {}) or {})
         target_coes = dict(target.get("initial_state", {}).get("coes", {}) or {})
@@ -2255,6 +2276,9 @@ class MainWindow(QMainWindow):
 
         orbit_substep = float(self.orbit_substep_spin.value())
         attitude_substep = float(self.attitude_substep_spin.value())
+        orbit_dyn["integrator"] = self.orbit_integrator_combo.currentText()
+        orbit_dyn["adaptive_atol"] = float(self.orbit_adaptive_atol_spin.value())
+        orbit_dyn["adaptive_rtol"] = float(self.orbit_adaptive_rtol_spin.value())
         orbit_dyn["orbit_substep_s"] = orbit_substep if (self.orbit_substep_enabled_check.isChecked() and orbit_substep > 0.0) else None
         att_dyn["attitude_substep_s"] = attitude_substep if (self.attitude_substep_enabled_check.isChecked() and attitude_substep > 0.0) else None
         att_dyn["enabled"] = bool(self.attitude_enabled_check.isChecked())
@@ -2977,3 +3001,13 @@ class MainWindow(QMainWindow):
     def _refresh_substep_visibility(self) -> None:
         self.orbit_substep_spin.setVisible(bool(self.orbit_substep_enabled_check.isChecked()))
         self.attitude_substep_spin.setVisible(bool(self.attitude_substep_enabled_check.isChecked()))
+
+    def _refresh_integrator_visibility(self) -> None:
+        adaptive_integrator = self.orbit_integrator_combo.currentText() in ("rkf78", "dopri5", "adaptive")
+        layout = getattr(self, "scenario_form_layout", None)
+        if layout is not None and hasattr(layout, "setRowVisible"):
+            layout.setRowVisible(self.orbit_adaptive_atol_spin, adaptive_integrator)
+            layout.setRowVisible(self.orbit_adaptive_rtol_spin, adaptive_integrator)
+        else:
+            self.orbit_adaptive_atol_spin.setVisible(adaptive_integrator)
+            self.orbit_adaptive_rtol_spin.setVisible(adaptive_integrator)

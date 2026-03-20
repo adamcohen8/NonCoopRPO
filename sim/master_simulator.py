@@ -676,7 +676,12 @@ def _build_orbit_propagator(cfg: SimulationScenarioConfig) -> OrbitPropagator:
         plugins.append(third_body_sun_plugin)
     if bool(o.get("third_body_moon", False)):
         plugins.append(third_body_moon_plugin)
-    return OrbitPropagator(integrator="rk4", plugins=plugins)
+    return OrbitPropagator(
+        integrator=str(o.get("integrator", "rk4")),
+        plugins=plugins,
+        adaptive_atol=float(o.get("adaptive_atol", 1e-9)),
+        adaptive_rtol=float(o.get("adaptive_rtol", 1e-7)),
+    )
 
 
 @dataclass
@@ -999,8 +1004,15 @@ def _build_knowledge_base(observer_id: str, agent_cfg: Any, dt_s: float, rng: np
                     refresh_rate_s=float(k.get("refresh_rate_s", dt_s)),
                     max_range_km=cond.get("max_range_km"),
                     fov_half_angle_rad=cond.get("fov_half_angle_rad"),
+                    solid_angle_sr=cond.get("solid_angle_sr"),
                     require_line_of_sight=bool(cond.get("require_line_of_sight", False)),
                     dropout_prob=float(cond.get("dropout_prob", 0.0)),
+                    sensor_position_body_m=np.array(cond.get("sensor_position_body_m", [0.0, 0.0, 0.0]), dtype=float),
+                    sensor_boresight_body=(
+                        np.array(cond.get("sensor_boresight_body"), dtype=float)
+                        if cond.get("sensor_boresight_body") is not None
+                        else None
+                    ),
                 ),
                 sensor_noise=KnowledgeNoiseConfig(
                     pos_sigma_km=np.array(noise.get("pos_sigma_km", [0.01, 0.01, 0.01]), dtype=float),
@@ -2144,6 +2156,62 @@ def _extract_baseline_metrics(payload: dict[str, Any]) -> dict[str, float]:
     }
 
 
+def _aggregate_knowledge_consistency_from_runs(run_details: list[dict[str, Any]]) -> dict[str, Any]:
+    buckets: dict[tuple[str, str, str], list[float]] = {}
+    for detail in run_details:
+        summary = dict(detail.get("summary", {}) or {})
+        by_observer = dict(summary.get("knowledge_consistency_by_observer", {}) or {})
+        for observer_id, by_target in by_observer.items():
+            for target_id, metrics in dict(by_target or {}).items():
+                for metric_name, value in dict(metrics or {}).items():
+                    try:
+                        v = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if np.isfinite(v):
+                        buckets.setdefault((str(observer_id), str(target_id), str(metric_name)), []).append(v)
+    out: dict[str, dict[str, dict[str, float]]] = {}
+    for (observer_id, target_id, metric_name), values in sorted(buckets.items()):
+        obs_map = out.setdefault(observer_id, {})
+        tgt_map = obs_map.setdefault(target_id, {})
+        arr = np.array(values, dtype=float)
+        tgt_map[metric_name] = float(np.mean(arr)) if arr.size else float("nan")
+    return out
+
+
+def _aggregate_knowledge_detection_from_runs(run_details: list[dict[str, Any]]) -> dict[str, Any]:
+    buckets: dict[tuple[str, str, str], list[float]] = {}
+    status_counts: dict[tuple[str, str, str], int] = {}
+    for detail in run_details:
+        summary = dict(detail.get("summary", {}) or {})
+        by_observer = dict(summary.get("knowledge_detection_by_observer", {}) or {})
+        for observer_id, by_target in by_observer.items():
+            for target_id, metrics in dict(by_target or {}).items():
+                for metric_name, value in dict(metrics or {}).items():
+                    if metric_name == "status_counts" and isinstance(value, dict):
+                        for status, count in value.items():
+                            key = (str(observer_id), str(target_id), str(status))
+                            status_counts[key] = int(status_counts.get(key, 0)) + int(count)
+                        continue
+                    try:
+                        v = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if np.isfinite(v):
+                        buckets.setdefault((str(observer_id), str(target_id), str(metric_name)), []).append(v)
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for (observer_id, target_id, metric_name), values in sorted(buckets.items()):
+        obs_map = out.setdefault(observer_id, {})
+        tgt_map = obs_map.setdefault(target_id, {})
+        arr = np.array(values, dtype=float)
+        tgt_map[metric_name] = float(np.mean(arr)) if arr.size else float("nan")
+    for (observer_id, target_id, status), count in sorted(status_counts.items()):
+        obs_map = out.setdefault(observer_id, {})
+        tgt_map = obs_map.setdefault(target_id, {})
+        tgt_map.setdefault("status_counts", {})[status] = int(count)
+    return out
+
+
 def _build_baseline_comparison(current_payload: dict[str, Any], baseline_payload: dict[str, Any]) -> dict[str, Any]:
     cur = _extract_baseline_metrics(current_payload)
     base = _extract_baseline_metrics(baseline_payload)
@@ -2821,6 +2889,16 @@ def _run_single_config(
         "rocket_insertion_time_s": rocket_insertion_time_s,
         "thrust_stats": thrust_stats,
         "attitude_guardrail_stats": get_attitude_guardrail_stats(),
+        "knowledge_detection_by_observer": {
+            aid: a.knowledge_base.detection_summary()
+            for aid, a in agents.items()
+            if a.knowledge_base is not None
+        },
+        "knowledge_consistency_by_observer": {
+            aid: a.knowledge_base.consistency_summary()
+            for aid, a in agents.items()
+            if a.knowledge_base is not None
+        },
         "plot_outputs": plot_outputs,
         "animation_outputs": animation_outputs,
     }
@@ -2833,6 +2911,8 @@ def _run_single_config(
         "applied_thrust_by_object": {k: v.tolist() for k, v in thrust_out.items()},
         "applied_torque_by_object": {k: v.tolist() for k, v in torque_out.items()},
         "knowledge_by_observer": {o: {t: a.tolist() for t, a in bt.items()} for o, bt in knowledge_out.items()},
+        "knowledge_detection_by_observer": dict(summary.get("knowledge_detection_by_observer", {}) or {}),
+        "knowledge_consistency_by_observer": dict(summary.get("knowledge_consistency_by_observer", {}) or {}),
         "bridge_events_by_object": bridge_hist,
         "rocket_throttle_cmd": throttle_hist.get("rocket", np.array([])).tolist() if throttle_hist else [],
         "rocket_metrics": {k: v.tolist() for k, v in rocket_metrics_out.items()},
@@ -3167,6 +3247,8 @@ def run_master_simulation(
         "delta_v_remaining_m_s_by_object": {
             oid: _quantile_stats(vals, (50.0, 90.0, 99.0)) for oid, vals in sorted(dv_remaining_m_s_by_object.items())
         },
+        "knowledge_detection_by_observer": _aggregate_knowledge_detection_from_runs(run_details),
+        "knowledge_consistency_by_observer": _aggregate_knowledge_consistency_from_runs(run_details),
     }
 
     keepout_threshold = _safe_float(gates.get("min_closest_approach_km"))
