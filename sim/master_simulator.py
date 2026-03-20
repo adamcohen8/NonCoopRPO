@@ -231,7 +231,7 @@ def _rocket_altitude_km(r_eci_km: np.ndarray, t_s: float, sim_cfg: RocketSimConf
     return float(alt_km)
 
 
-def _module_obj(pointer) -> Any | None:
+def _module_obj(pointer, *, extra_kwargs: dict[str, Any] | None = None) -> Any | None:
     if pointer is None:
         return None
     if pointer.module is None:
@@ -240,7 +240,10 @@ def _module_obj(pointer) -> Any | None:
         mod = importlib.import_module(pointer.module)
         if pointer.class_name:
             cls = getattr(mod, pointer.class_name)
-            return cls(**dict(pointer.params or {}))
+            kwargs = dict(pointer.params or {})
+            if extra_kwargs:
+                kwargs.update(dict(extra_kwargs))
+            return cls(**kwargs)
         if pointer.function:
             fn = getattr(mod, pointer.function)
             return fn
@@ -703,6 +706,7 @@ class AgentRuntime:
     waiting_for_launch: bool
     orbital_isp_s: float | None = None
     dry_mass_kg: float | None = None
+    fuel_capacity_kg: float | None = None
 
 
 @dataclass
@@ -781,6 +785,7 @@ def _create_satellite_runtime(
     missions = [m for m in missions if m is not None]
     sat_isp_s = _resolve_satellite_isp_s(specs)
     sat_dry_mass_kg: float | None = None
+    sat_fuel_capacity_kg: float | None = None
     if "dry_mass_kg" in specs:
         try:
             sat_dry_mass_kg = float(specs.get("dry_mass_kg"))
@@ -788,6 +793,13 @@ def _create_satellite_runtime(
             sat_dry_mass_kg = None
         if sat_dry_mass_kg is not None and (not np.isfinite(sat_dry_mass_kg) or sat_dry_mass_kg < 0.0):
             sat_dry_mass_kg = None
+    if "fuel_mass_kg" in specs:
+        try:
+            sat_fuel_capacity_kg = float(specs.get("fuel_mass_kg"))
+        except (TypeError, ValueError):
+            sat_fuel_capacity_kg = None
+        if sat_fuel_capacity_kg is not None and (not np.isfinite(sat_fuel_capacity_kg) or sat_fuel_capacity_kg < 0.0):
+            sat_fuel_capacity_kg = None
     return AgentRuntime(
         object_id=object_id,
         kind="satellite",
@@ -814,6 +826,7 @@ def _create_satellite_runtime(
         waiting_for_launch=False,
         orbital_isp_s=(None if sat_isp_s <= 0.0 else float(sat_isp_s)),
         dry_mass_kg=sat_dry_mass_kg,
+        fuel_capacity_kg=sat_fuel_capacity_kg,
     )
 
 
@@ -896,7 +909,7 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         payload_mass_kg=float(r_specs.get("payload_mass_kg", 150.0)),
         thrust_axis_body=np.array(r_specs.get("thrust_axis_body", [1.0, 0.0, 0.0]), dtype=float),
     )
-    guidance = _module_obj(rc.guidance) or OpenLoopPitchProgramGuidance()
+    guidance = _build_rocket_guidance(rc)
     if bool(rocket_dyn.get("tvc_steering_enabled", False)):
         guidance = TVCSteeringGuidance(
             base_guidance=guidance,
@@ -954,7 +967,19 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         waiting_for_launch=False,
         orbital_isp_s=None,
         dry_mass_kg=None,
+        fuel_capacity_kg=None,
     )
+
+
+def _build_rocket_guidance(agent_cfg: Any) -> RocketGuidanceLaw:
+    base_pointer = getattr(agent_cfg, "base_guidance", None) or getattr(agent_cfg, "guidance", None)
+    guidance = _module_obj(base_pointer) or OpenLoopPitchProgramGuidance()
+    for modifier_pointer in list(getattr(agent_cfg, "guidance_modifiers", []) or []):
+        modifier_obj = _module_obj(modifier_pointer, extra_kwargs={"base_guidance": guidance})
+        if modifier_obj is None:
+            continue
+        guidance = modifier_obj
+    return guidance
 
 
 def _build_knowledge_base(observer_id: str, agent_cfg: Any, dt_s: float, rng: np.random.Generator) -> ObjectKnowledgeBase | None:
@@ -1099,6 +1124,8 @@ def _run_mission_strategy(
                 att_belief=att_belief,
                 rocket_state=agent.rocket_state,
                 rocket_vehicle_cfg=(agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
+                dry_mass_kg=agent.dry_mass_kg,
+                fuel_capacity_kg=agent.fuel_capacity_kg,
             )
         except TypeError:
             ret = method(truth=truth, t_s=t_s)
@@ -1121,7 +1148,7 @@ def _run_mission_execution(
     orb_belief: StateBelief | None = None,
     att_belief: StateBelief | None = None,
 ) -> dict[str, Any]:
-    execution = agent.mission_execution
+    execution = intent.get("_mission_execution_override", agent.mission_execution)
     if execution is None:
         return {}
     own_knowledge = agent.knowledge_base.snapshot() if agent.knowledge_base is not None else {}

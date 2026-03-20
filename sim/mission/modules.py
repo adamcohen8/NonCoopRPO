@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import importlib
 import logging
 from typing import Any
 
@@ -15,6 +16,13 @@ from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_dcm
 from sim.utils.quaternion import dcm_to_quaternion_bn, normalize_quaternion, quaternion_to_dcm_bn
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _MissionExecutiveMode:
+    name: str
+    strategy: Any | None
+    execution: Any | None
 
 
 def _unit(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -131,6 +139,45 @@ def _apply_orbit_controller_intent(controller: Any | None, intent: dict[str, Any
         _set_orbit_controller_target(controller, np.array(desired_eci, dtype=float).reshape(6))
 
 
+def _pointer_dict_to_obj(pointer: dict[str, Any] | None) -> Any | None:
+    if not isinstance(pointer, dict):
+        return None
+    module_name = str(pointer.get("module", "") or "").strip()
+    class_name = str(pointer.get("class_name", "") or "").strip()
+    function_name = str(pointer.get("function", "") or "").strip()
+    params = dict(pointer.get("params", {}) or {})
+    if not module_name:
+        return None
+    try:
+        mod = importlib.import_module(module_name)
+        if class_name:
+            cls = getattr(mod, class_name)
+            return cls(**params)
+        if function_name:
+            return getattr(mod, function_name)
+        return mod
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        logger.warning("Failed to construct nested mission pointer %r: %s", pointer, exc)
+        return None
+
+
+def _call_plugin_method(obj: Any | None, method_names: tuple[str, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    if obj is None:
+        return {}
+    for method_name in method_names:
+        if not hasattr(obj, method_name):
+            continue
+        method = getattr(obj, method_name)
+        try:
+            ret = method(**kwargs)
+        except TypeError:
+            ret = method(truth=kwargs.get("truth"), t_s=kwargs.get("t_s", 0.0))
+        if isinstance(ret, dict):
+            return ret
+        return {}
+    return {}
+
+
 def _relative_pd_accel_eci(
     *,
     truth: StateTruth,
@@ -152,6 +199,32 @@ def _relative_pd_accel_eci(
         a_cmd_ric *= amax / nrm
     c_ir = ric_dcm_ir_from_rv(target_state_eci[0], target_state_eci[1])
     return c_ir @ a_cmd_ric
+
+
+def _resolve_desired_state_from_inputs(
+    *,
+    target_id: str | None,
+    desired_state_source: str,
+    use_knowledge_for_targeting: bool,
+    desired_position_eci_km: np.ndarray | None,
+    desired_velocity_eci_km_s: np.ndarray | None,
+    own_knowledge: dict[str, StateBelief],
+    world_truth: dict[str, StateTruth],
+) -> tuple[np.ndarray, np.ndarray] | None:
+    src = str(desired_state_source).lower()
+    if src == "explicit":
+        if desired_position_eci_km is None or desired_velocity_eci_km_s is None:
+            return None
+        return (
+            np.array(desired_position_eci_km, dtype=float).reshape(3),
+            np.array(desired_velocity_eci_km_s, dtype=float).reshape(3),
+        )
+    return _resolve_target_state(
+        target_id=target_id,
+        use_knowledge_for_targeting=use_knowledge_for_targeting,
+        own_knowledge=own_knowledge,
+        world_truth=world_truth,
+    )
 
 
 def _desired_attitude_for_thrust(
@@ -455,6 +528,46 @@ class SafeHoldMissionStrategy:
 
 
 @dataclass
+class DesiredStateMissionStrategy:
+    target_id: str | None = None
+    desired_state_source: str = "target"  # target|explicit
+    use_knowledge_for_targeting: bool = True
+    desired_position_eci_km: np.ndarray | None = None
+    desired_velocity_eci_km_s: np.ndarray | None = None
+    align_to_thrust: bool = True
+
+    def update(
+        self,
+        *,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        desired = _resolve_desired_state_from_inputs(
+            target_id=self.target_id,
+            desired_state_source=self.desired_state_source,
+            use_knowledge_for_targeting=self.use_knowledge_for_targeting,
+            desired_position_eci_km=self.desired_position_eci_km,
+            desired_velocity_eci_km_s=self.desired_velocity_eci_km_s,
+            own_knowledge=own_knowledge,
+            world_truth=world_truth,
+        )
+        if desired is None:
+            return {
+                "strategy_name": "desired_state",
+                "mission_mode": {"strategy": "desired_state", "phase": "hold_no_target"},
+            }
+        x_des = np.hstack((desired[0], desired[1]))
+        return {
+            "strategy_name": "desired_state",
+            "target_id": self.target_id,
+            "desired_state_eci_6": x_des,
+            "align_to_thrust": bool(self.align_to_thrust),
+            "mission_mode": {"strategy": "desired_state", "source": str(self.desired_state_source)},
+        }
+
+
+@dataclass
 class DefensiveMissionStrategy:
     chaser_id: str = "chaser"
     defense_mode: str = "fixed_ric_axis"  # fixed_ric_axis|away_from_chaser
@@ -522,6 +635,448 @@ class DefensiveMissionStrategy:
 
 
 @dataclass
+class MissionExecutiveStrategy:
+    initial_mode: str | None = None
+    modes: list[dict[str, Any]] = field(default_factory=list)
+    transitions: list[dict[str, Any]] = field(default_factory=list)
+    _modes: dict[str, _MissionExecutiveMode] = field(default_factory=dict, init=False, repr=False)
+    _active_mode: str | None = field(default=None, init=False, repr=False)
+    _last_transition: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _active_mode_enter_t_s: float | None = field(default=None, init=False, repr=False)
+    _transition_armed: dict[int, bool] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        built: dict[str, _MissionExecutiveMode] = {}
+        for raw in list(self.modes or []):
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name", "") or "").strip()
+            if not name:
+                continue
+            built[name] = _MissionExecutiveMode(
+                name=name,
+                strategy=_pointer_dict_to_obj(dict(raw.get("mission_strategy", {}) or {})),
+                execution=_pointer_dict_to_obj(dict(raw.get("mission_execution", {}) or {})),
+            )
+        self._modes = built
+        if self.initial_mode is not None and str(self.initial_mode).strip() in self._modes:
+            self._active_mode = str(self.initial_mode).strip()
+        elif self._modes:
+            self._active_mode = next(iter(self._modes.keys()))
+        self._transition_armed = {i: True for i, _ in enumerate(list(self.transitions or []))}
+
+    @staticmethod
+    def _metric_suffix(trigger: str) -> str | None:
+        t = str(trigger).strip().lower()
+        if t.startswith("range_"):
+            return "km"
+        if t == "fuel_below_kg":
+            return "kg"
+        if t == "fuel_below_fraction":
+            return "fraction"
+        return None
+
+    def _fuel_metrics(
+        self,
+        *,
+        truth: StateTruth,
+        dry_mass_kg: float | None,
+        fuel_capacity_kg: float | None,
+        rocket_state: RocketState | None,
+        rocket_vehicle_cfg: RocketVehicleConfig | None,
+    ) -> tuple[float | None, float | None]:
+        if rocket_state is not None:
+            fuel_kg = float(np.sum(np.clip(np.array(rocket_state.stage_prop_remaining_kg, dtype=float), 0.0, np.inf)))
+            fuel0_kg = None
+            if rocket_vehicle_cfg is not None:
+                fuel0_kg = float(sum(float(s.propellant_mass_kg) for s in rocket_vehicle_cfg.stack.stages))
+            fuel_frac = None
+            if fuel0_kg is not None and fuel0_kg > 0.0:
+                fuel_frac = float(np.clip(fuel_kg / fuel0_kg, 0.0, 1.0))
+            return fuel_kg, fuel_frac
+        if dry_mass_kg is None or not np.isfinite(float(dry_mass_kg)):
+            return None, None
+        fuel_kg = float(max(float(truth.mass_kg) - float(dry_mass_kg), 0.0))
+        fuel_frac = None
+        if fuel_capacity_kg is not None and np.isfinite(float(fuel_capacity_kg)) and float(fuel_capacity_kg) > 0.0:
+            fuel_frac = float(np.clip(fuel_kg / float(fuel_capacity_kg), 0.0, 1.0))
+        elif fuel_kg <= 0.0:
+            fuel_frac = 0.0
+        return fuel_kg, fuel_frac
+
+    def _range_km(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        target_id: str | None,
+        use_knowledge: bool,
+    ) -> float | None:
+        tgt = _resolve_target_state(
+            target_id=target_id,
+            use_knowledge_for_targeting=use_knowledge,
+            own_knowledge=own_knowledge,
+            world_truth=world_truth,
+        )
+        if tgt is None:
+            return None
+        return float(np.linalg.norm(np.array(tgt[0], dtype=float) - np.array(truth.position_eci_km, dtype=float)))
+
+    @staticmethod
+    def _transition_applies_to_mode(transition: dict[str, Any], active_mode: str) -> bool:
+        raw = transition.get("from_mode", "*")
+        if raw is None:
+            return True
+        if isinstance(raw, (list, tuple)):
+            return active_mode in {str(x).strip() for x in raw}
+        token = str(raw).strip()
+        return token in {"", "*"} or token == active_mode
+
+    def _evaluate_transition(
+        self,
+        *,
+        transition: dict[str, Any],
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        dry_mass_kg: float | None,
+        rocket_state: RocketState | None,
+        rocket_vehicle_cfg: RocketVehicleConfig | None,
+        fuel_capacity_kg: float | None,
+    ) -> tuple[bool, str]:
+        trigger = str(transition.get("trigger", "") or "").strip().lower()
+        if trigger in {"range_lt", "range_gt"}:
+            range_km = self._range_km(
+                truth=truth,
+                own_knowledge=own_knowledge,
+                world_truth=world_truth,
+                target_id=(None if transition.get("target_id") is None else str(transition.get("target_id"))),
+                use_knowledge=bool(transition.get("use_knowledge_for_targeting", True)),
+            )
+            if range_km is None:
+                return False, "range_unavailable"
+            threshold_km = float(transition.get("threshold_km", transition.get("threshold", 0.0)) or 0.0)
+            if trigger == "range_lt":
+                return bool(range_km < threshold_km), f"range_km={range_km:.6f}<threshold_km={threshold_km:.6f}"
+            return bool(range_km > threshold_km), f"range_km={range_km:.6f}>threshold_km={threshold_km:.6f}"
+        fuel_kg, fuel_frac = self._fuel_metrics(
+            truth=truth,
+            dry_mass_kg=dry_mass_kg,
+            fuel_capacity_kg=fuel_capacity_kg,
+            rocket_state=rocket_state,
+            rocket_vehicle_cfg=rocket_vehicle_cfg,
+        )
+        if trigger == "fuel_below_kg":
+            if fuel_kg is None:
+                return False, "fuel_kg_unavailable"
+            threshold_kg = float(transition.get("threshold_kg", transition.get("threshold", 0.0)) or 0.0)
+            return bool(fuel_kg < threshold_kg), f"fuel_kg={fuel_kg:.6f}<threshold_kg={threshold_kg:.6f}"
+        if trigger == "fuel_below_fraction":
+            if fuel_frac is None:
+                return False, "fuel_fraction_unavailable"
+            threshold = float(transition.get("threshold_fraction", transition.get("threshold", 0.0)) or 0.0)
+            return bool(fuel_frac < threshold), f"fuel_fraction={fuel_frac:.6f}<threshold={threshold:.6f}"
+        return False, f"unsupported_trigger={trigger}"
+
+    def _metric_value_for_transition(
+        self,
+        *,
+        transition: dict[str, Any],
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        dry_mass_kg: float | None,
+        rocket_state: RocketState | None,
+        rocket_vehicle_cfg: RocketVehicleConfig | None,
+        fuel_capacity_kg: float | None,
+    ) -> float | None:
+        trigger = str(transition.get("trigger", "") or "").strip().lower()
+        if trigger in {"range_lt", "range_gt"}:
+            return self._range_km(
+                truth=truth,
+                own_knowledge=own_knowledge,
+                world_truth=world_truth,
+                target_id=(None if transition.get("target_id") is None else str(transition.get("target_id"))),
+                use_knowledge=bool(transition.get("use_knowledge_for_targeting", True)),
+            )
+        fuel_kg, fuel_frac = self._fuel_metrics(
+            truth=truth,
+            dry_mass_kg=dry_mass_kg,
+            fuel_capacity_kg=fuel_capacity_kg,
+            rocket_state=rocket_state,
+            rocket_vehicle_cfg=rocket_vehicle_cfg,
+        )
+        if trigger == "fuel_below_kg":
+            return fuel_kg
+        if trigger == "fuel_below_fraction":
+            return fuel_frac
+        return None
+
+    def _rearm_condition_met(self, *, transition: dict[str, Any], metric_value: float | None) -> bool:
+        if metric_value is None or not np.isfinite(float(metric_value)):
+            return False
+        trigger = str(transition.get("trigger", "") or "").strip().lower()
+        suffix = self._metric_suffix(trigger)
+        reset_value = None
+        if suffix is not None:
+            reset_value = transition.get(f"reset_threshold_{suffix}")
+        if reset_value is None:
+            reset_value = transition.get("reset_threshold")
+        if reset_value is None:
+            return True
+        threshold = float(reset_value)
+        if trigger == "range_lt":
+            return bool(metric_value > threshold)
+        if trigger == "range_gt":
+            return bool(metric_value < threshold)
+        if trigger in {"fuel_below_kg", "fuel_below_fraction"}:
+            return bool(metric_value > threshold)
+        return True
+
+    def _maybe_transition(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        dry_mass_kg: float | None,
+        rocket_state: RocketState | None,
+        rocket_vehicle_cfg: RocketVehicleConfig | None,
+        fuel_capacity_kg: float | None,
+        t_s: float | None,
+    ) -> None:
+        active_mode = self._active_mode
+        if active_mode is None:
+            return
+        self._last_transition = None
+        for idx, transition in enumerate(list(self.transitions or [])):
+            if not isinstance(transition, dict):
+                continue
+            if not self._transition_applies_to_mode(transition, active_mode):
+                continue
+            to_mode = str(transition.get("to_mode", "") or "").strip()
+            if not to_mode or to_mode not in self._modes:
+                continue
+            metric_value = self._metric_value_for_transition(
+                transition=transition,
+                truth=truth,
+                own_knowledge=own_knowledge,
+                world_truth=world_truth,
+                dry_mass_kg=dry_mass_kg,
+                rocket_state=rocket_state,
+                rocket_vehicle_cfg=rocket_vehicle_cfg,
+                fuel_capacity_kg=fuel_capacity_kg,
+            )
+            if not self._transition_armed.get(idx, True):
+                if self._rearm_condition_met(transition=transition, metric_value=metric_value):
+                    self._transition_armed[idx] = True
+                else:
+                    continue
+            min_mode_duration_s = float(max(float(transition.get("min_mode_duration_s", 0.0) or 0.0), 0.0))
+            if (
+                min_mode_duration_s > 0.0
+                and self._active_mode_enter_t_s is not None
+                and t_s is not None
+                and (float(t_s) - float(self._active_mode_enter_t_s)) < (min_mode_duration_s - 1e-12)
+            ):
+                continue
+            fired, detail = self._evaluate_transition(
+                transition=transition,
+                truth=truth,
+                own_knowledge=own_knowledge,
+                world_truth=world_truth,
+                dry_mass_kg=dry_mass_kg,
+                rocket_state=rocket_state,
+                rocket_vehicle_cfg=rocket_vehicle_cfg,
+                fuel_capacity_kg=fuel_capacity_kg,
+            )
+            if not fired:
+                continue
+            self._active_mode = to_mode
+            self._active_mode_enter_t_s = None if t_s is None else float(t_s)
+            self._transition_armed[idx] = False
+            self._last_transition = {
+                "from_mode": active_mode,
+                "to_mode": to_mode,
+                "trigger": str(transition.get("trigger", "") or ""),
+                "detail": detail,
+                "min_mode_duration_s": float(max(float(transition.get("min_mode_duration_s", 0.0) or 0.0), 0.0)),
+            }
+            return
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        dry_mass_kg: float | None = None,
+        fuel_capacity_kg: float | None = None,
+        rocket_state: RocketState | None = None,
+        rocket_vehicle_cfg: RocketVehicleConfig | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        if not self._modes:
+            return {}
+        if self._active_mode not in self._modes:
+            self._active_mode = next(iter(self._modes.keys()))
+        if self._active_mode_enter_t_s is None:
+            t_now = kwargs.get("t_s")
+            self._active_mode_enter_t_s = None if t_now is None else float(t_now)
+        self._maybe_transition(
+            truth=truth,
+            own_knowledge=own_knowledge,
+            world_truth=world_truth,
+            dry_mass_kg=dry_mass_kg,
+            rocket_state=rocket_state,
+            rocket_vehicle_cfg=rocket_vehicle_cfg,
+            fuel_capacity_kg=fuel_capacity_kg,
+            t_s=(None if kwargs.get("t_s") is None else float(kwargs.get("t_s"))),
+        )
+        mode = self._modes.get(self._active_mode or "")
+        if mode is None:
+            return {}
+        strategy_out = _call_plugin_method(
+            mode.strategy,
+            ("update", "plan", "decide"),
+            {
+                "truth": truth,
+                "own_knowledge": own_knowledge,
+                "world_truth": world_truth,
+                "env": dict(kwargs.get("env", {}) or {}),
+                "dry_mass_kg": dry_mass_kg,
+                "fuel_capacity_kg": fuel_capacity_kg,
+                "rocket_state": rocket_state,
+                "rocket_vehicle_cfg": rocket_vehicle_cfg,
+                **dict(kwargs or {}),
+            },
+        )
+        out = dict(strategy_out or {})
+        if mode.execution is not None:
+            out["_mission_execution_override"] = mode.execution
+        mission_mode = dict(out.get("mission_mode", {}) or {})
+        mission_mode["executive_mode"] = str(mode.name)
+        if self._last_transition is not None:
+            mission_mode["executive_transition"] = dict(self._last_transition)
+        out["mission_mode"] = mission_mode
+        return out
+
+
+@dataclass
+class RocketPursuitMissionStrategy:
+    target_id: str | None = None
+    align_to_thrust: bool = True
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "strategy_name": "rocket_pursuit",
+            "orbital_goal": "pursuit",
+            "mission_mode": {"strategy": "rocket_pursuit", "orbital_goal": "pursuit"},
+            "align_to_thrust": bool(self.align_to_thrust),
+        }
+        if self.target_id:
+            out["target_id"] = str(self.target_id)
+        return out
+
+
+@dataclass
+class RocketPredefinedOrbitMissionStrategy:
+    predef_target_alt_km: float = 400.0
+    predef_target_ecc: float = 0.02
+    align_to_thrust: bool = True
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "strategy_name": "rocket_predefined_orbit",
+            "orbital_goal": "predefined_orbit",
+            "predefined_orbit_goal": {
+                "target_alt_km": float(self.predef_target_alt_km),
+                "target_ecc": float(self.predef_target_ecc),
+            },
+            "mission_mode": {"strategy": "rocket_predefined_orbit", "orbital_goal": "predefined_orbit"},
+            "align_to_thrust": bool(self.align_to_thrust),
+        }
+
+
+@dataclass
+class RocketGoNowExecution:
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        mission_mode = dict(intent.get("mission_mode", {}) or {})
+        mission_mode["launch"] = "go_now"
+        return {
+            "launch_authorized": True,
+            "mission_mode": mission_mode,
+        }
+
+
+@dataclass
+class RocketGoWhenPossibleExecution:
+    go_when_possible_margin_m_s: float = 0.0
+    target_id: str | None = None
+
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        truth: StateTruth,
+        world_truth: dict[str, StateTruth],
+        rocket_state: RocketState | None = None,
+        rocket_vehicle_cfg: RocketVehicleConfig | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        target_id = self.target_id or intent.get("target_id")
+        target_truth = world_truth.get(str(target_id)) if target_id else None
+        dv_needed = _estimate_needed_delta_v_m_s(truth, target_truth)
+        dv_avail = _estimate_stack_delta_v_m_s(rocket_state, rocket_vehicle_cfg) if (rocket_state is not None and rocket_vehicle_cfg is not None) else np.inf
+        launch_authorized = bool(np.isfinite(dv_avail) and dv_avail >= (dv_needed + float(self.go_when_possible_margin_m_s)))
+        mission_mode = dict(intent.get("mission_mode", {}) or {})
+        mission_mode["launch"] = "go_when_possible"
+        return {
+            "launch_authorized": launch_authorized,
+            "mission_mode": mission_mode,
+        }
+
+
+@dataclass
+class RocketWaitOptimalExecution:
+    window_period_s: float = 5400.0
+    window_open_duration_s: float = 300.0
+
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        t_s: float,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        period = max(float(self.window_period_s), 1.0)
+        open_dt = float(np.clip(self.window_open_duration_s, 0.0, period))
+        launch_authorized = (float(t_s) % period) <= open_dt
+        mission_mode = dict(intent.get("mission_mode", {}) or {})
+        mission_mode["launch"] = "wait_optimal_window"
+        return {
+            "launch_authorized": bool(launch_authorized),
+            "mission_mode": mission_mode,
+        }
+
+
+@dataclass
 class RocketMissionStrategy:
     launch_mode: str = "go_now"  # go_now|go_when_possible|wait_optimal_window
     orbital_goal: str = "pursuit"  # pursuit|predefined_orbit
@@ -542,27 +1097,36 @@ class RocketMissionStrategy:
         rocket_vehicle_cfg: RocketVehicleConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        launch_authorized = True
-        if self.launch_mode == "wait_optimal_window":
-            period = max(float(self.window_period_s), 1.0)
-            open_dt = float(np.clip(self.window_open_duration_s, 0.0, period))
-            launch_authorized = (float(t_s) % period) <= open_dt
-        elif self.launch_mode == "go_when_possible":
-            target_truth = world_truth.get(self.target_id) if self.target_id else None
-            dv_needed = _estimate_needed_delta_v_m_s(truth, target_truth)
-            dv_avail = _estimate_stack_delta_v_m_s(rocket_state, rocket_vehicle_cfg) if (rocket_state is not None and rocket_vehicle_cfg is not None) else np.inf
-            launch_authorized = bool(np.isfinite(dv_avail) and dv_avail >= (dv_needed + float(self.go_when_possible_margin_m_s)))
-
-        out: dict[str, Any] = {
-            "strategy_name": "rocket_launch",
-            "launch_authorized": bool(launch_authorized),
-            "mission_mode": {"strategy": "rocket_launch", "orbital_goal": self.orbital_goal},
-        }
+        # Compatibility wrapper for older configs that combined goal selection and launch timing.
         if self.orbital_goal == "predefined_orbit":
-            out["predefined_orbit_goal"] = {
-                "target_alt_km": float(self.predef_target_alt_km),
-                "target_ecc": float(self.predef_target_ecc),
-            }
+            out = RocketPredefinedOrbitMissionStrategy(
+                predef_target_alt_km=self.predef_target_alt_km,
+                predef_target_ecc=self.predef_target_ecc,
+            ).update(truth=truth)
+        else:
+            out = RocketPursuitMissionStrategy(target_id=self.target_id).update(truth=truth)
+        if self.launch_mode == "wait_optimal_window":
+            out.update(
+                RocketWaitOptimalExecution(
+                    window_period_s=self.window_period_s,
+                    window_open_duration_s=self.window_open_duration_s,
+                ).update(intent=out, t_s=t_s)
+            )
+        elif self.launch_mode == "go_when_possible":
+            out.update(
+                RocketGoWhenPossibleExecution(
+                    go_when_possible_margin_m_s=self.go_when_possible_margin_m_s,
+                    target_id=self.target_id,
+                ).update(
+                    intent=out,
+                    truth=truth,
+                    world_truth=world_truth,
+                    rocket_state=rocket_state,
+                    rocket_vehicle_cfg=rocket_vehicle_cfg,
+                )
+            )
+        else:
+            out.update(RocketGoNowExecution().update(intent=out))
         return out
 
 
@@ -703,6 +1267,11 @@ class PredictiveBurnExecution:
         own_knowledge: dict[str, StateBelief],
         world_truth: dict[str, StateTruth],
     ) -> tuple[np.ndarray, np.ndarray] | None:
+        desired_state = intent.get("desired_state_eci_6")
+        if desired_state is not None:
+            x_des = np.array(desired_state, dtype=float).reshape(-1)
+            if x_des.size >= 6 and np.all(np.isfinite(x_des[:6])):
+                return np.array(x_des[:3], dtype=float), np.array(x_des[3:6], dtype=float)
         target_id = intent.get("target_id", self.target_id)
         use_knowledge = bool(intent.get("use_knowledge_for_targeting", self.use_knowledge_for_targeting))
         return _resolve_target_state(
@@ -990,6 +1559,86 @@ class DirectIntegratedExecution:
 
 
 @dataclass
+class IntegratedCommandExecution:
+    require_attitude_alignment: bool = True
+    thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    alignment_tolerance_rad: float = np.deg2rad(5.0)
+    alignment_tolerance_deg: float | None = None
+    min_burn_accel_km_s2: float = 1e-12
+    orbit_controller_budget_ms: float = 2.0
+    attitude_controller_budget_ms: float = 2.0
+
+    def __post_init__(self) -> None:
+        self.alignment_tolerance_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
+
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        truth: StateTruth,
+        orbit_controller: Any | None = None,
+        attitude_controller: Any | None = None,
+        orb_belief: StateBelief | None = None,
+        att_belief: StateBelief | None = None,
+        t_s: float,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        env = dict(kwargs.get("env", {}) or {})
+        attitude_disabled = bool(env.get("attitude_disabled", False))
+        out: dict[str, Any] = {}
+        _apply_orbit_controller_intent(orbit_controller, intent)
+
+        c_orb = (
+            orbit_controller.act(orb_belief, float(t_s), float(max(self.orbit_controller_budget_ms, 1e-9)))
+            if (orbit_controller is not None and orb_belief is not None)
+            else Command.zero()
+        )
+        thrust_cmd = np.array(c_orb.thrust_eci_km_s2, dtype=float).reshape(3)
+        burn_requested = float(np.linalg.norm(thrust_cmd)) > float(max(self.min_burn_accel_km_s2, 0.0))
+
+        align_ok = True
+        align_angle = 0.0
+        required_q = np.array(truth.attitude_quat_bn, dtype=float)
+        if burn_requested and self.require_attitude_alignment and (not attitude_disabled):
+            align_ok, align_angle = PredictiveBurnExecution._alignment(self, truth=truth, accel_eci_km_s2=thrust_cmd)
+            required_q = _desired_attitude_for_thrust(
+                truth=truth,
+                thrust_eci_km_s2=thrust_cmd,
+                thruster_direction_body=np.array(self.thruster_direction_body, dtype=float),
+            )
+
+        if (not attitude_disabled) and attitude_controller is not None and hasattr(attitude_controller, "set_target"):
+            try:
+                attitude_controller.set_target(np.array(required_q, dtype=float))
+            except (TypeError, ValueError, AttributeError) as exc:
+                logger.warning("Failed to set attitude target in IntegratedCommandExecution: %s", exc)
+        c_att = (
+            attitude_controller.act(att_belief, float(t_s), float(max(self.attitude_controller_budget_ms, 1e-9)))
+            if (not attitude_disabled) and attitude_controller is not None and att_belief is not None
+            else Command.zero()
+        )
+
+        if burn_requested and align_ok:
+            out["thrust_eci_km_s2"] = thrust_cmd
+            phase = "burn"
+        else:
+            out["thrust_eci_km_s2"] = np.zeros(3, dtype=float)
+            phase = "slew" if burn_requested else "hold"
+        out["torque_body_nm"] = np.array(c_att.torque_body_nm, dtype=float).reshape(3)
+        out["desired_attitude_quat_bn"] = np.array(required_q, dtype=float)
+        out["mission_use_integrated_command"] = True
+        out["mission_mode"] = {
+            **dict(intent.get("mission_mode", {}) or {}),
+            "execution": "integrated_command",
+            "phase": phase,
+            "burn_requested": bool(burn_requested),
+            "alignment_ok": bool(align_ok),
+            "alignment_angle_rad": float(align_angle),
+        }
+        return out
+
+
+@dataclass
 class ImpulsiveExecution:
     align_thruster_to_thrust: bool = True
     thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
@@ -1089,6 +1738,91 @@ class ImpulsiveExecution:
                 "alignment_angle_rad": float(alignment_angle_rad),
             },
         }
+
+
+@dataclass
+class BudgetedEndStateExecution:
+    strategy: ManeuverStrategy = "thrust_limited"
+    max_thrust_n: float = 0.2
+    min_thrust_n: float = 0.0
+    burn_dt_s: float = 1.0
+    available_delta_v_km_s: float = 0.5
+    require_attitude_alignment: bool = True
+    thruster_position_body_m: np.ndarray | None = None
+    thruster_direction_body: np.ndarray | None = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=float))
+    alignment_tolerance_rad: float = np.deg2rad(5.0)
+    alignment_tolerance_deg: float | None = None
+    terminate_on_velocity_tolerance_km_s: float = 1e-5
+    _coordinator: OrbitalAttitudeManeuverCoordinator = field(default_factory=OrbitalAttitudeManeuverCoordinator, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.alignment_tolerance_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
+
+    def update(
+        self,
+        *,
+        intent: dict[str, Any],
+        truth: StateTruth,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        env = dict(kwargs.get("env", {}) or {})
+        attitude_disabled = bool(env.get("attitude_disabled", False))
+        out: dict[str, Any] = {}
+        x_des = intent.get("desired_state_eci_6")
+        if x_des is None:
+            out["mission_mode"] = {
+                **dict(intent.get("mission_mode", {}) or {}),
+                "execution": "budgeted_end_state",
+                "phase": "hold_no_target",
+            }
+            return out
+        x_des_arr = np.array(x_des, dtype=float).reshape(-1)
+        if x_des_arr.size != 6:
+            out["mission_mode"] = {
+                **dict(intent.get("mission_mode", {}) or {}),
+                "execution": "budgeted_end_state",
+                "phase": "hold_no_target",
+            }
+            return out
+        dv_eci = x_des_arr[3:6] - np.array(truth.velocity_eci_km_s, dtype=float)
+        if float(np.linalg.norm(dv_eci)) <= max(float(self.terminate_on_velocity_tolerance_km_s), 0.0):
+            out["mission_mode"] = {
+                **dict(intent.get("mission_mode", {}) or {}),
+                "execution": "budgeted_end_state",
+                "phase": "on_target",
+            }
+            return out
+
+        cmd = IntegratedManeuverCommand(
+            delta_v_eci_km_s=dv_eci,
+            available_delta_v_km_s=float(max(self.available_delta_v_km_s, 0.0)),
+            strategy=str(self.strategy),  # type: ignore[arg-type]
+            max_thrust_n=float(max(self.max_thrust_n, 0.0)),
+            dt_s=float(max(self.burn_dt_s, 1e-6)),
+            min_thrust_n=float(max(self.min_thrust_n, 0.0)),
+            require_attitude_alignment=(bool(self.require_attitude_alignment) and (not attitude_disabled)),
+            thruster_position_body_m=None if self.thruster_position_body_m is None else np.array(self.thruster_position_body_m, dtype=float),
+            thruster_direction_body=None if self.thruster_direction_body is None else np.array(self.thruster_direction_body, dtype=float),
+            alignment_tolerance_rad=float(max(self.alignment_tolerance_rad, 0.0)),
+        )
+        _, decision = self._coordinator.execute(truth=truth, command=cmd)
+        self.available_delta_v_km_s = float(max(decision.remaining_delta_v_km_s, 0.0))
+
+        if decision.required_attitude_quat_bn is not None:
+            out["desired_attitude_quat_bn"] = np.array(decision.required_attitude_quat_bn, dtype=float)
+        if decision.executed and decision.applied_delta_v_km_s > 0.0:
+            out["thrust_eci_km_s2"] = _unit(dv_eci) * (float(decision.applied_delta_v_km_s) / float(max(self.burn_dt_s, 1e-6)))
+
+        out["mission_mode"] = {
+            **dict(intent.get("mission_mode", {}) or {}),
+            "execution": "budgeted_end_state",
+            "phase": decision.action,
+            "reason": decision.reason,
+            "alignment_ok": bool(decision.alignment_ok),
+            "remaining_delta_v_km_s": float(self.available_delta_v_km_s),
+            "applied_delta_v_km_s": float(decision.applied_delta_v_km_s),
+        }
+        return out
 
 
 @dataclass

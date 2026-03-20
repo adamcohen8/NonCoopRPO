@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
+from sim.rocket.guidance import OpenLoopPitchProgramGuidance
 from typing import Any
 
 
@@ -80,6 +81,9 @@ def validate_scenario_plugins(cfg: Any) -> list[str]:
     # Rocket
     if getattr(cfg.rocket, "enabled", False):
         errs.extend(_validate_pointer(getattr(cfg.rocket, "guidance", None), _CONTRACTS["guidance"], "rocket.guidance"))
+        errs.extend(_validate_pointer(getattr(cfg.rocket, "base_guidance", None), _CONTRACTS["guidance"], "rocket.base_guidance"))
+        for i, p in enumerate(getattr(cfg.rocket, "guidance_modifiers", []) or []):
+            errs.extend(_validate_rocket_guidance_modifier(p, f"rocket.guidance_modifiers[{i}]"))
         errs.extend(
             _validate_pointer(getattr(cfg.rocket, "orbit_control", None), _CONTRACTS["orbit_control"], "rocket.orbit_control")
         )
@@ -149,4 +153,32 @@ def validate_scenario_plugins(cfg: Any) -> list[str]:
             errs.extend(_validate_pointer(tb, _CONTRACTS["bridge"], "target.bridge"))
         for i, p in enumerate(getattr(cfg.target, "mission_objectives", []) or []):
             errs.extend(_validate_pointer(p, _CONTRACTS["mission_objective"], f"target.mission_objectives[{i}]"))
+    return errs
+
+
+def _validate_rocket_guidance_modifier(pointer: Any, path: str) -> list[str]:
+    errs: list[str] = []
+    if pointer is None:
+        return errs
+    if getattr(pointer, "kind", "python") != "python":
+        return [f"{path}: only kind='python' is supported."]
+    if not getattr(pointer, "module", None):
+        return [f"{path}: 'module' is required for python pointers."]
+    try:
+        mod = importlib.import_module(str(pointer.module))
+    except Exception as ex:
+        return [f"{path}: failed to import module '{pointer.module}': {ex}"]
+    class_name = getattr(pointer, "class_name", None)
+    if not class_name:
+        return [f"{path}: must define 'class_name'."]
+    if not hasattr(mod, class_name):
+        return [f"{path}: class '{class_name}' not found in module '{pointer.module}'."]
+    cls = getattr(mod, class_name)
+    params = dict(getattr(pointer, "params", {}) or {})
+    try:
+        obj = cls(base_guidance=OpenLoopPitchProgramGuidance(), **params)
+    except Exception as ex:
+        return [f"{path}: failed to construct guidance modifier '{class_name}' with params {params}: {ex}"]
+    if not hasattr(obj, "command") or not callable(getattr(obj, "command")):
+        errs.append(f"{path}: class '{class_name}' missing required callable method 'command'.")
     return errs

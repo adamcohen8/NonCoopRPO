@@ -32,6 +32,8 @@ class AgentSection:
     specs: dict[str, Any] = field(default_factory=dict)
     initial_state: dict[str, Any] = field(default_factory=dict)
     guidance: AlgorithmPointer | None = None
+    base_guidance: AlgorithmPointer | None = None
+    guidance_modifiers: list[AlgorithmPointer] = field(default_factory=list)
     orbit_control: AlgorithmPointer | None = None
     attitude_control: AlgorithmPointer | None = None
     mission_strategy: AlgorithmPointer | None = None
@@ -142,11 +144,18 @@ def _parse_agent_section(value: Any, role: str) -> AgentSection:
     objectives = d.get("mission_objectives", []) or []
     if not isinstance(objectives, list):
         raise ValueError(f"Section '{role}.mission_objectives' must be a list.")
+    guidance_modifiers = d.get("guidance_modifiers", []) or []
+    if not isinstance(guidance_modifiers, list):
+        raise ValueError(f"Section '{role}.guidance_modifiers' must be a list.")
     if role != "rocket" and d.get("guidance") is not None:
         raise ValueError(
             f"Section '{role}.guidance' is no longer supported. "
             "Use mission_objectives for mission logic and orbit_control/attitude_control for controllers."
         )
+    base_guidance = d.get("base_guidance")
+    legacy_guidance = d.get("guidance")
+    if role == "rocket" and base_guidance is None and legacy_guidance is not None:
+        base_guidance = legacy_guidance
     default_enabled_by_role = {
         "rocket": False,
         "chaser": False,
@@ -158,7 +167,9 @@ def _parse_agent_section(value: Any, role: str) -> AgentSection:
         role=str(d.get("role", role)),
         specs=dict(d.get("specs", {}) or {}),
         initial_state=dict(d.get("initial_state", {}) or {}),
-        guidance=_parse_algorithm_pointer(d.get("guidance")),
+        guidance=_parse_algorithm_pointer(legacy_guidance),
+        base_guidance=_parse_algorithm_pointer(base_guidance),
+        guidance_modifiers=[p for p in (_parse_algorithm_pointer(x) for x in guidance_modifiers) if p is not None],
         orbit_control=_parse_algorithm_pointer(d.get("orbit_control")),
         attitude_control=_parse_algorithm_pointer(d.get("attitude_control")),
         mission_strategy=_parse_algorithm_pointer(d.get("mission_strategy")),

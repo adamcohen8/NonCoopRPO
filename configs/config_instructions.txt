@@ -30,7 +30,7 @@ Top-Level Sections
 - monte_carlo: Optional campaign settings and parameter variations.
 
 Algorithm Pointer Format
-- Any rocket.guidance/orbit_control/attitude_control/mission_strategy/mission_execution/mission_objectives entry can use:
+- Any rocket.base_guidance/guidance_modifiers/orbit_control/attitude_control/mission_strategy/mission_execution/mission_objectives entry can use:
   kind: "python"
   module: "python.module.path"
   class_name: "ClassName"
@@ -48,10 +48,34 @@ Mission Architecture
 - Preferred path:
   - mission_strategy decides intent (pursuit, evade, hold, launch, etc.)
   - mission_execution realizes that intent through orbit/attitude controllers and actuator-facing commands
+  - `MissionExecutiveStrategy` can sequence multiple strategy/execution pairs and switch modes on triggers
 - Legacy path:
   - mission_objectives are executed each master_sim step when provided.
 
 Mission Strategy Pointers
+- Mission executive strategy:
+  module: "sim.mission.modules"
+  class_name: "MissionExecutiveStrategy"
+  params:
+    initial_mode: "hold"
+    modes:
+      - name: "hold"
+        mission_strategy: {module: "sim.mission.modules", class_name: "HoldMissionStrategy", params: {attitude_mode: "sun_track"}}
+        mission_execution: {module: "sim.mission.modules", class_name: "SafeHoldExecution", params: {}}
+      - name: "defend"
+        mission_strategy: {module: "sim.mission.modules", class_name: "DefensiveMissionStrategy", params: {chaser_id: "chaser", defense_mode: "away_from_chaser", burn_accel_km_s2: 2.0e-6}}
+        mission_execution: {module: "sim.mission.modules", class_name: "ControllerPointingExecution", params: {}}
+    transitions:
+      - from_mode: "hold"
+        to_mode: "defend"
+        trigger: "range_lt"
+        target_id: "chaser"
+        use_knowledge_for_targeting: false
+        threshold_km: 10.0
+      - from_mode: "defend"
+        to_mode: "hold"
+        trigger: "fuel_below_fraction"
+        threshold: 0.1
 - Pursuit strategy:
   module: "sim.mission.modules"
   class_name: "PursuitMissionStrategy"
@@ -71,6 +95,15 @@ Mission Strategy Pointers
   class_name: "HoldMissionStrategy"
   params:
     attitude_mode: "hold_eci" | "hold_ric" | "sun_track" | "spotlight" | "sensing"
+- Desired-state strategy:
+  module: "sim.mission.modules"
+  class_name: "DesiredStateMissionStrategy"
+  params:
+    target_id: "<object_id>"
+    desired_state_source: "target" | "explicit"
+    use_knowledge_for_targeting: true|false
+    desired_position_eci_km: [x,y,z]
+    desired_velocity_eci_km_s: [vx,vy,vz]
 - Station-keep strategy:
   module: "sim.mission.modules"
   class_name: "StationKeepMissionStrategy"
@@ -100,12 +133,17 @@ Mission Strategy Pointers
   class_name: "SafeHoldMissionStrategy"
   params:
     attitude_mode: "hold_current" | "hold_eci" | "sun_track"
-- Rocket launch strategy:
+- Rocket pursuit strategy:
   module: "sim.mission.modules"
-  class_name: "RocketMissionStrategy"
+  class_name: "RocketPursuitMissionStrategy"
   params:
-    launch_mode: "go_now" | "go_when_possible" | "wait_optimal_window"
-    orbital_goal: "pursuit" | "predefined_orbit"
+    target_id: "<object_id>"
+- Rocket predefined-orbit strategy:
+  module: "sim.mission.modules"
+  class_name: "RocketPredefinedOrbitMissionStrategy"
+  params:
+    predef_target_alt_km: <float>
+    predef_target_ecc: <float>
 
 Mission Execution Pointers
 - Controller-pointing execution:
@@ -124,6 +162,45 @@ Mission Execution Pointers
     lead_time_s: <float>
     planning_period_s: <float|null>
     alignment_tolerance_deg: <float>
+  notes:
+    - accepts target-based pursuit intent or `desired_state_eci_6` from `DesiredStateMissionStrategy`
+- Integrated-command execution:
+  module: "sim.mission.modules"
+  class_name: "IntegratedCommandExecution"
+  params:
+    require_attitude_alignment: true|false
+    thruster_direction_body: [x,y,z]
+    alignment_tolerance_deg: <float>
+    min_burn_accel_km_s2: <float>
+- Budgeted end-state execution:
+  module: "sim.mission.modules"
+  class_name: "BudgetedEndStateExecution"
+  params:
+    strategy: "thrust_limited" | "burn_all" | "attitude_only"
+    max_thrust_n: <float>
+    min_thrust_n: <float>
+    burn_dt_s: <float>
+    available_delta_v_km_s: <float>
+    require_attitude_alignment: true|false
+    thruster_position_body_m: [x,y,z] | null
+    thruster_direction_body: [x,y,z]
+    alignment_tolerance_deg: <float>
+    terminate_on_velocity_tolerance_km_s: <float>
+- Rocket go-now execution:
+  module: "sim.mission.modules"
+  class_name: "RocketGoNowExecution"
+- Rocket go-when-possible execution:
+  module: "sim.mission.modules"
+  class_name: "RocketGoWhenPossibleExecution"
+  params:
+    target_id: "<object_id>"
+    go_when_possible_margin_m_s: <float>
+- Rocket wait-optimal execution:
+  module: "sim.mission.modules"
+  class_name: "RocketWaitOptimalExecution"
+  params:
+    window_period_s: <float>
+    window_open_duration_s: <float>
 - Direct-integrated execution:
   module: "sim.mission.modules"
   class_name: "DirectIntegratedExecution"
@@ -162,6 +239,8 @@ Mission Module Pointers
     spotlight_ric_direction: [R,I,C]
     use_knowledge_for_targeting: true|false
 - End-state maneuver mission module (generic desired end-state + current knowledge):
+  compatibility note:
+    - preferred replacement is `DesiredStateMissionStrategy` + `BudgetedEndStateExecution`
   module: "sim.mission.modules"
   class_name: "EndStateManeuverMissionModule"
   params:
@@ -181,6 +260,8 @@ Mission Module Pointers
     alignment_tolerance_rad: <float>
     terminate_on_velocity_tolerance_km_s: <float>
 - Integrated command mission module (mission brain that arbitrates orbital + attitude commands each timestep):
+  compatibility note:
+    - preferred replacement is `DesiredStateMissionStrategy` + `IntegratedCommandExecution`
   module: "sim.mission.modules"
   class_name: "IntegratedCommandMissionModule"
   params:
@@ -194,6 +275,8 @@ Mission Module Pointers
     alignment_tolerance_rad: <float>
     min_burn_accel_km_s2: <float>
 - Predictive integrated command mission module (plan at future time, slew early, fire at gate):
+  compatibility note:
+    - preferred replacement is `DesiredStateMissionStrategy` + `PredictiveBurnExecution`
   module: "sim.mission.modules"
   class_name: "PredictiveIntegratedCommandMissionModule"
   params:
@@ -257,7 +340,8 @@ Agent Sections (rocket/chaser/target)
       - this is target-centered (chaser wrt target).
       - when present, this relative initialization overrides chaser absolute ECI/COE startup state
         (except rocket_deployment mode).
-- guidance: rocket guidance pointer only
+- base_guidance: rocket base guidance pointer
+- guidance_modifiers: ordered list of rocket guidance wrapper/modifier pointers
 - orbit_control: orbit controller pointer
 - attitude_control: attitude controller pointer
 - mission_strategy: top-level mission/intent pointer
@@ -394,7 +478,8 @@ Validation Rules (Current Loader)
 - monte_carlo.variations[*].parameter_path must be a non-empty string.
 
 Plugin Contract Validation (strict mode)
-- rocket.guidance: must construct and implement command(state, sim_cfg, vehicle_cfg)
+- rocket.guidance / rocket.base_guidance: must construct and implement command(state, sim_cfg, vehicle_cfg)
+- rocket.guidance_modifiers[*]: must construct as wrappers around a base guidance law and implement command(...)
 - rocket/chaser/target orbit_control: must construct and implement act(belief, t_s, budget_ms)
 - rocket/chaser/target attitude_control: must construct and implement act(...)
 - bridge (if enabled): must provide at least one of step/start/send_command/receive_command

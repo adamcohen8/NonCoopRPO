@@ -57,15 +57,18 @@ OUTPUT_MODES = ["interactive", "save", "both"]
 ZERO_POINTER = {"kind": "python", "module": "sim.control.orbit.zero_controller", "class_name": "ZeroController", "params": {}}
 ZERO_TORQUE_POINTER = {"kind": "python", "module": "sim.control.attitude.zero_torque", "class_name": "ZeroTorqueController", "params": {}}
 
-GUIDANCE_OPTIONS = {
+BASE_GUIDANCE_OPTIONS = {
     "rocket": [
         ("Open Loop Pitch Program", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "OpenLoopPitchProgramGuidance", "params": {}}),
         ("Closed Loop Insertion", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "ClosedLoopInsertionGuidance", "params": {}}),
         ("Hold Attitude", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "HoldAttitudeGuidance", "params": {}}),
-        ("Max Q Throttle Limiter", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "MaxQThrottleLimiterGuidance", "params": {}}),
-        ("Orbit Insertion Cutoff", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "OrbitInsertionCutoffGuidance", "params": {}}),
     ],
 }
+GUIDANCE_MODIFIER_OPTIONS = [
+    ("TVC Steering", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "TVCSteeringGuidance", "params": {}}),
+    ("Max Q Throttle Limiter", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "MaxQThrottleLimiterGuidance", "params": {}}),
+    ("Orbit Insertion Cutoff", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "OrbitInsertionCutoffGuidance", "params": {}}),
+]
 
 ORBIT_CONTROL_OPTIONS = {
     "rocket": [("Zero Controller", ZERO_POINTER)],
@@ -120,13 +123,16 @@ MISSION_OPTIONS = {
 MISSION_STRATEGY_OPTIONS = {
     "rocket": [
         ("None", None),
-        ("Rocket Launch Strategy", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketMissionStrategy", "params": {}}),
+        ("Pursuit", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketPursuitMissionStrategy", "params": {}}),
+        ("Predefined Orbit", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketPredefinedOrbitMissionStrategy", "params": {}}),
     ],
     "chaser": [
         ("None", None),
         ("Pursuit", {"kind": "python", "module": "sim.mission.modules", "class_name": "PursuitMissionStrategy", "params": {}}),
         ("Evade", {"kind": "python", "module": "sim.mission.modules", "class_name": "EvadeMissionStrategy", "params": {}}),
         ("Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "HoldMissionStrategy", "params": {}}),
+        ("Desired State", {"kind": "python", "module": "sim.mission.modules", "class_name": "DesiredStateMissionStrategy", "params": {}}),
+        ("Mission Executive", {"kind": "python", "module": "sim.mission.modules", "class_name": "MissionExecutiveStrategy", "params": {}}),
         ("Station Keep", {"kind": "python", "module": "sim.mission.modules", "class_name": "StationKeepMissionStrategy", "params": {}}),
         ("Inspect", {"kind": "python", "module": "sim.mission.modules", "class_name": "InspectMissionStrategy", "params": {}}),
         ("Defensive", {"kind": "python", "module": "sim.mission.modules", "class_name": "DefensiveMissionStrategy", "params": {}}),
@@ -137,6 +143,8 @@ MISSION_STRATEGY_OPTIONS = {
         ("Pursuit", {"kind": "python", "module": "sim.mission.modules", "class_name": "PursuitMissionStrategy", "params": {}}),
         ("Evade", {"kind": "python", "module": "sim.mission.modules", "class_name": "EvadeMissionStrategy", "params": {}}),
         ("Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "HoldMissionStrategy", "params": {}}),
+        ("Desired State", {"kind": "python", "module": "sim.mission.modules", "class_name": "DesiredStateMissionStrategy", "params": {}}),
+        ("Mission Executive", {"kind": "python", "module": "sim.mission.modules", "class_name": "MissionExecutiveStrategy", "params": {}}),
         ("Station Keep", {"kind": "python", "module": "sim.mission.modules", "class_name": "StationKeepMissionStrategy", "params": {}}),
         ("Inspect", {"kind": "python", "module": "sim.mission.modules", "class_name": "InspectMissionStrategy", "params": {}}),
         ("Defensive", {"kind": "python", "module": "sim.mission.modules", "class_name": "DefensiveMissionStrategy", "params": {}}),
@@ -144,11 +152,18 @@ MISSION_STRATEGY_OPTIONS = {
     ],
 }
 MISSION_EXECUTION_OPTIONS = {
-    "rocket": [("None", None)],
+    "rocket": [
+        ("None", None),
+        ("Go Now", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketGoNowExecution", "params": {}}),
+        ("Go When Possible", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketGoWhenPossibleExecution", "params": {}}),
+        ("Wait For Optimal", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketWaitOptimalExecution", "params": {}}),
+    ],
     "chaser": [
         ("None", None),
         ("Controller Pointing", {"kind": "python", "module": "sim.mission.modules", "class_name": "ControllerPointingExecution", "params": {}}),
         ("Predictive Burn", {"kind": "python", "module": "sim.mission.modules", "class_name": "PredictiveBurnExecution", "params": {}}),
+        ("Integrated Command", {"kind": "python", "module": "sim.mission.modules", "class_name": "IntegratedCommandExecution", "params": {}}),
+        ("Budgeted End State", {"kind": "python", "module": "sim.mission.modules", "class_name": "BudgetedEndStateExecution", "params": {}}),
         ("Direct Integrated", {"kind": "python", "module": "sim.mission.modules", "class_name": "DirectIntegratedExecution", "params": {}}),
         ("Impulsive", {"kind": "python", "module": "sim.mission.modules", "class_name": "ImpulsiveExecution", "params": {}}),
         ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldExecution", "params": {}}),
@@ -157,6 +172,8 @@ MISSION_EXECUTION_OPTIONS = {
         ("None", None),
         ("Controller Pointing", {"kind": "python", "module": "sim.mission.modules", "class_name": "ControllerPointingExecution", "params": {}}),
         ("Predictive Burn", {"kind": "python", "module": "sim.mission.modules", "class_name": "PredictiveBurnExecution", "params": {}}),
+        ("Integrated Command", {"kind": "python", "module": "sim.mission.modules", "class_name": "IntegratedCommandExecution", "params": {}}),
+        ("Budgeted End State", {"kind": "python", "module": "sim.mission.modules", "class_name": "BudgetedEndStateExecution", "params": {}}),
         ("Direct Integrated", {"kind": "python", "module": "sim.mission.modules", "class_name": "DirectIntegratedExecution", "params": {}}),
         ("Impulsive", {"kind": "python", "module": "sim.mission.modules", "class_name": "ImpulsiveExecution", "params": {}}),
         ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldExecution", "params": {}}),
@@ -197,6 +214,8 @@ FIGURE_ID_OPTIONS = [
 ANIMATION_TYPE_OPTIONS = [
     "ground_track",
     "ground_track_multi",
+    "ric_curv_prism_multi",
+    "ric_prism_side_by_side",
 ]
 MC_PARAMETER_CATEGORIES = {
     "Launch": [
@@ -251,6 +270,34 @@ PARAMETER_FORM_SCHEMAS = {
         {"key": "pitch_final_deg", "label": "Pitch Final (deg)", "kind": "float"},
         {"key": "max_throttle", "label": "Max Throttle", "kind": "float"},
         {"key": "min_throttle", "label": "Min Throttle", "kind": "float"},
+    ],
+    "ClosedLoopInsertionGuidance": [
+        {"key": "target_altitude_km", "label": "Target Altitude (km)", "kind": "float"},
+        {"key": "target_eccentricity_max", "label": "Target Max Ecc", "kind": "float"},
+        {"key": "pitch_gain", "label": "Pitch Gain", "kind": "float"},
+        {"key": "throttle_gain", "label": "Throttle Gain", "kind": "float"},
+        {"key": "min_throttle", "label": "Min Throttle", "kind": "float"},
+        {"key": "max_throttle", "label": "Max Throttle", "kind": "float"},
+    ],
+    "HoldAttitudeGuidance": [
+        {"key": "throttle", "label": "Throttle", "kind": "float"},
+        {"key": "attitude_quat_bn_cmd", "label": "Attitude Quaternion BN", "kind": "vector", "length": 4},
+    ],
+    "TVCSteeringGuidance": [
+        {"key": "pass_through_attitude", "label": "Pass Through Attitude", "kind": "bool"},
+    ],
+    "MaxQThrottleLimiterGuidance": [
+        {"key": "max_q_pa", "label": "Max Q (Pa)", "kind": "float"},
+        {"key": "min_throttle", "label": "Min Throttle", "kind": "float"},
+    ],
+    "OrbitInsertionCutoffGuidance": [
+        {"key": "min_cutoff_alt_km", "label": "Min Cutoff Alt (km)", "kind": "float"},
+        {"key": "min_periapsis_alt_km", "label": "Min Periapsis Alt (km)", "kind": "float"},
+        {"key": "apoapsis_margin_km", "label": "Apoapsis Margin (km)", "kind": "float"},
+        {"key": "energy_margin_km2_s2", "label": "Energy Margin", "kind": "float"},
+        {"key": "ecc_relax_factor", "label": "Ecc Relax Factor", "kind": "float"},
+        {"key": "hard_escape_cutoff", "label": "Hard Escape Cutoff", "kind": "bool"},
+        {"key": "near_escape_speed_margin_frac", "label": "Near Escape Margin", "kind": "float"},
     ],
     "HCWLQRController": [
         {"key": "mean_motion_rad_s", "label": "Mean Motion (rad/s)", "kind": "float"},
@@ -361,6 +408,19 @@ PARAMETER_FORM_SCHEMAS = {
         {"key": "spotlight_alt_km", "label": "Spotlight Alt (km)", "kind": "float"},
         {"key": "spotlight_ric_direction", "label": "Spotlight RIC Direction", "kind": "vector", "length": 3},
     ],
+    "MissionExecutiveStrategy": [
+        {"key": "initial_mode", "label": "Initial Mode", "kind": "string"},
+        {"key": "modes", "label": "Modes YAML", "kind": "yaml"},
+        {"key": "transitions", "label": "Transitions YAML", "kind": "yaml"},
+    ],
+    "DesiredStateMissionStrategy": [
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "desired_state_source", "label": "Desired State Source", "kind": "choice", "options": ["target", "explicit"]},
+        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
+        {"key": "desired_position_eci_km", "label": "Desired Position ECI", "kind": "vector", "length": 3},
+        {"key": "desired_velocity_eci_km_s", "label": "Desired Velocity ECI", "kind": "vector", "length": 3},
+        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
+    ],
     "StationKeepMissionStrategy": [
         {"key": "target_id", "label": "Target ID", "kind": "string"},
         {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
@@ -404,6 +464,15 @@ PARAMETER_FORM_SCHEMAS = {
         {"key": "predef_target_alt_km", "label": "Target Alt (km)", "kind": "float"},
         {"key": "predef_target_ecc", "label": "Target Ecc", "kind": "float"},
     ],
+    "RocketPursuitMissionStrategy": [
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
+    ],
+    "RocketPredefinedOrbitMissionStrategy": [
+        {"key": "predef_target_alt_km", "label": "Target Alt (km)", "kind": "float"},
+        {"key": "predef_target_ecc", "label": "Target Ecc", "kind": "float"},
+        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
+    ],
     "ControllerPointingExecution": [
         {"key": "align_thruster_to_thrust", "label": "Align Thruster To Thrust", "kind": "bool"},
         {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
@@ -433,6 +502,26 @@ PARAMETER_FORM_SCHEMAS = {
         {"key": "detumble_mode_name", "label": "Detumble Mode", "kind": "string"},
         {"key": "nominal_mode_name", "label": "Nominal Mode", "kind": "string"},
     ],
+    "IntegratedCommandExecution": [
+        {"key": "require_attitude_alignment", "label": "Require Alignment", "kind": "bool"},
+        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
+        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
+        {"key": "min_burn_accel_km_s2", "label": "Min Burn Accel", "kind": "float"},
+        {"key": "orbit_controller_budget_ms", "label": "Orbit Budget (ms)", "kind": "float"},
+        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
+    ],
+    "BudgetedEndStateExecution": [
+        {"key": "strategy", "label": "Maneuver Strategy", "kind": "choice", "options": ["thrust_limited", "burn_all", "attitude_only"]},
+        {"key": "max_thrust_n", "label": "Max Thrust (N)", "kind": "float"},
+        {"key": "min_thrust_n", "label": "Min Thrust (N)", "kind": "float"},
+        {"key": "burn_dt_s", "label": "Burn dt (s)", "kind": "float"},
+        {"key": "available_delta_v_km_s", "label": "Available dV (km/s)", "kind": "float"},
+        {"key": "require_attitude_alignment", "label": "Require Alignment", "kind": "bool"},
+        {"key": "thruster_position_body_m", "label": "Thruster Position Body", "kind": "vector", "length": 3},
+        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
+        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
+        {"key": "terminate_on_velocity_tolerance_km_s", "label": "Velocity Tol", "kind": "float"},
+    ],
     "DirectIntegratedExecution": [
         {"key": "align_thruster_to_thrust", "label": "Align Thruster To Thrust", "kind": "bool"},
         {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
@@ -457,6 +546,15 @@ PARAMETER_FORM_SCHEMAS = {
     "SafeHoldExecution": [
         {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
     ],
+    "RocketGoNowExecution": [],
+    "RocketGoWhenPossibleExecution": [
+        {"key": "target_id", "label": "Target ID", "kind": "string"},
+        {"key": "go_when_possible_margin_m_s", "label": "Go Margin (m/s)", "kind": "float"},
+    ],
+    "RocketWaitOptimalExecution": [
+        {"key": "window_period_s", "label": "Window Period (s)", "kind": "float"},
+        {"key": "window_open_duration_s", "label": "Window Open Duration (s)", "kind": "float"},
+    ],
 }
 
 
@@ -476,6 +574,7 @@ class MainWindow(QMainWindow):
         self.preview_drag_last_pos = None
         self.results_output_dir: Path | None = None
         self.preview_temp_dir: tempfile.TemporaryDirectory[str] | None = None
+        self.rocket_guidance_modifiers_config: list[dict] = []
         self.is_dirty = False
         self._suppress_dirty_tracking = False
         self._suppress_config_selector_load = False
@@ -489,18 +588,13 @@ class MainWindow(QMainWindow):
             self.target_execution_combo,
             self.target_orbit_control_combo,
             self.target_attitude_control_combo,
-            self.target_mission_combo,
             self.chaser_strategy_combo,
             self.chaser_execution_combo,
             self.chaser_orbit_control_combo,
             self.chaser_attitude_control_combo,
-            self.chaser_mission_combo,
             self.rocket_strategy_combo,
             self.rocket_execution_combo,
-            self.rocket_guidance_combo,
-            self.rocket_orbit_control_combo,
-            self.rocket_attitude_control_combo,
-            self.rocket_mission_combo,
+            self.rocket_base_guidance_combo,
         ):
             combo.currentIndexChanged.connect(self._on_mc_catalog_source_changed)
         self._load_config_into_widgets(self.current_config)
@@ -689,18 +783,13 @@ class MainWindow(QMainWindow):
             self.target_execution_combo,
             self.target_orbit_control_combo,
             self.target_attitude_control_combo,
-            self.target_mission_combo,
             self.chaser_strategy_combo,
             self.chaser_execution_combo,
             self.chaser_orbit_control_combo,
             self.chaser_attitude_control_combo,
-            self.chaser_mission_combo,
             self.rocket_strategy_combo,
             self.rocket_execution_combo,
-            self.rocket_guidance_combo,
-            self.rocket_orbit_control_combo,
-            self.rocket_attitude_control_combo,
-            self.rocket_mission_combo,
+            self.rocket_base_guidance_combo,
         ]
         for widget in combo_boxes:
             widget.currentIndexChanged.connect(self._mark_dirty)
@@ -752,14 +841,16 @@ class MainWindow(QMainWindow):
             self.mc_iterations_spin,
             self.mc_workers_spin,
             self.mc_base_seed_spin,
-            self.target_mass,
+            self.target_dry_mass,
+            self.target_fuel_mass,
             self.target_a,
             self.target_ecc,
             self.target_inc,
             self.target_raan,
             self.target_argp,
             self.target_ta,
-            self.chaser_mass,
+            self.chaser_dry_mass,
+            self.chaser_fuel_mass,
             self.chaser_deploy_time,
             self.rocket_payload,
             self.rocket_launch_lat,
@@ -767,6 +858,9 @@ class MainWindow(QMainWindow):
             self.rocket_launch_alt,
             self.rocket_launch_az,
             self.plots_dpi,
+            self.animation_fps_spin,
+            self.animation_speed_multiple_spin,
+            self.animation_frame_stride_spin,
             self.mc_gate_min_closest_approach,
             self.mc_gate_max_duration,
             self.mc_gate_max_total_dv,
@@ -981,9 +1075,12 @@ class MainWindow(QMainWindow):
         self.target_preset = QComboBox()
         self._configure_compact_combo(self.target_preset)
         self.target_preset.addItems(SATELLITE_PRESET_OPTIONS)
-        self.target_mass = QDoubleSpinBox()
-        self.target_mass.setRange(0.0, 1.0e9)
-        self.target_mass.setDecimals(3)
+        self.target_dry_mass = QDoubleSpinBox()
+        self.target_dry_mass.setRange(0.0, 1.0e9)
+        self.target_dry_mass.setDecimals(3)
+        self.target_fuel_mass = QDoubleSpinBox()
+        self.target_fuel_mass.setRange(0.0, 1.0e9)
+        self.target_fuel_mass.setDecimals(3)
         self.target_a = QDoubleSpinBox()
         self.target_a.setRange(1.0, 1.0e9)
         self.target_a.setDecimals(3)
@@ -1004,7 +1101,8 @@ class MainWindow(QMainWindow):
         self.target_ta.setDecimals(3)
         target_form.addRow(self.target_enabled)
         target_form.addRow("Preset", self.target_preset)
-        target_form.addRow("Mass (kg)", self.target_mass)
+        target_form.addRow("Dry Mass (kg)", self.target_dry_mass)
+        target_form.addRow("Fuel Mass (kg)", self.target_fuel_mass)
         self.target_initial_state_button = self._make_section_toggle_button("target")
         target_form.addRow("Initial State", self.target_initial_state_button)
         self.target_initial_state_container = QWidget()
@@ -1021,12 +1119,10 @@ class MainWindow(QMainWindow):
         self.target_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["target"])
         self.target_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["target"])
         self.target_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["target"])
-        self.target_mission_combo = self._make_pointer_combo(MISSION_OPTIONS["target"])
         target_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.target_strategy_combo, "target", "mission_strategy"))
         target_form.addRow("Mission Execution", self._make_pointer_editor_row(self.target_execution_combo, "target", "mission_execution"))
         target_form.addRow("Orbit Control", self._make_pointer_editor_row(self.target_orbit_control_combo, "target", "orbit_control"))
         target_form.addRow("Attitude Control", self._make_pointer_editor_row(self.target_attitude_control_combo, "target", "attitude_control"))
-        target_form.addRow("Mission (Legacy)", self._make_pointer_editor_row(self.target_mission_combo, "target", "mission"))
         layout.addWidget(target_box, 0, 0)
 
         chaser_box = QGroupBox("Chaser")
@@ -1035,16 +1131,20 @@ class MainWindow(QMainWindow):
         self.chaser_preset = QComboBox()
         self._configure_compact_combo(self.chaser_preset)
         self.chaser_preset.addItems(SATELLITE_PRESET_OPTIONS)
-        self.chaser_mass = QDoubleSpinBox()
-        self.chaser_mass.setRange(0.0, 1.0e9)
-        self.chaser_mass.setDecimals(3)
+        self.chaser_dry_mass = QDoubleSpinBox()
+        self.chaser_dry_mass.setRange(0.0, 1.0e9)
+        self.chaser_dry_mass.setDecimals(3)
+        self.chaser_fuel_mass = QDoubleSpinBox()
+        self.chaser_fuel_mass.setRange(0.0, 1.0e9)
+        self.chaser_fuel_mass.setDecimals(3)
         self.chaser_init_mode = QComboBox()
         self.chaser_init_mode.addItems(["rocket_deployment", "relative_ric_rect", "relative_ric_curv"])
         self.chaser_init_values = [self._make_free_spinbox() for _ in range(6)]
         self.chaser_deploy_time = self._make_free_spinbox()
         chaser_form.addRow(self.chaser_enabled)
         chaser_form.addRow("Preset", self.chaser_preset)
-        chaser_form.addRow("Mass (kg)", self.chaser_mass)
+        chaser_form.addRow("Dry Mass (kg)", self.chaser_dry_mass)
+        chaser_form.addRow("Fuel Mass (kg)", self.chaser_fuel_mass)
         self.chaser_initial_state_button = self._make_section_toggle_button("chaser")
         chaser_form.addRow("Initial State", self.chaser_initial_state_button)
         self.chaser_initial_state_container = QWidget()
@@ -1059,12 +1159,10 @@ class MainWindow(QMainWindow):
         self.chaser_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["chaser"])
         self.chaser_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["chaser"])
         self.chaser_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["chaser"])
-        self.chaser_mission_combo = self._make_pointer_combo(MISSION_OPTIONS["chaser"])
         chaser_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.chaser_strategy_combo, "chaser", "mission_strategy"))
         chaser_form.addRow("Mission Execution", self._make_pointer_editor_row(self.chaser_execution_combo, "chaser", "mission_execution"))
         chaser_form.addRow("Orbit Control", self._make_pointer_editor_row(self.chaser_orbit_control_combo, "chaser", "orbit_control"))
         chaser_form.addRow("Attitude Control", self._make_pointer_editor_row(self.chaser_attitude_control_combo, "chaser", "attitude_control"))
-        chaser_form.addRow("Mission (Legacy)", self._make_pointer_editor_row(self.chaser_mission_combo, "chaser", "mission"))
         layout.addWidget(chaser_box, 0, 1)
 
         rocket_box = QGroupBox("Rocket")
@@ -1099,16 +1197,22 @@ class MainWindow(QMainWindow):
         rocket_form.addRow(self.rocket_initial_state_container)
         self.rocket_strategy_combo = self._make_pointer_combo(MISSION_STRATEGY_OPTIONS["rocket"])
         self.rocket_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["rocket"])
-        self.rocket_guidance_combo = self._make_pointer_combo(GUIDANCE_OPTIONS["rocket"])
-        self.rocket_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["rocket"])
-        self.rocket_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["rocket"])
-        self.rocket_mission_combo = self._make_pointer_combo(MISSION_OPTIONS["rocket"])
+        self.rocket_base_guidance_combo = self._make_pointer_combo(BASE_GUIDANCE_OPTIONS["rocket"])
+        self.rocket_guidance_modifiers_label = QLabel("None")
+        self.rocket_guidance_modifiers_label.setWordWrap(True)
+        self.rocket_guidance_modifiers_button = QPushButton("+")
+        self.rocket_guidance_modifiers_button.setFixedWidth(28)
+        self.rocket_guidance_modifiers_button.setToolTip("Edit ordered rocket guidance modifiers")
+        self.rocket_guidance_modifiers_button.clicked.connect(self._edit_rocket_guidance_modifiers)
         rocket_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.rocket_strategy_combo, "rocket", "mission_strategy"))
         rocket_form.addRow("Mission Execution", self._make_pointer_editor_row(self.rocket_execution_combo, "rocket", "mission_execution"))
-        rocket_form.addRow("Guidance", self._make_pointer_editor_row(self.rocket_guidance_combo, "rocket", "guidance"))
-        rocket_form.addRow("Orbit Control", self._make_pointer_editor_row(self.rocket_orbit_control_combo, "rocket", "orbit_control"))
-        rocket_form.addRow("Attitude Control", self._make_pointer_editor_row(self.rocket_attitude_control_combo, "rocket", "attitude_control"))
-        rocket_form.addRow("Mission (Legacy)", self._make_pointer_editor_row(self.rocket_mission_combo, "rocket", "mission"))
+        rocket_form.addRow("Base Guidance", self._make_pointer_editor_row(self.rocket_base_guidance_combo, "rocket", "base_guidance"))
+        rocket_guidance_modifiers_row = QWidget()
+        rocket_guidance_modifiers_layout = QHBoxLayout(rocket_guidance_modifiers_row)
+        rocket_guidance_modifiers_layout.setContentsMargins(0, 0, 0, 0)
+        rocket_guidance_modifiers_layout.addWidget(self.rocket_guidance_modifiers_label, 1)
+        rocket_guidance_modifiers_layout.addWidget(self.rocket_guidance_modifiers_button)
+        rocket_form.addRow("Guidance Modifiers", rocket_guidance_modifiers_row)
         layout.addWidget(rocket_box, 0, 2)
         self._set_initial_state_section_visible("target", False)
         self._set_initial_state_section_visible("chaser", False)
@@ -1180,7 +1284,18 @@ class MainWindow(QMainWindow):
         animation_types_scroll.setWidgetResizable(True)
         animation_types_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         animation_types_scroll.setWidget(animation_types_widget)
-        animation_types_scroll.setMaximumHeight(100)
+        animation_types_scroll.setMaximumHeight(140)
+        self.animation_fps_spin = QDoubleSpinBox()
+        self.animation_fps_spin.setRange(1.0, 240.0)
+        self.animation_fps_spin.setDecimals(1)
+        self.animation_fps_spin.setValue(30.0)
+        self.animation_speed_multiple_spin = QDoubleSpinBox()
+        self.animation_speed_multiple_spin.setRange(0.1, 1000.0)
+        self.animation_speed_multiple_spin.setDecimals(2)
+        self.animation_speed_multiple_spin.setValue(10.0)
+        self.animation_frame_stride_spin = QSpinBox()
+        self.animation_frame_stride_spin.setRange(1, 100000)
+        self.animation_frame_stride_spin.setValue(1)
         left_controls = QWidget()
         left_controls_layout = QVBoxLayout(left_controls)
         left_controls_layout.setContentsMargins(0, 0, 0, 0)
@@ -1199,8 +1314,23 @@ class MainWindow(QMainWindow):
         lower_fields_layout.setSpacing(6)
         lower_fields_layout.addWidget(QLabel("RIC Reference Object"))
         lower_fields_layout.addWidget(self.reference_object_edit, 0, Qt.AlignLeft)
-        lower_fields_layout.addWidget(QLabel("Animation Types"))
-        lower_fields_layout.addWidget(animation_types_scroll, 0, Qt.AlignLeft)
+        animation_row = QHBoxLayout()
+        animation_row.setContentsMargins(0, 0, 0, 0)
+        animation_row.setSpacing(12)
+        animation_left = QWidget()
+        animation_left_layout = QVBoxLayout(animation_left)
+        animation_left_layout.setContentsMargins(0, 0, 0, 0)
+        animation_left_layout.setSpacing(6)
+        animation_left_layout.addWidget(QLabel("Animation Types"))
+        animation_left_layout.addWidget(animation_types_scroll, 0, Qt.AlignLeft)
+        animation_settings_form = QFormLayout()
+        animation_settings_form.addRow("Animation FPS", self.animation_fps_spin)
+        animation_settings_form.addRow("Speed Multiple", self.animation_speed_multiple_spin)
+        animation_settings_form.addRow("Frame Stride", self.animation_frame_stride_spin)
+        animation_row.addWidget(animation_left, 0, Qt.AlignTop)
+        animation_row.addLayout(animation_settings_form)
+        animation_row.addStretch(1)
+        lower_fields_layout.addLayout(animation_row)
         single_run_layout.addWidget(lower_fields, 0, Qt.AlignLeft)
         single_run_layout.addStretch(1)
         self.outputs_stack.addWidget(single_run_page)
@@ -1414,9 +1544,6 @@ class MainWindow(QMainWindow):
     def _get_existing_pointer_for_editor(self, object_key: str, pointer_kind: str) -> dict | None:
         cfg = self._collect_config_from_widgets()
         section = dict(cfg.get(object_key, {}) or {})
-        if pointer_kind == "mission":
-            missions = list(section.get("mission_objectives", []) or [])
-            return dict(missions[0]) if missions else None
         pointer = section.get(pointer_kind)
         return dict(pointer) if isinstance(pointer, dict) else None
 
@@ -1464,6 +1591,47 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._show_error("Invalid Params YAML", str(exc))
             return
+
+    def _refresh_rocket_guidance_modifiers_label(self) -> None:
+        names = [str(item.get("class_name", "") or item.get("function", "") or "Unknown") for item in self.rocket_guidance_modifiers_config]
+        self.rocket_guidance_modifiers_label.setText(", ".join(names) if names else "None")
+
+    def _edit_rocket_guidance_modifiers(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Rocket Guidance Modifiers")
+        dialog.resize(560, 420)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel(
+            "Enter an ordered YAML list of guidance modifier pointers. Available classes: "
+            + ", ".join(label for label, _ in GUIDANCE_MODIFIER_OPTIONS)
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        editor = QPlainTextEdit()
+        editor.setPlainText(yaml.safe_dump(self.rocket_guidance_modifiers_config, sort_keys=False, allow_unicode=False))
+        layout.addWidget(editor, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            parsed = yaml.safe_load(editor.toPlainText()) or []
+            if not isinstance(parsed, list):
+                raise ValueError("Guidance modifiers must be a YAML list.")
+            normalized: list[dict] = []
+            for item in parsed:
+                if not isinstance(item, dict):
+                    raise ValueError("Each guidance modifier must be a mapping/object.")
+                normalized.append(dict(item))
+            self.rocket_guidance_modifiers_config = normalized
+            self._refresh_rocket_guidance_modifiers_label()
+            self._mark_dirty()
+            self._on_mc_catalog_source_changed()
+            self.statusBar().showMessage("Updated rocket guidance modifiers.", 5000)
+        except Exception as exc:
+            self._show_error("Invalid Guidance Modifiers YAML", str(exc))
 
     def _on_mc_catalog_source_changed(self) -> None:
         self._rebuild_mc_category_combo()
@@ -1518,6 +1686,20 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Expected {length} values.")
         return values
 
+    def _format_yaml_text(self, value: object) -> str:
+        if value is None:
+            payload: object = []
+        else:
+            payload = value
+        text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=False).strip()
+        return text if text else "[]"
+
+    def _parse_yaml_text(self, text: str) -> object:
+        raw = text.strip()
+        if not raw:
+            return []
+        return yaml.safe_load(raw)
+
     def _edit_pointer_params_structured(self, pointer: dict, combo: QComboBox, object_key: str, pointer_kind: str) -> bool:
         schema = self._pointer_form_schema(pointer)
         if not schema:
@@ -1568,6 +1750,10 @@ class MainWindow(QMainWindow):
             elif kind == "vector":
                 widget = QLineEdit(self._format_vector_text(value, field_spec.get("length")))
                 widget.setPlaceholderText("comma-separated values")
+            elif kind == "yaml":
+                widget = QPlainTextEdit(self._format_yaml_text(value))
+                widget.setPlaceholderText("Enter YAML")
+                widget.setMinimumHeight(140)
             else:
                 continue
             editors[key] = widget
@@ -1601,6 +1787,8 @@ class MainWindow(QMainWindow):
                     new_params[key] = widget.currentText()  # type: ignore[attr-defined]
                 elif kind == "vector":
                     new_params[key] = self._parse_vector_text(widget.text(), field_spec.get("length"))  # type: ignore[attr-defined]
+                elif kind == "yaml":
+                    new_params[key] = self._parse_yaml_text(widget.toPlainText())  # type: ignore[attr-defined]
             pointer["params"] = new_params
             current_index = combo.currentIndex()
             combo.setItemData(current_index, pointer)
@@ -1647,18 +1835,13 @@ class MainWindow(QMainWindow):
             ("target", "mission_execution", cfg.get("target", {}).get("mission_execution")),
             ("target", "orbit_control", cfg.get("target", {}).get("orbit_control")),
             ("target", "attitude_control", cfg.get("target", {}).get("attitude_control")),
-            ("target", "mission_objectives[0]", (cfg.get("target", {}).get("mission_objectives") or [None])[0]),
             ("chaser", "mission_strategy", cfg.get("chaser", {}).get("mission_strategy")),
             ("chaser", "mission_execution", cfg.get("chaser", {}).get("mission_execution")),
             ("chaser", "orbit_control", cfg.get("chaser", {}).get("orbit_control")),
             ("chaser", "attitude_control", cfg.get("chaser", {}).get("attitude_control")),
-            ("chaser", "mission_objectives[0]", (cfg.get("chaser", {}).get("mission_objectives") or [None])[0]),
             ("rocket", "mission_strategy", cfg.get("rocket", {}).get("mission_strategy")),
             ("rocket", "mission_execution", cfg.get("rocket", {}).get("mission_execution")),
-            ("rocket", "guidance", cfg.get("rocket", {}).get("guidance")),
-            ("rocket", "orbit_control", cfg.get("rocket", {}).get("orbit_control")),
-            ("rocket", "attitude_control", cfg.get("rocket", {}).get("attitude_control")),
-            ("rocket", "mission_objectives[0]", (cfg.get("rocket", {}).get("mission_objectives") or [None])[0]),
+            ("rocket", "base_guidance", cfg.get("rocket", {}).get("base_guidance") or cfg.get("rocket", {}).get("guidance")),
         ]
         for object_key, pointer_key, pointer in pointer_paths:
             if not isinstance(pointer, dict):
@@ -1669,6 +1852,16 @@ class MainWindow(QMainWindow):
             class_name = str(pointer.get("class_name", "") or pointer.get("function", "") or pointer_key)
             base_label = f"{object_key}.{class_name}"
             base_path = f"{object_key}.{pointer_key}.params"
+            options.extend(self._flatten_mc_parameter_options(params, base_path, base_label))
+        for idx, pointer in enumerate(cfg.get("rocket", {}).get("guidance_modifiers", []) or []):
+            if not isinstance(pointer, dict):
+                continue
+            params = pointer.get("params")
+            if not isinstance(params, (dict, list)):
+                continue
+            class_name = str(pointer.get("class_name", "") or pointer.get("function", "") or f"modifier_{idx}")
+            base_label = f"rocket.{class_name}"
+            base_path = f"rocket.guidance_modifiers[{idx}].params"
             options.extend(self._flatten_mc_parameter_options(params, base_path, base_label))
         return options
 
@@ -1942,7 +2135,9 @@ class MainWindow(QMainWindow):
         target_coes = dict(target.get("initial_state", {}).get("coes", {}) or {})
         self.target_enabled.setChecked(bool(target.get("enabled", True)))
         self._set_combo_text_or_append(self.target_preset, str(target_specs.get("preset_satellite", "") or SATELLITE_PRESET_OPTIONS[0]))
-        self.target_mass.setValue(float(target_specs.get("mass_kg", 400.0) or 0.0))
+        target_mass_fallback = float(target_specs.get("mass_kg", 400.0) or 0.0)
+        self.target_dry_mass.setValue(float(target_specs.get("dry_mass_kg", target_mass_fallback) or 0.0))
+        self.target_fuel_mass.setValue(float(target_specs.get("fuel_mass_kg", 0.0) or 0.0))
         self.target_a.setValue(float(target_coes.get("a_km", 7000.0) or 7000.0))
         self.target_ecc.setValue(float(target_coes.get("ecc", 0.001) or 0.0))
         self.target_inc.setValue(float(target_coes.get("inc_deg", 45.0) or 0.0))
@@ -1953,15 +2148,20 @@ class MainWindow(QMainWindow):
         self._set_pointer_combo_value(self.target_execution_combo, dict(target.get("mission_execution", {}) or {}) if target.get("mission_execution") else None)
         self._set_pointer_combo_value(self.target_orbit_control_combo, dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
         self._set_pointer_combo_value(self.target_attitude_control_combo, dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
-        target_mission = list(target.get("mission_objectives", []) or [])
-        self._set_pointer_combo_value(self.target_mission_combo, dict(target_mission[0]) if target_mission else None)
 
         chaser_specs = dict(chaser.get("specs", {}) or {})
         chaser_init = dict(chaser.get("initial_state", {}) or {})
         self.chaser_enabled.setChecked(bool(chaser.get("enabled", False)))
         self._set_combo_text_or_append(self.chaser_preset, str(chaser_specs.get("preset_satellite", "") or SATELLITE_PRESET_OPTIONS[0]))
-        self.chaser_mass.setValue(float(chaser_specs.get("mass_kg", 200.0) or 0.0))
-        if "relative_ric_rect" in chaser_init:
+        chaser_mass_fallback = float(chaser_specs.get("mass_kg", 200.0) or 0.0)
+        self.chaser_dry_mass.setValue(float(chaser_specs.get("dry_mass_kg", chaser_mass_fallback) or 0.0))
+        self.chaser_fuel_mass.setValue(float(chaser_specs.get("fuel_mass_kg", 0.0) or 0.0))
+        rel_block = dict(chaser_init.get("relative_to_target_ric", {}) or {})
+        if rel_block:
+            frame = str(rel_block.get("frame", "rect") or "rect").strip().lower()
+            self.chaser_init_mode.setCurrentText("relative_ric_curv" if frame == "curv" else "relative_ric_rect")
+            values = list(rel_block.get("state", [0.0] * 6))
+        elif "relative_ric_rect" in chaser_init:
             self.chaser_init_mode.setCurrentText("relative_ric_rect")
             values = list(chaser_init.get("relative_ric_rect", [0.0] * 6))
         elif "relative_ric_curv" in chaser_init:
@@ -1977,8 +2177,6 @@ class MainWindow(QMainWindow):
         self._set_pointer_combo_value(self.chaser_execution_combo, dict(chaser.get("mission_execution", {}) or {}) if chaser.get("mission_execution") else None)
         self._set_pointer_combo_value(self.chaser_orbit_control_combo, dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
         self._set_pointer_combo_value(self.chaser_attitude_control_combo, dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
-        chaser_mission = list(chaser.get("mission_objectives", []) or [])
-        self._set_pointer_combo_value(self.chaser_mission_combo, dict(chaser_mission[0]) if chaser_mission else None)
 
         rocket_specs = dict(rocket.get("specs", {}) or {})
         rocket_init = dict(rocket.get("initial_state", {}) or {})
@@ -1991,12 +2189,12 @@ class MainWindow(QMainWindow):
         self.rocket_launch_az.setValue(float(rocket_init.get("launch_azimuth_deg", 90.0) or 0.0))
         self._set_pointer_combo_value(self.rocket_strategy_combo, dict(rocket.get("mission_strategy", {}) or {}) if rocket.get("mission_strategy") else None)
         self._set_pointer_combo_value(self.rocket_execution_combo, dict(rocket.get("mission_execution", {}) or {}) if rocket.get("mission_execution") else None)
-        self._set_pointer_combo_value(self.rocket_guidance_combo, dict(rocket.get("guidance", {}) or {}) if rocket.get("guidance") else None)
-        self._set_pointer_combo_value(self.rocket_orbit_control_combo, dict(rocket.get("orbit_control", {}) or {}) if rocket.get("orbit_control") else None)
-        self._set_pointer_combo_value(self.rocket_attitude_control_combo, dict(rocket.get("attitude_control", {}) or {}) if rocket.get("attitude_control") else None)
-        rocket_mission = list(rocket.get("mission_objectives", []) or [])
-        self._set_pointer_combo_value(self.rocket_mission_combo, dict(rocket_mission[0]) if rocket_mission else None)
-
+        rocket_base_guidance = dict(rocket.get("base_guidance", {}) or {}) if rocket.get("base_guidance") else None
+        if rocket_base_guidance is None and rocket.get("guidance"):
+            rocket_base_guidance = dict(rocket.get("guidance", {}) or {})
+        self._set_pointer_combo_value(self.rocket_base_guidance_combo, rocket_base_guidance)
+        self.rocket_guidance_modifiers_config = copy.deepcopy(list(rocket.get("guidance_modifiers", []) or []))
+        self._refresh_rocket_guidance_modifiers_label()
         stats = dict(outputs.get("stats", {}) or {})
         plots = dict(outputs.get("plots", {}) or {})
         animations = dict(outputs.get("animations", {}) or {})
@@ -2018,6 +2216,9 @@ class MainWindow(QMainWindow):
         for anim_type in list(animations.get("types", []) or []):
             if anim_type in self.animation_type_checks:
                 self.animation_type_checks[anim_type].setChecked(True)
+        self.animation_fps_spin.setValue(float(animations.get("fps", 30.0) or 30.0))
+        self.animation_speed_multiple_spin.setValue(float(animations.get("speed_multiple", 10.0) or 10.0))
+        self.animation_frame_stride_spin.setValue(int(animations.get("frame_stride", 1) or 1))
         self.mc_save_iteration_summaries.setChecked(bool(mc_outputs.get("save_iteration_summaries", False)))
         self.mc_save_aggregate_summary.setChecked(bool(mc_outputs.get("save_aggregate_summary", True)))
         self.mc_save_histograms.setChecked(bool(mc_outputs.get("save_histograms", False)))
@@ -2080,7 +2281,9 @@ class MainWindow(QMainWindow):
 
         target["enabled"] = bool(self.target_enabled.isChecked())
         target.setdefault("specs", {})["preset_satellite"] = self.target_preset.currentText().strip()
-        target["specs"]["mass_kg"] = float(self.target_mass.value())
+        target["specs"]["dry_mass_kg"] = float(self.target_dry_mass.value())
+        target["specs"]["fuel_mass_kg"] = float(self.target_fuel_mass.value())
+        target["specs"].pop("mass_kg", None)
         target.setdefault("initial_state", {})["coes"] = {
             "a_km": float(self.target_a.value()),
             "ecc": float(self.target_ecc.value()),
@@ -2094,28 +2297,37 @@ class MainWindow(QMainWindow):
         target.pop("guidance", None)
         target["orbit_control"] = self._combo_pointer_value(self.target_orbit_control_combo, existing=dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
         target["attitude_control"] = self._combo_pointer_value(self.target_attitude_control_combo, existing=dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
-        target_mission_pointer = self._combo_pointer_value(self.target_mission_combo, existing=dict((target.get("mission_objectives", []) or [{}])[0] or {}) if target.get("mission_objectives") else None)
-        target["mission_objectives"] = [target_mission_pointer] if target_mission_pointer is not None else []
 
         chaser["enabled"] = bool(self.chaser_enabled.isChecked())
         chaser.setdefault("specs", {})["preset_satellite"] = self.chaser_preset.currentText().strip()
-        chaser["specs"]["mass_kg"] = float(self.chaser_mass.value())
+        chaser["specs"]["dry_mass_kg"] = float(self.chaser_dry_mass.value())
+        chaser["specs"]["fuel_mass_kg"] = float(self.chaser_fuel_mass.value())
+        chaser["specs"].pop("mass_kg", None)
         init_mode = self.chaser_init_mode.currentText()
         chaser_initial_state = dict(chaser.get("initial_state", {}) or {})
         if init_mode == "rocket_deployment":
             chaser_initial_state["source"] = "rocket_deployment"
             chaser_initial_state["deploy_time_s"] = float(self.chaser_deploy_time.value())
             chaser_initial_state["deploy_dv_body_m_s"] = [float(self.chaser_init_values[i].value()) for i in range(3)]
+            chaser_initial_state.pop("relative_to_target_ric", None)
+            chaser_initial_state.pop("relative_ric_rect", None)
+            chaser_initial_state.pop("relative_ric_curv", None)
         else:
-            chaser_initial_state[init_mode] = [float(widget.value()) for widget in self.chaser_init_values]
+            chaser_initial_state.pop("source", None)
+            chaser_initial_state.pop("deploy_time_s", None)
+            chaser_initial_state.pop("deploy_dv_body_m_s", None)
+            chaser_initial_state["relative_to_target_ric"] = {
+                "frame": "rect" if init_mode == "relative_ric_rect" else "curv",
+                "state": [float(widget.value()) for widget in self.chaser_init_values],
+            }
+            chaser_initial_state.pop("relative_ric_rect", None)
+            chaser_initial_state.pop("relative_ric_curv", None)
         chaser["initial_state"] = chaser_initial_state
         chaser["mission_strategy"] = self._combo_pointer_value(self.chaser_strategy_combo, existing=dict(chaser.get("mission_strategy", {}) or {}) if chaser.get("mission_strategy") else None)
         chaser["mission_execution"] = self._combo_pointer_value(self.chaser_execution_combo, existing=dict(chaser.get("mission_execution", {}) or {}) if chaser.get("mission_execution") else None)
         chaser.pop("guidance", None)
         chaser["orbit_control"] = self._combo_pointer_value(self.chaser_orbit_control_combo, existing=dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
         chaser["attitude_control"] = self._combo_pointer_value(self.chaser_attitude_control_combo, existing=dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
-        chaser_mission_pointer = self._combo_pointer_value(self.chaser_mission_combo, existing=dict((chaser.get("mission_objectives", []) or [{}])[0] or {}) if chaser.get("mission_objectives") else None)
-        chaser["mission_objectives"] = [chaser_mission_pointer] if chaser_mission_pointer is not None else []
 
         rocket["enabled"] = bool(self.rocket_enabled.isChecked())
         rocket.setdefault("specs", {})["preset_stack"] = self.rocket_preset.currentText().strip()
@@ -2128,11 +2340,16 @@ class MainWindow(QMainWindow):
         }
         rocket["mission_strategy"] = self._combo_pointer_value(self.rocket_strategy_combo, existing=dict(rocket.get("mission_strategy", {}) or {}) if rocket.get("mission_strategy") else None)
         rocket["mission_execution"] = self._combo_pointer_value(self.rocket_execution_combo, existing=dict(rocket.get("mission_execution", {}) or {}) if rocket.get("mission_execution") else None)
-        rocket["guidance"] = self._combo_pointer_value(self.rocket_guidance_combo, existing=dict(rocket.get("guidance", {}) or {}) if rocket.get("guidance") else None)
-        rocket["orbit_control"] = self._combo_pointer_value(self.rocket_orbit_control_combo, existing=dict(rocket.get("orbit_control", {}) or {}) if rocket.get("orbit_control") else None)
-        rocket["attitude_control"] = self._combo_pointer_value(self.rocket_attitude_control_combo, existing=dict(rocket.get("attitude_control", {}) or {}) if rocket.get("attitude_control") else None)
-        rocket_mission_pointer = self._combo_pointer_value(self.rocket_mission_combo, existing=dict((rocket.get("mission_objectives", []) or [{}])[0] or {}) if rocket.get("mission_objectives") else None)
-        rocket["mission_objectives"] = [rocket_mission_pointer] if rocket_mission_pointer is not None else []
+        rocket["base_guidance"] = self._combo_pointer_value(
+            self.rocket_base_guidance_combo,
+            existing=dict(rocket.get("base_guidance", {}) or {}) if rocket.get("base_guidance") else (
+                dict(rocket.get("guidance", {}) or {}) if rocket.get("guidance") else None
+            ),
+        )
+        rocket["guidance_modifiers"] = copy.deepcopy(self.rocket_guidance_modifiers_config)
+        rocket.pop("guidance", None)
+        rocket.pop("orbit_control", None)
+        rocket.pop("attitude_control", None)
 
         stats = outputs.setdefault("stats", {})
         plots = outputs.setdefault("plots", {})
@@ -2154,6 +2371,9 @@ class MainWindow(QMainWindow):
         animation_types = [anim_type for anim_type, check in self.animation_type_checks.items() if check.isChecked()]
         animations["enabled"] = bool(animation_types)
         animations["types"] = animation_types
+        animations["fps"] = float(self.animation_fps_spin.value())
+        animations["speed_multiple"] = float(self.animation_speed_multiple_spin.value())
+        animations["frame_stride"] = int(self.animation_frame_stride_spin.value())
         mc_outputs["save_iteration_summaries"] = bool(self.mc_save_iteration_summaries.isChecked())
         mc_outputs["save_aggregate_summary"] = bool(self.mc_save_aggregate_summary.isChecked())
         mc_outputs["save_histograms"] = bool(self.mc_save_histograms.isChecked())

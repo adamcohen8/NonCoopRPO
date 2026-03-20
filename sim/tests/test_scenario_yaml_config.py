@@ -9,7 +9,11 @@ class TestScenarioYamlConfig(unittest.TestCase):
         cfg = scenario_config_from_dict(
             {
                 "scenario_name": "unit_test",
-                "rocket": {"enabled": True, "guidance": {"module": "sim.rocket.guidance", "class_name": "OpenLoopPitchProgramGuidance"}},
+                "rocket": {
+                    "enabled": True,
+                    "base_guidance": {"module": "sim.rocket.guidance", "class_name": "OpenLoopPitchProgramGuidance"},
+                    "guidance_modifiers": [{"module": "sim.rocket.guidance", "class_name": "MaxQThrottleLimiterGuidance"}],
+                },
                 "chaser": {"enabled": False},
                 "target": {"enabled": True},
                 "simulator": {"duration_s": 120.0, "dt_s": 0.5},
@@ -25,6 +29,8 @@ class TestScenarioYamlConfig(unittest.TestCase):
         )
         self.assertEqual(cfg.scenario_name, "unit_test")
         self.assertTrue(cfg.rocket.enabled)
+        self.assertIsNotNone(cfg.rocket.base_guidance)
+        self.assertEqual(len(cfg.rocket.guidance_modifiers), 1)
         self.assertFalse(cfg.chaser.enabled)
         self.assertTrue(cfg.monte_carlo.enabled)
         self.assertEqual(cfg.monte_carlo.iterations, 10)

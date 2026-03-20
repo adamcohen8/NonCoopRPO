@@ -9,11 +9,18 @@ class TestPluginValidation(unittest.TestCase):
             {
                 "rocket": {
                     "enabled": True,
-                    "guidance": {
+                    "base_guidance": {
                         "module": "sim.rocket.guidance",
                         "class_name": "OpenLoopPitchProgramGuidance",
                         "params": {},
                     },
+                    "guidance_modifiers": [
+                        {
+                            "module": "sim.rocket.guidance",
+                            "class_name": "MaxQThrottleLimiterGuidance",
+                            "params": {"max_q_pa": 45000.0, "min_throttle": 0.1},
+                        }
+                    ],
                     "orbit_control": {"module": "sim.control.orbit.zero_controller", "class_name": "ZeroController", "params": {}},
                     "attitude_control": {
                         "module": "sim.control.attitude.zero_torque",
@@ -70,7 +77,7 @@ class TestPluginValidation(unittest.TestCase):
             {
                 "rocket": {
                     "enabled": True,
-                    "guidance": {"module": "sim.control.orbit.zero_controller", "class_name": "ZeroController", "params": {}},
+                    "base_guidance": {"module": "sim.control.orbit.zero_controller", "class_name": "ZeroController", "params": {}},
                 },
                 "chaser": {"enabled": False},
                 "target": {"enabled": False},
@@ -78,7 +85,7 @@ class TestPluginValidation(unittest.TestCase):
             }
         )
         errs = validate_scenario_plugins(cfg)
-        self.assertTrue(any("rocket.guidance" in e for e in errs))
+        self.assertTrue(any("rocket.base_guidance" in e for e in errs))
 
 
 if __name__ == "__main__":

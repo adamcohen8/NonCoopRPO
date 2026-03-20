@@ -21,7 +21,7 @@ rocket:
     launch_lon_deg: -80.6
     launch_alt_km: 0.0
     launch_azimuth_deg: 90.0
-  guidance:
+  base_guidance:
     kind: "python"
     module: "sim.rocket.guidance"
     class_name: "OpenLoopPitchProgramGuidance"
@@ -31,6 +31,7 @@ rocket:
       pitch_end_s: 190.0
       pitch_final_deg: 75.0
       max_throttle: 1.0
+  guidance_modifiers: []
   orbit_control:
     kind: "python"
     module: "sim.control.orbit.zero_controller"
@@ -44,12 +45,14 @@ rocket:
   mission_strategy:
     kind: "python"
     module: "sim.mission.modules"
-    class_name: "RocketMissionStrategy"
+    class_name: "RocketPursuitMissionStrategy"
     params:
-      launch_mode: "go_now"
-      orbital_goal: "pursuit"
       target_id: "target"
-  mission_execution: null
+  mission_execution:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "RocketGoNowExecution"
+    params: {}
   mission_objectives: []
   bridge:
     enabled: false

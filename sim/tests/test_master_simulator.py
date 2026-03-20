@@ -464,6 +464,205 @@ class TestMasterSimulator(unittest.TestCase):
         thrust_norm = np.linalg.norm(np.nan_to_num(thrust_hist, nan=0.0), axis=1)
         self.assertGreater(float(np.max(thrust_norm)), 0.0)
 
+    def test_mission_executive_switches_on_range_trigger(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "mission_executive_range_trigger",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "MissionExecutiveStrategy",
+                        "params": {
+                            "initial_mode": "hold",
+                            "modes": [
+                                {
+                                    "name": "hold",
+                                    "mission_strategy": {
+                                        "module": "sim.mission.modules",
+                                        "class_name": "HoldMissionStrategy",
+                                        "params": {"attitude_mode": "hold_eci"},
+                                    },
+                                    "mission_execution": {
+                                        "module": "sim.mission.modules",
+                                        "class_name": "SafeHoldExecution",
+                                        "params": {},
+                                    },
+                                },
+                                {
+                                    "name": "defend",
+                                    "mission_strategy": {
+                                        "module": "sim.mission.modules",
+                                        "class_name": "DefensiveMissionStrategy",
+                                        "params": {
+                                            "chaser_id": "chaser",
+                                            "defense_mode": "fixed_ric_axis",
+                                            "axis_mode": "+I",
+                                            "burn_accel_km_s2": 2.0e-6,
+                                            "allow_truth_fallback": True,
+                                        },
+                                    },
+                                    "mission_execution": {
+                                        "module": "sim.mission.modules",
+                                        "class_name": "ControllerPointingExecution",
+                                        "params": {"alignment_tolerance_deg": 180.0},
+                                    },
+                                },
+                            ],
+                            "transitions": [
+                                {
+                                    "from_mode": "hold",
+                                    "to_mode": "defend",
+                                    "trigger": "range_lt",
+                                    "target_id": "chaser",
+                                    "use_knowledge_for_targeting": False,
+                                    "threshold_km": 10.0,
+                                }
+                            ],
+                        },
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "rect", "state": [1.0, -2.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                },
+                "simulator": {
+                    "duration_s": 1.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_mission_executive_range_trigger",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["target"], dtype=float)
+        thrust_norm = np.linalg.norm(np.nan_to_num(thrust_hist, nan=0.0), axis=1)
+        self.assertGreater(float(np.max(thrust_norm)), 0.0)
+
+    def test_mission_executive_switches_on_fuel_trigger(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "mission_executive_fuel_trigger",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"dry_mass_kg": 100.0, "fuel_mass_kg": 0.0},
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "curv", "state": [0.0, -3.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "MissionExecutiveStrategy",
+                        "params": {
+                            "initial_mode": "pursuit",
+                            "modes": [
+                                {
+                                    "name": "pursuit",
+                                    "mission_strategy": {
+                                        "module": "sim.mission.modules",
+                                        "class_name": "PursuitMissionStrategy",
+                                        "params": {"target_id": "target", "max_accel_km_s2": 2.0e-5},
+                                    },
+                                    "mission_execution": {
+                                        "module": "sim.mission.modules",
+                                        "class_name": "PredictiveBurnExecution",
+                                        "params": {"target_id": "target", "lead_time_s": 0.0, "alignment_tolerance_deg": 180.0},
+                                    },
+                                },
+                                {
+                                    "name": "safe_hold",
+                                    "mission_strategy": {
+                                        "module": "sim.mission.modules",
+                                        "class_name": "SafeHoldMissionStrategy",
+                                        "params": {"attitude_mode": "hold_current"},
+                                    },
+                                    "mission_execution": {
+                                        "module": "sim.mission.modules",
+                                        "class_name": "SafeHoldExecution",
+                                        "params": {},
+                                    },
+                                },
+                            ],
+                            "transitions": [
+                                {
+                                    "from_mode": "pursuit",
+                                    "to_mode": "safe_hold",
+                                    "trigger": "fuel_below_fraction",
+                                    "threshold": 0.1,
+                                }
+                            ],
+                        },
+                    },
+                    "orbit_control": {
+                        "module": "sim.control.orbit.lqr",
+                        "class_name": "HCWLQRController",
+                        "params": {
+                            "mean_motion_rad_s": 0.001078,
+                            "max_accel_km_s2": 2.0e-5,
+                            "design_dt_s": 1.0,
+                            "ric_curv_state_slice": [0, 6],
+                            "chief_eci_state_slice": [6, 12],
+                        },
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                },
+                "simulator": {
+                    "duration_s": 2.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_mission_executive_fuel_trigger",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float)
+        self.assertTrue(np.allclose(np.nan_to_num(thrust_hist, nan=0.0), 0.0))
+
     def test_master_runner_updates_knowledge_and_world_truth_after_propagation(self):
         cfg = scenario_config_from_dict(
             {
