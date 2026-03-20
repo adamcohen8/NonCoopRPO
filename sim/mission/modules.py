@@ -82,6 +82,21 @@ def _resolve_target_state(
     return np.array(tgt.position_eci_km, dtype=float), np.array(tgt.velocity_eci_km_s, dtype=float)
 
 
+def _axis_unit_ric(axis_mode: str) -> np.ndarray:
+    token = str(axis_mode).strip().upper().replace(" ", "")
+    m = {
+        "+R": np.array([1.0, 0.0, 0.0], dtype=float),
+        "-R": np.array([-1.0, 0.0, 0.0], dtype=float),
+        "+I": np.array([0.0, 1.0, 0.0], dtype=float),
+        "-I": np.array([0.0, -1.0, 0.0], dtype=float),
+        "+C": np.array([0.0, 0.0, 1.0], dtype=float),
+        "-C": np.array([0.0, 0.0, -1.0], dtype=float),
+    }
+    if token in m:
+        return m[token]
+    raise ValueError("axis_mode must be one of: +R, -R, +I, -I, +C, -C")
+
+
 def _set_orbit_controller_target(controller: Any | None, desired_state_eci_6: np.ndarray) -> None:
     if controller is None:
         return
@@ -436,6 +451,73 @@ class SafeHoldMissionStrategy:
             "fallback_thrust_eci_km_s2": np.zeros(3, dtype=float),
             "command_torque_body_nm": np.zeros(3, dtype=float),
             "mission_mode": {"strategy": "safe_hold", "attitude": mode},
+        }
+
+
+@dataclass
+class DefensiveMissionStrategy:
+    chaser_id: str = "chaser"
+    defense_mode: str = "fixed_ric_axis"  # fixed_ric_axis|away_from_chaser
+    axis_mode: str = "+R"  # +R|-R|+I|-I|+C|-C
+    burn_accel_km_s2: float = 2e-6
+    require_finite_knowledge: bool = True
+    allow_truth_fallback: bool = False
+    align_to_thrust: bool = True
+
+    def _resolve_chaser_state(
+        self,
+        *,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        kb = own_knowledge.get(self.chaser_id)
+        if kb is not None and kb.state.size >= 6:
+            x = np.array(kb.state[:6], dtype=float)
+            if (not self.require_finite_knowledge) or bool(np.all(np.isfinite(x))):
+                return np.array(x[:3], dtype=float), np.array(x[3:6], dtype=float)
+        if not self.allow_truth_fallback:
+            return None
+        tgt = world_truth.get(self.chaser_id)
+        if tgt is None:
+            return None
+        return np.array(tgt.position_eci_km, dtype=float), np.array(tgt.velocity_eci_km_s, dtype=float)
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        chaser_state = self._resolve_chaser_state(own_knowledge=own_knowledge, world_truth=world_truth)
+        thrust_cmd = np.zeros(3, dtype=float)
+        direction_source = "none"
+        if chaser_state is not None and float(max(self.burn_accel_km_s2, 0.0)) > 0.0:
+            mode = str(self.defense_mode).strip().lower()
+            if mode == "away_from_chaser":
+                direction_eci = -_unit(chaser_state[0] - np.array(truth.position_eci_km, dtype=float))
+                direction_source = "away_from_chaser"
+            else:
+                direction_eci = ric_dcm_ir_from_rv(
+                    np.array(truth.position_eci_km, dtype=float),
+                    np.array(truth.velocity_eci_km_s, dtype=float),
+                ) @ _axis_unit_ric(self.axis_mode)
+                direction_source = "fixed_ric_axis"
+            thrust_cmd = float(max(self.burn_accel_km_s2, 0.0)) * _unit(direction_eci)
+        return {
+            "strategy_name": "defensive",
+            "target_id": self.chaser_id,
+            "fallback_thrust_eci_km_s2": thrust_cmd,
+            "align_to_thrust": bool(self.align_to_thrust),
+            "mission_mode": {
+                "strategy": "defensive",
+                "defense_mode": str(self.defense_mode),
+                "axis_mode": str(self.axis_mode),
+                "has_chaser_knowledge": bool(chaser_state is not None),
+                "direction_source": direction_source,
+                "triggered": bool(float(np.linalg.norm(thrust_cmd)) > 0.0),
+            },
         }
 
 
@@ -1265,21 +1347,6 @@ class DefensiveRICAxisBurnMissionModule:
     def __post_init__(self) -> None:
         self.alignment_tolerance_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
 
-    @staticmethod
-    def _axis_unit_ric(axis_mode: str) -> np.ndarray:
-        token = str(axis_mode).strip().upper().replace(" ", "")
-        m = {
-            "+R": np.array([1.0, 0.0, 0.0], dtype=float),
-            "-R": np.array([-1.0, 0.0, 0.0], dtype=float),
-            "+I": np.array([0.0, 1.0, 0.0], dtype=float),
-            "-I": np.array([0.0, -1.0, 0.0], dtype=float),
-            "+C": np.array([0.0, 0.0, 1.0], dtype=float),
-            "-C": np.array([0.0, 0.0, -1.0], dtype=float),
-        }
-        if token in m:
-            return m[token]
-        raise ValueError("axis_mode must be one of: +R, -R, +I, -I, +C, -C")
-
     def _has_chaser_knowledge(self, own_knowledge: dict[str, StateBelief]) -> bool:
         kb = own_knowledge.get(self.chaser_id)
         if kb is None or kb.state.size < 6:
@@ -1346,7 +1413,7 @@ class DefensiveRICAxisBurnMissionModule:
             }
             return out
 
-        dir_ric = self._axis_unit_ric(self.axis_mode)
+        dir_ric = _axis_unit_ric(self.axis_mode)
         c_ir = ric_dcm_ir_from_rv(np.array(truth.position_eci_km, dtype=float), np.array(truth.velocity_eci_km_s, dtype=float))
         dir_eci = c_ir @ dir_ric
         thrust_cmd = a_mag * _unit(dir_eci)

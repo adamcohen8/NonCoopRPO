@@ -86,6 +86,15 @@ Mission Strategy Pointers
     desired_relative_ric_rect: [R,I,C,dR,dI,dC]
     boresight_body: [x,y,z]
     max_accel_km_s2: <float>
+- Defensive strategy:
+  module: "sim.mission.modules"
+  class_name: "DefensiveMissionStrategy"
+  params:
+    chaser_id: "<object_id>"
+    defense_mode: "fixed_ric_axis" | "away_from_chaser"
+    axis_mode: "+R" | "-R" | "+I" | "-I" | "+C" | "-C"
+    burn_accel_km_s2: <float>
+    require_finite_knowledge: true|false
 - Safe-hold strategy:
   module: "sim.mission.modules"
   class_name: "SafeHoldMissionStrategy"

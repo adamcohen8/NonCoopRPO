@@ -1,6 +1,7 @@
 from sim.mission.modules import (
     AttitudeDetumbleGateMissionModule,
     ControllerPointingExecution,
+    DefensiveMissionStrategy,
     DirectIntegratedExecution,
     DefensiveRICAxisBurnMissionModule,
     EndStateManeuverMissionModule,
@@ -23,6 +24,7 @@ from sim.mission.modules import (
 __all__ = [
     "AttitudeDetumbleGateMissionModule",
     "ControllerPointingExecution",
+    "DefensiveMissionStrategy",
     "DirectIntegratedExecution",
     "ImpulsiveExecution",
     "PredictiveBurnExecution",

@@ -133,6 +133,7 @@ from sim.estimation import (
 from sim.metrics import EngagementMetrics, ScoreSummary, compute_engagement_metrics, compute_scores
 from sim.mission import (
     AttitudeDetumbleGateMissionModule,
+    DefensiveMissionStrategy,
     DefensiveRICAxisBurnMissionModule,
     EndStateManeuverMissionModule,
     IntegratedCommandMissionModule,
@@ -321,6 +322,7 @@ __all__ = [
     "EngagementMetrics",
     "compute_engagement_metrics",
     "AttitudeDetumbleGateMissionModule",
+    "DefensiveMissionStrategy",
     "SatelliteMissionModule",
     "DefensiveRICAxisBurnMissionModule",
     "RocketMissionModule",

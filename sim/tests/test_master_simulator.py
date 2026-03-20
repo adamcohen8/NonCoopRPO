@@ -392,6 +392,78 @@ class TestMasterSimulator(unittest.TestCase):
         self.assertGreater(float(np.max(thrust_hist)), 0.0)
         self.assertTrue(np.any(np.isclose(thrust_hist, 0.0)))
 
+    def test_defensive_strategy_with_controller_pointing_executes_burn(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "defensive_strategy_execution",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "DefensiveMissionStrategy",
+                        "params": {
+                            "chaser_id": "chaser",
+                            "defense_mode": "fixed_ric_axis",
+                            "axis_mode": "+I",
+                            "burn_accel_km_s2": 2.0e-6,
+                            "allow_truth_fallback": True,
+                        },
+                    },
+                    "mission_execution": {
+                        "module": "sim.mission.modules",
+                        "class_name": "ControllerPointingExecution",
+                        "params": {"alignment_tolerance_deg": 180.0},
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                    "knowledge": {
+                        "targets": ["chaser"],
+                        "refresh_rate_s": 1.0,
+                        "sensor_error": {
+                            "pos_sigma_km": [0.0, 0.0, 0.0],
+                            "vel_sigma_km_s": [0.0, 0.0, 0.0],
+                        },
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "rect", "state": [1.0, -2.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                },
+                "simulator": {
+                    "duration_s": 1.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_defensive_strategy_execution",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["target"], dtype=float)
+        thrust_norm = np.linalg.norm(np.nan_to_num(thrust_hist, nan=0.0), axis=1)
+        self.assertGreater(float(np.max(thrust_norm)), 0.0)
+
     def test_master_runner_updates_knowledge_and_world_truth_after_propagation(self):
         cfg = scenario_config_from_dict(
             {

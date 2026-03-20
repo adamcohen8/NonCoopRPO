@@ -129,6 +129,7 @@ MISSION_STRATEGY_OPTIONS = {
         ("Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "HoldMissionStrategy", "params": {}}),
         ("Station Keep", {"kind": "python", "module": "sim.mission.modules", "class_name": "StationKeepMissionStrategy", "params": {}}),
         ("Inspect", {"kind": "python", "module": "sim.mission.modules", "class_name": "InspectMissionStrategy", "params": {}}),
+        ("Defensive", {"kind": "python", "module": "sim.mission.modules", "class_name": "DefensiveMissionStrategy", "params": {}}),
         ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldMissionStrategy", "params": {}}),
     ],
     "target": [
@@ -138,6 +139,7 @@ MISSION_STRATEGY_OPTIONS = {
         ("Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "HoldMissionStrategy", "params": {}}),
         ("Station Keep", {"kind": "python", "module": "sim.mission.modules", "class_name": "StationKeepMissionStrategy", "params": {}}),
         ("Inspect", {"kind": "python", "module": "sim.mission.modules", "class_name": "InspectMissionStrategy", "params": {}}),
+        ("Defensive", {"kind": "python", "module": "sim.mission.modules", "class_name": "DefensiveMissionStrategy", "params": {}}),
         ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldMissionStrategy", "params": {}}),
     ],
 }
@@ -376,6 +378,15 @@ PARAMETER_FORM_SCHEMAS = {
         {"key": "kp_pos", "label": "Kp Pos", "kind": "float"},
         {"key": "kd_vel", "label": "Kd Vel", "kind": "float"},
         {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
+        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
+    ],
+    "DefensiveMissionStrategy": [
+        {"key": "chaser_id", "label": "Chaser ID", "kind": "string"},
+        {"key": "defense_mode", "label": "Defense Mode", "kind": "choice", "options": ["fixed_ric_axis", "away_from_chaser"]},
+        {"key": "axis_mode", "label": "Axis Mode", "kind": "choice", "options": ["+R", "-R", "+I", "-I", "+C", "-C"]},
+        {"key": "burn_accel_km_s2", "label": "Burn Accel (km/s^2)", "kind": "float"},
+        {"key": "require_finite_knowledge", "label": "Require Finite Knowledge", "kind": "bool"},
+        {"key": "allow_truth_fallback", "label": "Allow Truth Fallback", "kind": "bool"},
         {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
     ],
     "SafeHoldMissionStrategy": [
