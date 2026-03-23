@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -769,6 +770,9 @@ class MainWindow(QMainWindow):
             self.mc_baseline_summary_json,
             self.save_path_edit,
             self.yaml_editor,
+            self.target_knowledge_targets_edit,
+            self.chaser_knowledge_targets_edit,
+            self.rocket_knowledge_targets_edit,
         ]
         for widget in line_edits:
             signal = getattr(widget, "textChanged", None)
@@ -869,10 +873,46 @@ class MainWindow(QMainWindow):
             self.mc_gate_max_duration,
             self.mc_gate_max_total_dv,
             self.mc_gate_max_guardrail_events,
+            self.target_knowledge_refresh_rate,
+            self.target_knowledge_max_range,
+            self.target_knowledge_dropout_prob,
+            self.target_knowledge_solid_angle,
+            self.target_knowledge_sensor_pos_x,
+            self.target_knowledge_sensor_pos_y,
+            self.target_knowledge_sensor_pos_z,
+            self.target_knowledge_sensor_bore_x,
+            self.target_knowledge_sensor_bore_y,
+            self.target_knowledge_sensor_bore_z,
+            self.chaser_knowledge_refresh_rate,
+            self.chaser_knowledge_max_range,
+            self.chaser_knowledge_dropout_prob,
+            self.chaser_knowledge_solid_angle,
+            self.chaser_knowledge_sensor_pos_x,
+            self.chaser_knowledge_sensor_pos_y,
+            self.chaser_knowledge_sensor_pos_z,
+            self.chaser_knowledge_sensor_bore_x,
+            self.chaser_knowledge_sensor_bore_y,
+            self.chaser_knowledge_sensor_bore_z,
+            self.rocket_knowledge_refresh_rate,
+            self.rocket_knowledge_max_range,
+            self.rocket_knowledge_dropout_prob,
+            self.rocket_knowledge_solid_angle,
+            self.rocket_knowledge_sensor_pos_x,
+            self.rocket_knowledge_sensor_pos_y,
+            self.rocket_knowledge_sensor_pos_z,
+            self.rocket_knowledge_sensor_bore_x,
+            self.rocket_knowledge_sensor_bore_y,
+            self.rocket_knowledge_sensor_bore_z,
         ]
         spin_boxes.extend(self.chaser_init_values)
         for widget in spin_boxes:
             widget.valueChanged.connect(self._mark_dirty)
+        for widget in (
+            self.target_knowledge_require_los,
+            self.chaser_knowledge_require_los,
+            self.rocket_knowledge_require_los,
+        ):
+            widget.toggled.connect(self._mark_dirty)
         self.orbit_integrator_combo.currentIndexChanged.connect(self._refresh_integrator_visibility)
 
     def _build_scenario_tab(self) -> QWidget:
@@ -901,6 +941,8 @@ class MainWindow(QMainWindow):
         self.output_mode_combo.addItems(OUTPUT_MODES)
         self.output_dir_edit = QLineEdit()
         self.output_dir_edit.setMinimumWidth(320)
+        self.output_dir_browse_button = QPushButton("Browse...")
+        self.output_dir_browse_button.clicked.connect(self._browse_output_directory)
         self.orbit_substep_enabled_check = QCheckBox("Orbit Substep")
         self.orbit_substep_spin = self._make_free_spinbox()
         self.attitude_substep_enabled_check = QCheckBox("Attitude Substep")
@@ -923,7 +965,13 @@ class MainWindow(QMainWindow):
         layout.addRow("dt (s)", self.dt_spin)
         layout.addRow("Orbit Integrator", self.orbit_integrator_combo)
         layout.addRow("Output Mode", self.output_mode_combo)
-        layout.addRow("Output Directory", self.output_dir_edit)
+        output_dir_row = QWidget()
+        output_dir_layout = QHBoxLayout(output_dir_row)
+        output_dir_layout.setContentsMargins(0, 0, 0, 0)
+        output_dir_layout.setSpacing(6)
+        output_dir_layout.addWidget(self.output_dir_edit, 1)
+        output_dir_layout.addWidget(self.output_dir_browse_button)
+        layout.addRow("Output Directory", output_dir_row)
         layout.addRow("Adaptive Abs Tol", self.orbit_adaptive_atol_spin)
         layout.addRow("Adaptive Rel Tol", self.orbit_adaptive_rtol_spin)
         orbit_substep_row = QWidget()
@@ -963,6 +1011,23 @@ class MainWindow(QMainWindow):
         attitude_disturbances_layout.addWidget(self.att_srp_check, 1, 1)
         layout.addRow("Attitude Disturbances", attitude_disturbances)
         return tab
+
+    def _browse_output_directory(self) -> None:
+        current_text = self.output_dir_edit.text().strip()
+        start_dir = self.repo_root
+        if current_text:
+            candidate = Path(current_text).expanduser()
+            if not candidate.is_absolute():
+                candidate = (self.repo_root / candidate).resolve()
+            if candidate.exists():
+                start_dir = candidate if candidate.is_dir() else candidate.parent
+            else:
+                parent = candidate.parent
+                if parent.exists():
+                    start_dir = parent
+        selected = QFileDialog.getExistingDirectory(self, "Select Output Directory", str(start_dir))
+        if selected:
+            self.output_dir_edit.setText(selected)
 
     def _build_monte_carlo_tab(self) -> QWidget:
         tab = QWidget()
@@ -1086,7 +1151,9 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QGridLayout(tab)
 
-        target_box = QGroupBox("Target")
+        target_box = QFrame()
+        target_box.setFrameShape(QFrame.StyledPanel)
+        target_box.setFrameShadow(QFrame.Plain)
         target_form = QFormLayout(target_box)
         self.target_enabled = QCheckBox("Enabled")
         self.target_preset = QComboBox()
@@ -1136,13 +1203,25 @@ class MainWindow(QMainWindow):
         self.target_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["target"])
         self.target_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["target"])
         self.target_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["target"])
-        target_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.target_strategy_combo, "target", "mission_strategy"))
-        target_form.addRow("Mission Execution", self._make_pointer_editor_row(self.target_execution_combo, "target", "mission_execution"))
-        target_form.addRow("Orbit Control", self._make_pointer_editor_row(self.target_orbit_control_combo, "target", "orbit_control"))
-        target_form.addRow("Attitude Control", self._make_pointer_editor_row(self.target_attitude_control_combo, "target", "attitude_control"))
-        layout.addWidget(target_box, 0, 0)
+        self.target_gnc_button = self._make_section_toggle_button("target", "gnc")
+        target_form.addRow("GNC", self.target_gnc_button)
+        self.target_gnc_container = QWidget()
+        target_gnc_form = QFormLayout(self.target_gnc_container)
+        target_gnc_form.setContentsMargins(0, 0, 0, 0)
+        target_gnc_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.target_strategy_combo, "target", "mission_strategy"))
+        target_gnc_form.addRow("Mission Execution", self._make_pointer_editor_row(self.target_execution_combo, "target", "mission_execution"))
+        target_gnc_form.addRow("Orbit Control", self._make_pointer_editor_row(self.target_orbit_control_combo, "target", "orbit_control"))
+        target_gnc_form.addRow("Attitude Control", self._make_pointer_editor_row(self.target_attitude_control_combo, "target", "attitude_control"))
+        target_form.addRow(self.target_gnc_container)
+        self.target_knowledge_button = self._make_section_toggle_button("target", "knowledge")
+        target_form.addRow("Knowledge / Sensor", self.target_knowledge_button)
+        self.target_knowledge_container = self._build_knowledge_editor("target")
+        target_form.addRow(self.target_knowledge_container)
+        layout.addWidget(self._wrap_object_panel(target_box, "Target"), 0, 0)
 
-        chaser_box = QGroupBox("Chaser")
+        chaser_box = QFrame()
+        chaser_box.setFrameShape(QFrame.StyledPanel)
+        chaser_box.setFrameShadow(QFrame.Plain)
         chaser_form = QFormLayout(chaser_box)
         self.chaser_enabled = QCheckBox("Enabled")
         self.chaser_preset = QComboBox()
@@ -1176,13 +1255,25 @@ class MainWindow(QMainWindow):
         self.chaser_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["chaser"])
         self.chaser_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["chaser"])
         self.chaser_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["chaser"])
-        chaser_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.chaser_strategy_combo, "chaser", "mission_strategy"))
-        chaser_form.addRow("Mission Execution", self._make_pointer_editor_row(self.chaser_execution_combo, "chaser", "mission_execution"))
-        chaser_form.addRow("Orbit Control", self._make_pointer_editor_row(self.chaser_orbit_control_combo, "chaser", "orbit_control"))
-        chaser_form.addRow("Attitude Control", self._make_pointer_editor_row(self.chaser_attitude_control_combo, "chaser", "attitude_control"))
-        layout.addWidget(chaser_box, 0, 1)
+        self.chaser_gnc_button = self._make_section_toggle_button("chaser", "gnc")
+        chaser_form.addRow("GNC", self.chaser_gnc_button)
+        self.chaser_gnc_container = QWidget()
+        chaser_gnc_form = QFormLayout(self.chaser_gnc_container)
+        chaser_gnc_form.setContentsMargins(0, 0, 0, 0)
+        chaser_gnc_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.chaser_strategy_combo, "chaser", "mission_strategy"))
+        chaser_gnc_form.addRow("Mission Execution", self._make_pointer_editor_row(self.chaser_execution_combo, "chaser", "mission_execution"))
+        chaser_gnc_form.addRow("Orbit Control", self._make_pointer_editor_row(self.chaser_orbit_control_combo, "chaser", "orbit_control"))
+        chaser_gnc_form.addRow("Attitude Control", self._make_pointer_editor_row(self.chaser_attitude_control_combo, "chaser", "attitude_control"))
+        chaser_form.addRow(self.chaser_gnc_container)
+        self.chaser_knowledge_button = self._make_section_toggle_button("chaser", "knowledge")
+        chaser_form.addRow("Knowledge / Sensor", self.chaser_knowledge_button)
+        self.chaser_knowledge_container = self._build_knowledge_editor("chaser")
+        chaser_form.addRow(self.chaser_knowledge_container)
+        layout.addWidget(self._wrap_object_panel(chaser_box, "Chaser"), 0, 1)
 
-        rocket_box = QGroupBox("Rocket")
+        rocket_box = QFrame()
+        rocket_box.setFrameShape(QFrame.StyledPanel)
+        rocket_box.setFrameShadow(QFrame.Plain)
         rocket_form = QFormLayout(rocket_box)
         self.rocket_enabled = QCheckBox("Enabled")
         self.rocket_preset = QComboBox()
@@ -1221,19 +1312,35 @@ class MainWindow(QMainWindow):
         self.rocket_guidance_modifiers_button.setFixedWidth(28)
         self.rocket_guidance_modifiers_button.setToolTip("Edit ordered rocket guidance modifiers")
         self.rocket_guidance_modifiers_button.clicked.connect(self._edit_rocket_guidance_modifiers)
-        rocket_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.rocket_strategy_combo, "rocket", "mission_strategy"))
-        rocket_form.addRow("Mission Execution", self._make_pointer_editor_row(self.rocket_execution_combo, "rocket", "mission_execution"))
-        rocket_form.addRow("Base Guidance", self._make_pointer_editor_row(self.rocket_base_guidance_combo, "rocket", "base_guidance"))
+        self.rocket_gnc_button = self._make_section_toggle_button("rocket", "gnc")
+        rocket_form.addRow("GNC", self.rocket_gnc_button)
+        self.rocket_gnc_container = QWidget()
+        rocket_gnc_form = QFormLayout(self.rocket_gnc_container)
+        rocket_gnc_form.setContentsMargins(0, 0, 0, 0)
+        rocket_gnc_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.rocket_strategy_combo, "rocket", "mission_strategy"))
+        rocket_gnc_form.addRow("Mission Execution", self._make_pointer_editor_row(self.rocket_execution_combo, "rocket", "mission_execution"))
+        rocket_gnc_form.addRow("Base Guidance", self._make_pointer_editor_row(self.rocket_base_guidance_combo, "rocket", "base_guidance"))
         rocket_guidance_modifiers_row = QWidget()
         rocket_guidance_modifiers_layout = QHBoxLayout(rocket_guidance_modifiers_row)
         rocket_guidance_modifiers_layout.setContentsMargins(0, 0, 0, 0)
         rocket_guidance_modifiers_layout.addWidget(self.rocket_guidance_modifiers_label, 1)
         rocket_guidance_modifiers_layout.addWidget(self.rocket_guidance_modifiers_button)
-        rocket_form.addRow("Guidance Modifiers", rocket_guidance_modifiers_row)
-        layout.addWidget(rocket_box, 0, 2)
+        rocket_gnc_form.addRow("Guidance Modifiers", rocket_guidance_modifiers_row)
+        rocket_form.addRow(self.rocket_gnc_container)
+        self.rocket_knowledge_button = self._make_section_toggle_button("rocket", "knowledge")
+        rocket_form.addRow("Knowledge / Sensor", self.rocket_knowledge_button)
+        self.rocket_knowledge_container = self._build_knowledge_editor("rocket")
+        rocket_form.addRow(self.rocket_knowledge_container)
+        layout.addWidget(self._wrap_object_panel(rocket_box, "Rocket"), 0, 2)
         self._set_initial_state_section_visible("target", False)
         self._set_initial_state_section_visible("chaser", False)
         self._set_initial_state_section_visible("rocket", False)
+        self._set_object_section_visible("target", "gnc", False)
+        self._set_object_section_visible("chaser", "gnc", False)
+        self._set_object_section_visible("rocket", "gnc", False)
+        self._set_object_section_visible("target", "knowledge", False)
+        self._set_object_section_visible("chaser", "knowledge", False)
+        self._set_object_section_visible("rocket", "knowledge", False)
         return tab
 
     def _build_outputs_tab(self) -> QWidget:
@@ -1497,11 +1604,31 @@ class MainWindow(QMainWindow):
         combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         combo.setMaximumWidth(126)
 
-    def _make_section_toggle_button(self, object_key: str) -> QPushButton:
+    def _make_section_toggle_button(self, object_key: str, section_key: str = "initial_state") -> QPushButton:
         button = QPushButton("+")
         button.setFixedWidth(28)
-        button.clicked.connect(lambda: self._toggle_initial_state_section(object_key))
+        button.clicked.connect(lambda: self._toggle_object_section(object_key, section_key))
         return button
+
+    def _wrap_object_panel(self, box: QWidget, title: str) -> QWidget:
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-weight: 600;")
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(box)
+        scroll.setFixedHeight(520)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.setAlignment(Qt.AlignTop)
+        layout.addWidget(title_label)
+        layout.addWidget(scroll)
+        layout.addStretch(1)
+        return container
 
     def _make_pointer_editor_row(self, combo: QComboBox, object_key: str, pointer_kind: str) -> QWidget:
         row = QWidget()
@@ -1514,6 +1641,151 @@ class MainWindow(QMainWindow):
         button.clicked.connect(lambda: self._edit_pointer_params(object_key, pointer_kind, combo))
         row_layout.addWidget(button)
         return row
+
+    def _build_knowledge_editor(self, object_key: str) -> QWidget:
+        targets_edit = QLineEdit()
+        targets_edit.setPlaceholderText("target, chaser")
+        targets_edit.textChanged.connect(self._mark_dirty)
+        setattr(self, f"{object_key}_knowledge_targets_edit", targets_edit)
+
+        refresh_spin = self._make_free_spinbox()
+        max_range_spin = self._make_free_spinbox()
+        dropout_spin = self._make_free_spinbox()
+        solid_angle_spin = self._make_free_spinbox()
+        for widget in (refresh_spin, max_range_spin, dropout_spin, solid_angle_spin):
+            self._configure_compact_spinbox(widget)
+        require_los = QCheckBox("Require Line Of Sight")
+        setattr(self, f"{object_key}_knowledge_refresh_rate", refresh_spin)
+        setattr(self, f"{object_key}_knowledge_max_range", max_range_spin)
+        setattr(self, f"{object_key}_knowledge_dropout_prob", dropout_spin)
+        setattr(self, f"{object_key}_knowledge_solid_angle", solid_angle_spin)
+        setattr(self, f"{object_key}_knowledge_require_los", require_los)
+
+        sensor_pos_widgets = [self._make_free_spinbox() for _ in range(3)]
+        sensor_bore_widgets = [self._make_free_spinbox() for _ in range(3)]
+        for widget in sensor_pos_widgets + sensor_bore_widgets:
+            self._configure_compact_spinbox(widget, width=72)
+        for axis, widget in zip(("x", "y", "z"), sensor_pos_widgets):
+            setattr(self, f"{object_key}_knowledge_sensor_pos_{axis}", widget)
+        for axis, widget in zip(("x", "y", "z"), sensor_bore_widgets):
+            setattr(self, f"{object_key}_knowledge_sensor_bore_{axis}", widget)
+
+        form_widget = QWidget()
+        form = QFormLayout(form_widget)
+        form.setContentsMargins(0, 0, 0, 0)
+
+        sensor_pos_column = QWidget()
+        sensor_pos_layout = QFormLayout(sensor_pos_column)
+        sensor_pos_layout.setContentsMargins(0, 0, 0, 0)
+        sensor_pos_layout.setSpacing(4)
+        for axis_label, widget in zip(("X", "Y", "Z"), sensor_pos_widgets):
+            sensor_pos_layout.addRow(axis_label, widget)
+
+        sensor_bore_column = QWidget()
+        sensor_bore_layout = QFormLayout(sensor_bore_column)
+        sensor_bore_layout.setContentsMargins(0, 0, 0, 0)
+        sensor_bore_layout.setSpacing(4)
+        for axis_label, widget in zip(("X", "Y", "Z"), sensor_bore_widgets):
+            sensor_bore_layout.addRow(axis_label, widget)
+
+        form.addRow("Targets", targets_edit)
+        form.addRow("Refresh Rate (s)", refresh_spin)
+        form.addRow("Max Range (km)", max_range_spin)
+        form.addRow("Dropout Prob", dropout_spin)
+        form.addRow("Solid Angle (sr)", solid_angle_spin)
+        form.addRow("", require_los)
+        form.addRow("Sensor Position Body (m)", sensor_pos_column)
+        form.addRow("Sensor Boresight Body", sensor_bore_column)
+        return form_widget
+
+    def _edit_knowledge_settings(self, object_key: str) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Edit {object_key.title()} Knowledge / Sensor")
+        dialog.resize(460, 420)
+        layout = QVBoxLayout(dialog)
+        form_widget = QWidget()
+        form = QFormLayout(form_widget)
+        form.setContentsMargins(0, 0, 0, 0)
+
+        targets_edit = QLineEdit(getattr(self, f"{object_key}_knowledge_targets_edit").text())
+        refresh_spin = self._make_free_spinbox()
+        refresh_spin.setValue(float(getattr(self, f"{object_key}_knowledge_refresh_rate").value()))
+        max_range_spin = self._make_free_spinbox()
+        max_range_spin.setValue(float(getattr(self, f"{object_key}_knowledge_max_range").value()))
+        dropout_spin = self._make_free_spinbox()
+        dropout_spin.setValue(float(getattr(self, f"{object_key}_knowledge_dropout_prob").value()))
+        solid_angle_spin = self._make_free_spinbox()
+        solid_angle_spin.setValue(float(getattr(self, f"{object_key}_knowledge_solid_angle").value()))
+        require_los = QCheckBox("Require Line Of Sight")
+        require_los.setChecked(bool(getattr(self, f"{object_key}_knowledge_require_los").isChecked()))
+
+        sensor_pos_widgets = [self._make_free_spinbox() for _ in range(3)]
+        sensor_bore_widgets = [self._make_free_spinbox() for _ in range(3)]
+        for axis, widget in zip(("x", "y", "z"), sensor_pos_widgets):
+            widget.setValue(float(getattr(self, f"{object_key}_knowledge_sensor_pos_{axis}").value()))
+        for axis, widget in zip(("x", "y", "z"), sensor_bore_widgets):
+            widget.setValue(float(getattr(self, f"{object_key}_knowledge_sensor_bore_{axis}").value()))
+
+        sensor_pos_row = QWidget()
+        sensor_pos_layout = QHBoxLayout(sensor_pos_row)
+        sensor_pos_layout.setContentsMargins(0, 0, 0, 0)
+        sensor_pos_layout.setSpacing(4)
+        for axis_label, widget in zip(("X", "Y", "Z"), sensor_pos_widgets):
+            widget.setPrefix(f"{axis_label}:")
+            sensor_pos_layout.addWidget(widget)
+
+        sensor_bore_row = QWidget()
+        sensor_bore_layout = QHBoxLayout(sensor_bore_row)
+        sensor_bore_layout.setContentsMargins(0, 0, 0, 0)
+        sensor_bore_layout.setSpacing(4)
+        for axis_label, widget in zip(("X", "Y", "Z"), sensor_bore_widgets):
+            widget.setPrefix(f"{axis_label}:")
+            sensor_bore_layout.addWidget(widget)
+
+        form.addRow("Targets", targets_edit)
+        form.addRow("Refresh Rate (s)", refresh_spin)
+        form.addRow("Max Range (km)", max_range_spin)
+        form.addRow("Dropout Prob", dropout_spin)
+        form.addRow("Solid Angle (sr)", solid_angle_spin)
+        form.addRow(require_los)
+        form.addRow("Sensor Position Body (m)", sensor_pos_row)
+        form.addRow("Sensor Boresight Body", sensor_bore_row)
+        layout.addWidget(form_widget, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        getattr(self, f"{object_key}_knowledge_targets_edit").setText(targets_edit.text())
+        getattr(self, f"{object_key}_knowledge_refresh_rate").setValue(float(refresh_spin.value()))
+        getattr(self, f"{object_key}_knowledge_max_range").setValue(float(max_range_spin.value()))
+        getattr(self, f"{object_key}_knowledge_dropout_prob").setValue(float(dropout_spin.value()))
+        getattr(self, f"{object_key}_knowledge_solid_angle").setValue(float(solid_angle_spin.value()))
+        getattr(self, f"{object_key}_knowledge_require_los").setChecked(bool(require_los.isChecked()))
+        for axis, widget in zip(("x", "y", "z"), sensor_pos_widgets):
+            getattr(self, f"{object_key}_knowledge_sensor_pos_{axis}").setValue(float(widget.value()))
+        for axis, widget in zip(("x", "y", "z"), sensor_bore_widgets):
+            getattr(self, f"{object_key}_knowledge_sensor_bore_{axis}").setValue(float(widget.value()))
+        self._refresh_knowledge_summary_label(object_key)
+        self._mark_dirty()
+
+    def _refresh_knowledge_summary_label(self, object_key: str) -> None:
+        if not hasattr(self, f"{object_key}_knowledge_summary_label"):
+            return
+        targets = getattr(self, f"{object_key}_knowledge_targets_edit").text().strip() or "none"
+        refresh = float(getattr(self, f"{object_key}_knowledge_refresh_rate").value())
+        max_range = float(getattr(self, f"{object_key}_knowledge_max_range").value())
+        solid_angle = float(getattr(self, f"{object_key}_knowledge_solid_angle").value())
+        los = bool(getattr(self, f"{object_key}_knowledge_require_los").isChecked())
+        summary = (
+            f"Targets: {targets} | dt={refresh:g}s | "
+            f"range={'none' if max_range <= 0.0 else f'{max_range:g} km'} | "
+            f"solid={'4pi' if solid_angle >= 4.0 * 3.141592653589793 else f'{solid_angle:g} sr'} | "
+            f"LOS={'on' if los else 'off'}"
+        )
+        getattr(self, f"{object_key}_knowledge_summary_label").setText(summary)
 
     def _pointer_signature(self, pointer: dict | None) -> tuple[str, str, str]:
         if not isinstance(pointer, dict):
@@ -1815,15 +2087,21 @@ class MainWindow(QMainWindow):
             self._show_error("Invalid Params", str(exc))
         return True
 
-    def _set_initial_state_section_visible(self, object_key: str, visible: bool) -> None:
-        container = getattr(self, f"{object_key}_initial_state_container")
-        button = getattr(self, f"{object_key}_initial_state_button")
+    def _set_object_section_visible(self, object_key: str, section_key: str, visible: bool) -> None:
+        container = getattr(self, f"{object_key}_{section_key}_container")
+        button = getattr(self, f"{object_key}_{section_key}_button")
         container.setVisible(bool(visible))
         button.setText("-" if visible else "+")
 
+    def _toggle_object_section(self, object_key: str, section_key: str) -> None:
+        container = getattr(self, f"{object_key}_{section_key}_container")
+        self._set_object_section_visible(object_key, section_key, not container.isVisible())
+
+    def _set_initial_state_section_visible(self, object_key: str, visible: bool) -> None:
+        self._set_object_section_visible(object_key, "initial_state", visible)
+
     def _toggle_initial_state_section(self, object_key: str) -> None:
-        container = getattr(self, f"{object_key}_initial_state_container")
-        self._set_initial_state_section_visible(object_key, not container.isVisible())
+        self._toggle_object_section(object_key, "initial_state")
 
     def _rebuild_mc_category_combo(self) -> None:
         current_text = self.mc_category_combo.currentText() if hasattr(self, "mc_category_combo") else ""
@@ -2169,6 +2447,7 @@ class MainWindow(QMainWindow):
         self._set_pointer_combo_value(self.target_execution_combo, dict(target.get("mission_execution", {}) or {}) if target.get("mission_execution") else None)
         self._set_pointer_combo_value(self.target_orbit_control_combo, dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
         self._set_pointer_combo_value(self.target_attitude_control_combo, dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
+        self._load_knowledge_into_widgets("target", dict(target.get("knowledge", {}) or {}))
 
         chaser_specs = dict(chaser.get("specs", {}) or {})
         chaser_init = dict(chaser.get("initial_state", {}) or {})
@@ -2198,6 +2477,7 @@ class MainWindow(QMainWindow):
         self._set_pointer_combo_value(self.chaser_execution_combo, dict(chaser.get("mission_execution", {}) or {}) if chaser.get("mission_execution") else None)
         self._set_pointer_combo_value(self.chaser_orbit_control_combo, dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
         self._set_pointer_combo_value(self.chaser_attitude_control_combo, dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
+        self._load_knowledge_into_widgets("chaser", dict(chaser.get("knowledge", {}) or {}))
 
         rocket_specs = dict(rocket.get("specs", {}) or {})
         rocket_init = dict(rocket.get("initial_state", {}) or {})
@@ -2216,6 +2496,7 @@ class MainWindow(QMainWindow):
         self._set_pointer_combo_value(self.rocket_base_guidance_combo, rocket_base_guidance)
         self.rocket_guidance_modifiers_config = copy.deepcopy(list(rocket.get("guidance_modifiers", []) or []))
         self._refresh_rocket_guidance_modifiers_label()
+        self._load_knowledge_into_widgets("rocket", dict(rocket.get("knowledge", {}) or {}))
         stats = dict(outputs.get("stats", {}) or {})
         plots = dict(outputs.get("plots", {}) or {})
         animations = dict(outputs.get("animations", {}) or {})
@@ -2295,7 +2576,10 @@ class MainWindow(QMainWindow):
         disturbance_torques["srp"] = bool(self.att_srp_check.isChecked())
 
         outputs["mode"] = self.output_mode_combo.currentText()
-        outputs["output_dir"] = self.output_dir_edit.text().strip()
+        output_dir = self.output_dir_edit.text().strip() or "outputs/gui_run"
+        outputs["output_dir"] = output_dir
+        if self.output_dir_edit.text().strip() != output_dir:
+            self.output_dir_edit.setText(output_dir)
         mc["enabled"] = bool(self.mc_enabled_check.isChecked())
         mc["iterations"] = int(self.mc_iterations_spin.value())
         mc["parallel_enabled"] = bool(self.mc_parallel_check.isChecked())
@@ -2321,6 +2605,7 @@ class MainWindow(QMainWindow):
         target.pop("guidance", None)
         target["orbit_control"] = self._combo_pointer_value(self.target_orbit_control_combo, existing=dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
         target["attitude_control"] = self._combo_pointer_value(self.target_attitude_control_combo, existing=dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
+        target["knowledge"] = self._collect_knowledge_from_widgets("target", existing=dict(target.get("knowledge", {}) or {}))
 
         chaser["enabled"] = bool(self.chaser_enabled.isChecked())
         chaser.setdefault("specs", {})["preset_satellite"] = self.chaser_preset.currentText().strip()
@@ -2352,6 +2637,7 @@ class MainWindow(QMainWindow):
         chaser.pop("guidance", None)
         chaser["orbit_control"] = self._combo_pointer_value(self.chaser_orbit_control_combo, existing=dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
         chaser["attitude_control"] = self._combo_pointer_value(self.chaser_attitude_control_combo, existing=dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
+        chaser["knowledge"] = self._collect_knowledge_from_widgets("chaser", existing=dict(chaser.get("knowledge", {}) or {}))
 
         rocket["enabled"] = bool(self.rocket_enabled.isChecked())
         rocket.setdefault("specs", {})["preset_stack"] = self.rocket_preset.currentText().strip()
@@ -2374,6 +2660,7 @@ class MainWindow(QMainWindow):
         rocket.pop("guidance", None)
         rocket.pop("orbit_control", None)
         rocket.pop("attitude_control", None)
+        rocket["knowledge"] = self._collect_knowledge_from_widgets("rocket", existing=dict(rocket.get("knowledge", {}) or {}))
 
         stats = outputs.setdefault("stats", {})
         plots = outputs.setdefault("plots", {})
@@ -2421,6 +2708,49 @@ class MainWindow(QMainWindow):
         else:
             mc_outputs.pop("gates", None)
         return cfg
+
+    def _load_knowledge_into_widgets(self, object_key: str, knowledge: dict) -> None:
+        conditions = dict(knowledge.get("conditions", {}) or {})
+        targets = list(knowledge.get("targets", []) or [])
+        getattr(self, f"{object_key}_knowledge_targets_edit").setText(", ".join(str(t) for t in targets))
+        getattr(self, f"{object_key}_knowledge_refresh_rate").setValue(float(knowledge.get("refresh_rate_s", 1.0) or 0.0))
+        getattr(self, f"{object_key}_knowledge_max_range").setValue(float(conditions.get("max_range_km", 0.0) or 0.0))
+        getattr(self, f"{object_key}_knowledge_dropout_prob").setValue(float(conditions.get("dropout_prob", 0.0) or 0.0))
+        getattr(self, f"{object_key}_knowledge_solid_angle").setValue(float(conditions.get("solid_angle_sr", 4.0 * 3.141592653589793) or 0.0))
+        getattr(self, f"{object_key}_knowledge_require_los").setChecked(bool(conditions.get("require_line_of_sight", False)))
+        sensor_pos = list(conditions.get("sensor_position_body_m", [0.0, 0.0, 0.0]) or [0.0, 0.0, 0.0])
+        sensor_bore = list(conditions.get("sensor_boresight_body", [0.0, 0.0, 0.0]) or [0.0, 0.0, 0.0])
+        for axis, value in zip(("x", "y", "z"), sensor_pos):
+            getattr(self, f"{object_key}_knowledge_sensor_pos_{axis}").setValue(float(value or 0.0))
+        for axis, value in zip(("x", "y", "z"), sensor_bore):
+            getattr(self, f"{object_key}_knowledge_sensor_bore_{axis}").setValue(float(value or 0.0))
+        self._refresh_knowledge_summary_label(object_key)
+
+    def _collect_knowledge_from_widgets(self, object_key: str, existing: dict | None = None) -> dict:
+        knowledge = copy.deepcopy(existing or {})
+        raw_targets = getattr(self, f"{object_key}_knowledge_targets_edit").text().strip()
+        knowledge["targets"] = [tok.strip() for tok in raw_targets.split(",") if tok.strip()]
+        knowledge["refresh_rate_s"] = float(getattr(self, f"{object_key}_knowledge_refresh_rate").value())
+        conditions = dict(knowledge.get("conditions", {}) or {})
+        max_range = float(getattr(self, f"{object_key}_knowledge_max_range").value())
+        conditions["max_range_km"] = max_range if max_range > 0.0 else None
+        conditions["dropout_prob"] = float(getattr(self, f"{object_key}_knowledge_dropout_prob").value())
+        solid_angle = float(getattr(self, f"{object_key}_knowledge_solid_angle").value())
+        conditions["solid_angle_sr"] = solid_angle if solid_angle > 0.0 else None
+        conditions["require_line_of_sight"] = bool(getattr(self, f"{object_key}_knowledge_require_los").isChecked())
+        conditions["sensor_position_body_m"] = [
+            float(getattr(self, f"{object_key}_knowledge_sensor_pos_x").value()),
+            float(getattr(self, f"{object_key}_knowledge_sensor_pos_y").value()),
+            float(getattr(self, f"{object_key}_knowledge_sensor_pos_z").value()),
+        ]
+        sensor_bore = [
+            float(getattr(self, f"{object_key}_knowledge_sensor_bore_x").value()),
+            float(getattr(self, f"{object_key}_knowledge_sensor_bore_y").value()),
+            float(getattr(self, f"{object_key}_knowledge_sensor_bore_z").value()),
+        ]
+        conditions["sensor_boresight_body"] = sensor_bore if any(abs(v) > 0.0 for v in sensor_bore) else None
+        knowledge["conditions"] = conditions
+        return knowledge
 
     def _refresh_yaml(self) -> None:
         try:
@@ -2753,7 +3083,7 @@ class MainWindow(QMainWindow):
             self.process.start(cmd[0], cmd[1:])
             self.run_button.setEnabled(False)
             self.statusBar().showMessage("Simulation running...")
-            self.tabs.setCurrentIndex(4)
+            self.tabs.setCurrentIndex(5)
         except Exception as exc:
             self._show_error("Run Failed", str(exc))
 

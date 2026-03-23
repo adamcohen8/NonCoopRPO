@@ -290,6 +290,181 @@ Common entry points in `examples/`:
 - `CFS_SIL_SingleSat_Loop_Demo.py`
 - `Train_NN_Rendezvous_PPO.py`
 - `Train_NN_AttitudeRIC_PPO.py`
+- `Train_Generic_RL_Env.py`
+- `Train_MultiAgent_SelfPlay_Demo.py`
+
+## Generic RL Environment
+
+There is now an MVP Gymnasium-style RL wrapper in [`machine_learning/gym_env.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/machine_learning/gym_env.py).
+
+It supports:
+
+- `reset()` / `step()` with Gymnasium return signatures
+- configurable observation selection via path strings
+- configurable action channels via named action fields
+- per-episode parameter variation using the existing Monte Carlo variation schema
+- hybrid control via action adapters, including a built-in thrust-vector adapter that can feed mission execution / attitude control instead of commanding raw torques directly
+- vectorized rollouts with synchronous or subprocess-based execution
+- a multi-agent wrapper for simultaneous `chaser` / `target` control in one shared environment
+
+The intended pattern is:
+
+```python
+from machine_learning import (
+    ActionField,
+    GymEnvConfig,
+    GymSimulationEnv,
+    ObservationField,
+    ThrustVectorToPointingAdapter,
+)
+
+scenario = {
+    "rocket": {"enabled": False},
+    "target": {"enabled": True},
+    "chaser": {
+        "enabled": True,
+        "mission_execution": {
+            "module": "sim.mission.modules",
+            "class_name": "ControllerPointingExecution",
+            "params": {"alignment_tolerance_deg": 10.0},
+        },
+    },
+    "simulator": {"duration_s": 300.0, "dt_s": 1.0},
+}
+
+env = GymSimulationEnv(
+    GymEnvConfig(
+        scenario=scenario,
+        controlled_agent_id="chaser",
+        observation_fields=(
+            ObservationField("truth.chaser.position_eci_km"),
+            ObservationField("truth.target.position_eci_km"),
+            ObservationField("truth.chaser.attitude_quat_bn"),
+        ),
+        action_fields=(
+            ActionField("thrust_direction_eci[0]", -1.0, 1.0),
+            ActionField("thrust_direction_eci[1]", -1.0, 1.0),
+            ActionField("thrust_direction_eci[2]", -1.0, 1.0),
+            ActionField("throttle", 0.0, 1.0),
+        ),
+        action_adapter=ThrustVectorToPointingAdapter(),
+    )
+)
+```
+
+The wrapper currently targets satellite scenarios and reuses the simulator’s controller / mission composition pipeline rather than the output-heavy full `run_master_simulation()` path.
+
+For rollout throughput, build a vector env:
+
+```python
+from machine_learning import VectorEnvConfig, make_vector_env
+
+vec_env = make_vector_env(
+    VectorEnvConfig(
+        env_cfg=GymEnvConfig(
+            scenario=scenario,
+            controlled_agent_id="chaser",
+            observation_fields=(
+                ObservationField("truth.chaser.position_eci_km"),
+                ObservationField("truth.target.position_eci_km"),
+            ),
+            action_fields=(
+                ActionField("thrust_eci_km_s2[0]", -1e-5, 1e-5),
+                ActionField("thrust_eci_km_s2[1]", -1e-5, 1e-5),
+                ActionField("thrust_eci_km_s2[2]", -1e-5, 1e-5),
+            ),
+        ),
+        num_envs=8,
+        parallel=True,
+        auto_reset=True,
+    )
+)
+```
+
+`parallel=False` runs a synchronous batched wrapper in-process. `parallel=True` uses spawned subprocess workers so multiple episodes can advance concurrently.
+
+For custom PPO/A2C loops, collect batched rollouts directly:
+
+```python
+from machine_learning import collect_vector_rollout
+import numpy as np
+
+batch = collect_vector_rollout(
+    vec_env,
+    policy_fn=lambda obs: np.zeros((obs.shape[0], 3), dtype=np.float32),
+    horizon=128,
+)
+```
+
+This returns stacked `obs`, `actions`, `rewards`, `terminated`, `truncated`, `next_obs`, and `infos`.
+
+For Stable-Baselines3, use the optional adapter:
+
+```python
+from machine_learning import VectorEnvConfig, make_sb3_vec_env
+
+sb3_env = make_sb3_vec_env(
+    VectorEnvConfig(
+        env_cfg=GymEnvConfig(
+            scenario=scenario,
+            controlled_agent_id="chaser",
+            observation_fields=(ObservationField("truth.chaser.position_eci_km"),),
+            action_fields=(
+                ActionField("thrust_eci_km_s2[0]", -1e-5, 1e-5),
+                ActionField("thrust_eci_km_s2[1]", -1e-5, 1e-5),
+                ActionField("thrust_eci_km_s2[2]", -1e-5, 1e-5),
+            ),
+        ),
+        num_envs=8,
+        parallel=True,
+    )
+)
+```
+
+`make_sb3_vec_env()` requires `stable_baselines3` to be installed.
+
+For adversarial or self-play setups, use the multi-agent env:
+
+```python
+from machine_learning import MultiAgentEnvConfig, MultiAgentSimulationEnv
+
+ma_env = MultiAgentSimulationEnv(
+    MultiAgentEnvConfig(
+        scenario=scenario,
+        controlled_agent_ids=("chaser", "target"),
+        observation_fields_by_agent={
+            "chaser": (
+                ObservationField("truth.chaser.position_eci_km"),
+                ObservationField("truth.target.position_eci_km"),
+            ),
+            "target": (
+                ObservationField("truth.target.position_eci_km"),
+                ObservationField("truth.chaser.position_eci_km"),
+            ),
+        },
+        action_fields_by_agent={
+            "chaser": (
+                ActionField("thrust_eci_km_s2[0]", -1e-5, 1e-5),
+                ActionField("thrust_eci_km_s2[1]", -1e-5, 1e-5),
+                ActionField("thrust_eci_km_s2[2]", -1e-5, 1e-5),
+            ),
+            "target": (
+                ActionField("thrust_eci_km_s2[0]", -1e-5, 1e-5),
+                ActionField("thrust_eci_km_s2[1]", -1e-5, 1e-5),
+                ActionField("thrust_eci_km_s2[2]", -1e-5, 1e-5),
+            ),
+        },
+    )
+)
+```
+
+`reset()` returns per-agent observation and info dicts. `step()` takes a dict of per-agent actions and returns per-agent observations, rewards, terminations, truncations, and infos.
+
+For training infrastructure, the repository now also includes:
+
+- `collect_multi_agent_rollout(...)` for batched self-play/adversarial trajectory collection
+- `run_self_play_training(...)` with opponent-pool support and alternating vs simultaneous update schedules
+- `Train_MultiAgent_SelfPlay_Demo.py` as a runnable example built on that trainer
 
 ## Presets
 

@@ -16,6 +16,7 @@ pytest>=8.0
 # Machine learning stack
 torch>=2.1
 lightning>=2.2
+gymnasium>=0.29
 
 # Optional: enable NRLMSISE-00 atmospheric model backend
 # nrlmsise00>=0.1.2
