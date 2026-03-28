@@ -902,6 +902,7 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
                 "attitude_substep_s",
                 att_dyn.get("attitude_substep_s", 0.02),
             )
+            or 0.02
         ),
         attitude_mode=str(rocket_dyn.get("attitude_mode", "dynamic")),
         tvc_time_constant_s=float(rocket_dyn.get("tvc_time_constant_s", 0.1)),

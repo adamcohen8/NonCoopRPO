@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from sim.app.io import DEFAULT_CONFIG_PATH, load_config_dict
 from sim.config import scenario_config_from_dict
 from sim.master_simulator import _run_single_config, run_master_simulation
 
@@ -53,6 +54,26 @@ class TimeSplitThrustMission:
 
 
 class TestMasterSimulator(unittest.TestCase):
+    def test_default_template_runs_with_null_attitude_substep(self):
+        cfg_dict = load_config_dict(DEFAULT_CONFIG_PATH)
+        cfg_dict["simulator"]["duration_s"] = 1.0
+        cfg_dict["simulator"]["dt_s"] = 1.0
+        cfg_dict["outputs"]["mode"] = "save"
+        cfg_dict["outputs"]["stats"] = {
+            "enabled": False,
+            "print_summary": False,
+            "save_json": False,
+            "save_csv": False,
+            "save_full_log": False,
+        }
+        cfg_dict["outputs"]["plots"] = {"enabled": False, "figure_ids": []}
+        cfg_dict["outputs"]["animations"] = {"enabled": False, "types": []}
+
+        payload = _run_single_config(scenario_config_from_dict(cfg_dict))
+
+        self.assertEqual(payload["summary"]["samples"], 2)
+        self.assertIn("rocket", payload["summary"]["objects"])
+
     def test_strategy_and_execution_layers_drive_satellite_command_stack(self):
         cfg = scenario_config_from_dict(
             {
