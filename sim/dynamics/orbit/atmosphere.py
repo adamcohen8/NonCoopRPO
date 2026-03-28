@@ -13,6 +13,14 @@ from sim.utils.geodesy import ecef_to_geodetic_deg_km
 AtmosphereModelName = Literal["exponential", "ussa1976", "nrlmsise00", "jb2008"]
 
 
+def _radial_altitude_km_from_eci(r_eci_km: np.ndarray) -> float:
+    r_vec = np.asarray(r_eci_km, dtype=float).reshape(3)
+    r2 = float(np.dot(r_vec, r_vec))
+    if r2 <= 0.0:
+        return 0.0
+    return float(max(0.0, np.sqrt(r2) - EARTH_RADIUS_KM))
+
+
 def _altitude_km_from_eci(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) -> float:
     env = {} if env is None else env
     r_ecef_km = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s), jd_utc_start=env.get("jd_utc_start"))
@@ -37,8 +45,8 @@ def _spherical_lat_lon_deg_from_eci(r_eci_km: np.ndarray, t_s: float, env: dict 
     return float(lat), float(lon)
 
 
-def density_exponential(r_eci_km: np.ndarray, t_s: float) -> float:
-    alt_km = _altitude_km_from_eci(r_eci_km, t_s)
+def density_exponential(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) -> float:
+    alt_km = _radial_altitude_km_from_eci(r_eci_km)
     if alt_km > 1000.0:
         return 0.0
     rho0 = 1.225
@@ -324,7 +332,7 @@ def density_from_model(
 ) -> float:
     m = str(model).lower()
     if m == "exponential":
-        return density_exponential(r_eci_km, t_s)
+        return density_exponential(r_eci_km, t_s, env=env)
     if m == "ussa1976":
         return density_ussa1976(r_eci_km, t_s)
     if m == "nrlmsise00":

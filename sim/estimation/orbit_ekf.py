@@ -27,6 +27,17 @@ class OrbitEKFEstimator(Estimator):
     process_noise_diag: np.ndarray
     meas_noise_diag: np.ndarray
     last_update_diagnostics: OrbitEKFUpdateDiagnostics | None = field(default=None, init=False, repr=False)
+    _q: np.ndarray = field(default_factory=lambda: np.zeros((6, 6)), init=False, repr=False)
+    _r: np.ndarray = field(default_factory=lambda: np.zeros((6, 6)), init=False, repr=False)
+    _h: np.ndarray = field(default_factory=lambda: np.eye(6), init=False, repr=False)
+    _i6: np.ndarray = field(default_factory=lambda: np.eye(6), init=False, repr=False)
+    _zero_accel: np.ndarray = field(default_factory=lambda: np.zeros(3), init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.process_noise_diag = np.array(self.process_noise_diag, dtype=float)
+        self.meas_noise_diag = np.array(self.meas_noise_diag, dtype=float)
+        self._q = np.diag(self.process_noise_diag)
+        self._r = np.diag(self.meas_noise_diag)
 
     def update(self, belief: StateBelief, measurement: Measurement | None, t_s: float) -> StateBelief:
         x_prev = belief.state
@@ -36,11 +47,10 @@ class OrbitEKFEstimator(Estimator):
             x_eci=x_prev,
             dt_s=self.dt_s,
             mu_km3_s2=self.mu_km3_s2,
-            accel_cmd_eci_km_s2=np.zeros(3),
+            accel_cmd_eci_km_s2=self._zero_accel,
         )
-        f = self._numerical_jacobian(x_prev)
-        q = np.diag(self.process_noise_diag)
-        p_pred = f @ p_prev @ f.T + q
+        f = self._numerical_jacobian(x_prev, base=x_pred)
+        p_pred = f @ p_prev @ f.T + self._q
 
         if measurement is None:
             self.last_update_diagnostics = OrbitEKFUpdateDiagnostics(
@@ -51,17 +61,15 @@ class OrbitEKFEstimator(Estimator):
             )
             return StateBelief(state=x_pred, covariance=p_pred, last_update_t_s=t_s)
 
-        h = np.eye(6)
-        r = np.diag(self.meas_noise_diag)
         z = measurement.vector[:6] if measurement.vector.size >= 6 else measurement.vector
         if z.size < 6:
             z = np.pad(z, (0, 6 - z.size))
-        y = z - h @ x_pred
-        s = h @ p_pred @ h.T + r
+        y = z - x_pred
+        s = p_pred + self._r
         s_inv = np.linalg.inv(s)
-        k = p_pred @ h.T @ s_inv
+        k = p_pred @ s_inv
         x_upd = x_pred + k @ y
-        p_upd = (np.eye(6) - k @ h) @ p_pred
+        p_upd = (self._i6 - k) @ p_pred
         nis = float(y.T @ s_inv @ y)
         self.last_update_diagnostics = OrbitEKFUpdateDiagnostics(
             measurement_available=True,
@@ -74,14 +82,16 @@ class OrbitEKFEstimator(Estimator):
         )
         return StateBelief(state=x_upd, covariance=p_upd, last_update_t_s=t_s)
 
-    def _numerical_jacobian(self, x: np.ndarray) -> np.ndarray:
+    def _numerical_jacobian(self, x: np.ndarray, *, base: np.ndarray | None = None) -> np.ndarray:
         eps = 1e-6
-        base = propagate_two_body_rk4(
-            x_eci=x,
-            dt_s=self.dt_s,
-            mu_km3_s2=self.mu_km3_s2,
-            accel_cmd_eci_km_s2=np.zeros(3),
-        )
+        base_eval = base
+        if base_eval is None:
+            base_eval = propagate_two_body_rk4(
+                x_eci=x,
+                dt_s=self.dt_s,
+                mu_km3_s2=self.mu_km3_s2,
+                accel_cmd_eci_km_s2=self._zero_accel,
+            )
         j = np.zeros((6, 6))
         for i in range(6):
             xp = x.copy()
@@ -90,7 +100,7 @@ class OrbitEKFEstimator(Estimator):
                 x_eci=xp,
                 dt_s=self.dt_s,
                 mu_km3_s2=self.mu_km3_s2,
-                accel_cmd_eci_km_s2=np.zeros(3),
+                accel_cmd_eci_km_s2=self._zero_accel,
             )
-            j[:, i] = (yp - base) / eps
+            j[:, i] = (yp - base_eval) / eps
         return j

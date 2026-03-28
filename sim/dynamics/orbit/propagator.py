@@ -16,6 +16,7 @@ from sim.dynamics.orbit.accelerations import (
     accel_two_body,
 )
 from sim.dynamics.orbit.atmosphere import density_from_model
+from sim.dynamics.orbit.eclipse import resolve_srp_geometry, srp_shadow_factor
 from sim.dynamics.orbit.epoch import resolve_body_position_eci_km, resolve_sun_moon_positions
 from sim.dynamics.orbit.environment import (
     JUPITER_MU_KM3_S2,
@@ -48,6 +49,7 @@ PLANETARY_MU_KM3_S2 = {
     "neptune": NEPTUNE_MU_KM3_S2,
     "pluto": PLUTO_MU_KM3_S2,
 }
+_ZERO3 = np.zeros(3, dtype=float)
 
 
 def j2_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
@@ -85,20 +87,36 @@ def spherical_harmonics_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: Or
     Optional env fields:
     - spherical_harmonics_fd_step_km
     """
-    terms = parse_spherical_harmonic_terms(env.get("spherical_harmonics_terms"))
+    terms = env.get("_parsed_spherical_harmonics_terms")
+    if terms is None:
+        terms = parse_spherical_harmonic_terms(env.get("spherical_harmonics_terms"))
+        if terms:
+            env["_parsed_spherical_harmonics_terms"] = terms
     if not terms and bool(env.get("spherical_harmonics_use_real_coefficients", False)):
         n_max = int(env.get("spherical_harmonics_max_degree", 8))
         m_max = int(env.get("spherical_harmonics_max_order", n_max))
         model = str(env.get("spherical_harmonics_model", "EGM96"))
         coeff_path = env.get("spherical_harmonics_coeff_path")
         allow_download = bool(env.get("spherical_harmonics_allow_download", True))
-        terms = load_real_earth_gravity_terms(
-            max_degree=n_max,
-            max_order=m_max,
-            model=model,
-            coeff_path=None if coeff_path is None else str(coeff_path),
-            allow_download=allow_download,
+        cache_key = (
+            n_max,
+            m_max,
+            model,
+            None if coeff_path is None else str(coeff_path),
+            allow_download,
         )
+        cached_terms = env.get("_real_spherical_harmonics_cache")
+        if cached_terms is None or cached_terms[0] != cache_key:
+            terms = load_real_earth_gravity_terms(
+                max_degree=n_max,
+                max_order=m_max,
+                model=model,
+                coeff_path=None if coeff_path is None else str(coeff_path),
+                allow_download=allow_download,
+            )
+            env["_real_spherical_harmonics_cache"] = (cache_key, terms)
+        else:
+            terms = cached_terms[1]
     if not terms:
         return np.zeros(3)
     fd_step_km = float(env.get("spherical_harmonics_fd_step_km", 1e-3))
@@ -116,35 +134,64 @@ def spherical_harmonics_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: Or
 
 
 def drag_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
-    env_local = dict(env)
-    if "density_kg_m3" not in env_local:
-        atmo_model = str(env_local.get("atmosphere_model", "exponential")).lower()
-        env_local["density_kg_m3"] = density_from_model(
+    density = env.get("density_kg_m3")
+    if density is None:
+        atmo_model = str(env.get("atmosphere_model", "exponential")).lower()
+        density = density_from_model(
             atmo_model,
             x_eci[:3],
             t_s,
-            env=env_local,
+            env=env,
         )
-    return accel_drag(x_eci[:3], x_eci[3:], t_s, ctx.mass_kg, ctx.area_m2, ctx.cd, env_local)
+    return accel_drag(
+        x_eci[:3],
+        x_eci[3:],
+        t_s,
+        ctx.mass_kg,
+        ctx.area_m2,
+        ctx.cd,
+        {
+            "density_kg_m3": density,
+            "drag_area_m2": env.get("drag_area_m2", ctx.area_m2),
+        },
+    )
 
 
 def srp_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
-    env_local = dict(env)
-    if "sun_dir_eci" not in env_local:
-        sun, _ = resolve_sun_moon_positions(env_local, t_s)
-        n = float(np.linalg.norm(sun))
-        if n > 0.0:
-            env_local["sun_dir_eci"] = sun / n
-    return accel_srp(x_eci[:3], ctx.mass_kg, ctx.area_m2, ctx.cr, t_s, env_local)
+    srp_geometry = resolve_srp_geometry(x_eci[:3], t_s, env)
+    return accel_srp(
+        x_eci[:3],
+        ctx.mass_kg,
+        ctx.area_m2,
+        ctx.cr,
+        t_s,
+        {
+            "srp_geometry": srp_geometry,
+            "srp_sun_dir_eci": srp_geometry["sun_dir_sc_eci"],
+            "srp_distance_scale": srp_geometry["distance_scale"],
+            "srp_shadow_factor": srp_shadow_factor(
+                r_sc_eci_km=x_eci[:3],
+                t_s=t_s,
+                env=env,
+                srp_geometry=srp_geometry,
+            ),
+            "srp_area_m2": env.get("srp_area_m2", ctx.area_m2),
+            "srp_shadow_model": env.get("srp_shadow_model", "conical"),
+        },
+    )
 
 
 def third_body_moon_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
-    _, moon = resolve_sun_moon_positions(env, t_s)
+    moon = env.get("moon_pos_eci_km")
+    if moon is None:
+        _, moon = resolve_sun_moon_positions(env, t_s)
     return accel_third_body(x_eci[:3], moon, MOON_MU_KM3_S2)
 
 
 def third_body_sun_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> np.ndarray:
-    sun, _ = resolve_sun_moon_positions(env, t_s)
+    sun = env.get("sun_pos_eci_km")
+    if sun is None:
+        sun, _ = resolve_sun_moon_positions(env, t_s)
     return accel_third_body(x_eci[:3], sun, SUN_MU_KM3_S2)
 
 
@@ -184,10 +231,13 @@ class OrbitPropagator:
         ctx: OrbitContext,
     ) -> np.ndarray:
         def deriv(t_local: float, x_local: np.ndarray) -> np.ndarray:
+            dx = np.empty(6, dtype=float)
+            dx[:3] = x_local[3:]
             a = accel_two_body(x_local[:3], ctx.mu_km3_s2) + command_accel_eci_km_s2
             for plugin in self.plugins:
                 a += plugin(t_local, x_local, env, ctx)
-            return np.hstack((x_local[3:], a))
+            dx[3:] = a
+            return dx
 
         if self.integrator in ("rkf78", "dopri5", "adaptive"):
             adaptive_method = "rkf78" if self.integrator in ("rkf78", "adaptive") else "dopri5"

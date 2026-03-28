@@ -4,12 +4,15 @@ import numpy as np
 
 
 def normalize_quaternion(q: np.ndarray) -> np.ndarray:
-    x = np.array(q, dtype=float).reshape(-1)
+    x = np.asarray(q, dtype=float).reshape(-1)
     if x.size != 4 or not np.all(np.isfinite(x)):
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
-    n = float(np.linalg.norm(x))
+    n2 = float(np.dot(x, x))
+    if n2 <= 0.0 or not np.isfinite(n2):
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    n = float(np.sqrt(n2))
     if n <= 0.0 or not np.isfinite(n):
-        return np.array([1.0, 0.0, 0.0, 0.0])
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
     return x / n
 
 
@@ -26,8 +29,8 @@ def omega_matrix(w_body_rad_s: np.ndarray) -> np.ndarray:
 
 
 def quaternion_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    a0, a1, a2, a3 = normalize_quaternion(np.array(q1, dtype=float))
-    b0, b1, b2, b3 = normalize_quaternion(np.array(q2, dtype=float))
+    a0, a1, a2, a3 = normalize_quaternion(q1)
+    b0, b1, b2, b3 = normalize_quaternion(q2)
     return np.array(
         [
             a0 * b0 - a1 * b1 - a2 * b2 - a3 * b3,
@@ -40,7 +43,7 @@ def quaternion_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
 
 
 def quaternion_delta_from_body_rate(omega_body_rad_s: np.ndarray, dt_s: float) -> np.ndarray:
-    w = np.array(omega_body_rad_s, dtype=float).reshape(3)
+    w = np.asarray(omega_body_rad_s, dtype=float).reshape(3)
     if not np.all(np.isfinite(w)) or not np.isfinite(float(dt_s)):
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
     w_norm = float(np.linalg.norm(w))

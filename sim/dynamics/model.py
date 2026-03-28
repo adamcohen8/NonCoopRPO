@@ -8,6 +8,8 @@ from sim.core.interfaces import DynamicsModel
 from sim.core.models import Command, StateTruth
 from sim.dynamics.attitude.disturbances import DisturbanceTorqueModel
 from sim.dynamics.attitude.rigid_body import propagate_attitude_exponential_map
+from sim.dynamics.orbit.atmosphere import density_from_model
+from sim.dynamics.orbit.eclipse import srp_shadow_factor
 from sim.dynamics.orbit.environment import EARTH_ROT_RATE_RAD_S
 from sim.dynamics.orbit.accelerations import OrbitContext
 from sim.dynamics.orbit.propagator import OrbitPropagator
@@ -48,7 +50,14 @@ class OrbitalAttitudeDynamics(DynamicsModel):
         if self.use_rectangular_prism_for_aero_srp and geom is not None and self.disturbance_model is not None:
             c_bn = quaternion_to_dcm_bn(state.attitude_quat_bn)
             omega_earth = np.array([0.0, 0.0, EARTH_ROT_RATE_RAD_S], dtype=float)
-            v_atm_eci_km_s = np.cross(omega_earth, state.position_eci_km)
+            v_atm_eci_km_s = np.array(
+                [
+                    -EARTH_ROT_RATE_RAD_S * float(state.position_eci_km[1]),
+                    EARTH_ROT_RATE_RAD_S * float(state.position_eci_km[0]),
+                    0.0,
+                ],
+                dtype=float,
+            )
             v_rel_eci_km_s = state.velocity_eci_km_s - v_atm_eci_km_s
             v_rel_body = c_bn @ v_rel_eci_km_s
             env_local["drag_area_m2"] = geom.projected_area_m2(-v_rel_body)
@@ -84,6 +93,39 @@ class OrbitalAttitudeDynamics(DynamicsModel):
         q_next = state.attitude_quat_bn.copy()
         w_next = state.angular_rate_body_rad_s.copy()
         if self.propagate_attitude:
+            disturbance_cfg = getattr(self.disturbance_model, "config", None)
+            if self.disturbance_model is not None and bool(getattr(disturbance_cfg, "use_drag", False)):
+                if "density_kg_m3" not in env_local:
+                    env_local["density_kg_m3"] = density_from_model(
+                        str(env_local.get("atmosphere_model", "exponential")).lower(),
+                        state.position_eci_km,
+                        state.t_s,
+                        env=env_local,
+                    )
+                v_atm_eci_km_s = np.array(
+                    [
+                        -EARTH_ROT_RATE_RAD_S * float(state.position_eci_km[1]),
+                        EARTH_ROT_RATE_RAD_S * float(state.position_eci_km[0]),
+                        0.0,
+                    ],
+                    dtype=float,
+                )
+                v_rel_eci_m_s = (state.velocity_eci_km_s - v_atm_eci_km_s) * 1e3
+                env_local["drag_v_rel_eci_m_s"] = v_rel_eci_m_s
+                env_local["drag_v_rel_norm_m_s"] = float(np.linalg.norm(v_rel_eci_m_s))
+
+            if self.disturbance_model is not None and bool(getattr(disturbance_cfg, "use_srp", False)):
+                sun_dir_eci = env_local.get("sun_dir_eci")
+                if sun_dir_eci is not None:
+                    sun_dir_eci = np.asarray(sun_dir_eci, dtype=float).reshape(3)
+                    sun_norm = float(np.linalg.norm(sun_dir_eci))
+                    if sun_norm > 0.0:
+                        env_local["sun_dir_eci_unit"] = sun_dir_eci / sun_norm
+                env_local["srp_shadow_factor"] = srp_shadow_factor(
+                    r_sc_eci_km=state.position_eci_km,
+                    t_s=state.t_s,
+                    env=env_local,
+                )
             att_dt = self._effective_substep(self.attitude_substep_s, dt_s)
             t_att = state.t_s
             for h in self._substep_sequence(dt_s, att_dt):

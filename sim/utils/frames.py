@@ -4,21 +4,44 @@ import numpy as np
 
 
 def ric_dcm_ir_from_rv(r_eci_km: np.ndarray, v_eci_km_s: np.ndarray) -> np.ndarray:
-    r_hat = r_eci_km / max(np.linalg.norm(r_eci_km), 1e-12)
-    h = np.cross(r_eci_km, v_eci_km_s)
-    c_hat = h / max(np.linalg.norm(h), 1e-12)
-    i_hat = np.cross(c_hat, r_hat)
-    i_hat = i_hat / max(np.linalg.norm(i_hat), 1e-12)
+    r = np.asarray(r_eci_km, dtype=float).reshape(3)
+    v = np.asarray(v_eci_km_s, dtype=float).reshape(3)
+    r_hat = r / max(float(np.sqrt(np.dot(r, r))), 1e-12)
+    h = np.array(
+        [
+            r[1] * v[2] - r[2] * v[1],
+            r[2] * v[0] - r[0] * v[2],
+            r[0] * v[1] - r[1] * v[0],
+        ],
+        dtype=float,
+    )
+    c_hat = h / max(float(np.sqrt(np.dot(h, h))), 1e-12)
+    i_hat = np.array(
+        [
+            c_hat[1] * r_hat[2] - c_hat[2] * r_hat[1],
+            c_hat[2] * r_hat[0] - c_hat[0] * r_hat[2],
+            c_hat[0] * r_hat[1] - c_hat[1] * r_hat[0],
+        ],
+        dtype=float,
+    )
+    i_hat = i_hat / max(float(np.sqrt(np.dot(i_hat, i_hat))), 1e-12)
     return np.column_stack((r_hat, i_hat, c_hat))
 
 
 def ric_angular_rate_eci_from_rv(r_eci_km: np.ndarray, v_eci_km_s: np.ndarray) -> np.ndarray:
-    r = np.array(r_eci_km, dtype=float).reshape(3)
-    v = np.array(v_eci_km_s, dtype=float).reshape(3)
+    r = np.asarray(r_eci_km, dtype=float).reshape(3)
+    v = np.asarray(v_eci_km_s, dtype=float).reshape(3)
     r2 = float(np.dot(r, r))
     if r2 <= 1e-12:
         return np.zeros(3, dtype=float)
-    return np.cross(r, v) / r2
+    return np.array(
+        [
+            r[1] * v[2] - r[2] * v[1],
+            r[2] * v[0] - r[0] * v[2],
+            r[0] * v[1] - r[1] * v[0],
+        ],
+        dtype=float,
+    ) / r2
 
 
 def ric_rect_state_to_eci(
@@ -30,7 +53,15 @@ def ric_rect_state_to_eci(
     c_ir = ric_dcm_ir_from_rv(r_chief_eci_km, v_chief_eci_km_s)
     omega_ric_eci = ric_angular_rate_eci_from_rv(r_chief_eci_km, v_chief_eci_km_s)
     dr_eci = c_ir @ x_rel[:3]
-    dv_eci = c_ir @ x_rel[3:] + np.cross(omega_ric_eci, dr_eci)
+    omega_cross_dr = np.array(
+        [
+            omega_ric_eci[1] * dr_eci[2] - omega_ric_eci[2] * dr_eci[1],
+            omega_ric_eci[2] * dr_eci[0] - omega_ric_eci[0] * dr_eci[2],
+            omega_ric_eci[0] * dr_eci[1] - omega_ric_eci[1] * dr_eci[0],
+        ],
+        dtype=float,
+    )
+    dv_eci = c_ir @ x_rel[3:] + omega_cross_dr
     return np.hstack(
         (
             np.array(r_chief_eci_km, dtype=float).reshape(3) + dr_eci,
@@ -52,7 +83,15 @@ def eci_relative_to_ric_rect(
     dr_eci = x_dep[:3] - r_chief
     dv_eci = x_dep[3:] - v_chief
     dr_ric = c_ir.T @ dr_eci
-    dv_ric = c_ir.T @ (dv_eci - np.cross(omega_ric_eci, dr_eci))
+    omega_cross_dr = np.array(
+        [
+            omega_ric_eci[1] * dr_eci[2] - omega_ric_eci[2] * dr_eci[1],
+            omega_ric_eci[2] * dr_eci[0] - omega_ric_eci[0] * dr_eci[2],
+            omega_ric_eci[0] * dr_eci[1] - omega_ric_eci[1] * dr_eci[0],
+        ],
+        dtype=float,
+    )
+    dv_ric = c_ir.T @ (dv_eci - omega_cross_dr)
     return np.hstack((dr_ric, dv_ric))
 
 

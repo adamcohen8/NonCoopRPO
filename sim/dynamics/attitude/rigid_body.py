@@ -46,10 +46,10 @@ def rigid_body_derivatives(
     inertia_kg_m2: np.ndarray,
     torque_body_nm: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    q = normalize_quaternion(np.array(quat_bn, dtype=float).reshape(4))
-    w = np.array(omega_body_rad_s, dtype=float).reshape(3)
-    I = np.array(inertia_kg_m2, dtype=float).reshape(3, 3)
-    tau = np.array(torque_body_nm, dtype=float).reshape(3)
+    q = normalize_quaternion(quat_bn)
+    w = np.asarray(omega_body_rad_s, dtype=float).reshape(3)
+    I = np.asarray(inertia_kg_m2, dtype=float).reshape(3, 3)
+    tau = np.asarray(torque_body_nm, dtype=float).reshape(3)
 
     # Clamp/sanitize extremes to keep attitude propagation numerically stable.
     if not (np.all(np.isfinite(w)) and np.all(np.isfinite(tau)) and np.all(np.isfinite(I))):
@@ -69,7 +69,14 @@ def rigid_body_derivatives(
 
     q_dot = 0.5 * omega_matrix(w) @ q
     Iw = I @ w
-    coriolis = np.cross(w, Iw)
+    coriolis = np.array(
+        [
+            w[1] * Iw[2] - w[2] * Iw[1],
+            w[2] * Iw[0] - w[0] * Iw[2],
+            w[0] * Iw[1] - w[1] * Iw[0],
+        ],
+        dtype=float,
+    )
     if not np.all(np.isfinite(coriolis)):
         _ATTITUDE_GUARDRAIL_STATS.non_finite_coriolis_events += 1
     rhs = tau - np.nan_to_num(coriolis, nan=0.0, posinf=_MAX_ABS_TORQUE_NM, neginf=-_MAX_ABS_TORQUE_NM)
@@ -112,7 +119,7 @@ def propagate_attitude_exponential_map(
     # Integrate angular-rate dynamics with first-order step.
     _, omega_dot = rigid_body_derivatives(quat_bn, omega_body_rad_s, inertia_kg_m2, torque_body_nm)
     dt = float(max(dt_s, 0.0))
-    omega_now = np.array(omega_body_rad_s, dtype=float).reshape(3)
+    omega_now = np.asarray(omega_body_rad_s, dtype=float).reshape(3)
     omega_next = omega_now + dt * omega_dot
     if not np.all(np.isfinite(omega_next)):
         _ATTITUDE_GUARDRAIL_STATS.non_finite_output_events += 1

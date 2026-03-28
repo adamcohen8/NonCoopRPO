@@ -1181,13 +1181,15 @@ class ControllerPointingExecution:
         _apply_orbit_controller_intent(orbit_controller, intent)
         c_orb = orbit_controller.act(orb_belief, t_s, 2.0) if (orbit_controller is not None and orb_belief is not None) else Command.zero()
         thrust_cmd = np.array(c_orb.thrust_eci_km_s2, dtype=float).reshape(3)
-        if self.use_strategy_fallback_thrust and float(np.linalg.norm(thrust_cmd)) <= 1e-15 and "fallback_thrust_eci_km_s2" in intent:
+        thrust_norm = float(np.sqrt(np.dot(thrust_cmd, thrust_cmd)))
+        if self.use_strategy_fallback_thrust and thrust_norm <= 1e-15 and "fallback_thrust_eci_km_s2" in intent:
             thrust_cmd = np.array(intent.get("fallback_thrust_eci_km_s2"), dtype=float).reshape(3)
+            thrust_norm = float(np.sqrt(np.dot(thrust_cmd, thrust_cmd)))
 
         q_des = None
         if "desired_attitude_quat_bn" in intent:
             q_des = np.array(intent.get("desired_attitude_quat_bn"), dtype=float).reshape(-1)
-        elif bool(intent.get("align_to_thrust", self.align_thruster_to_thrust)) and float(np.linalg.norm(thrust_cmd)) > 1e-15:
+        elif bool(intent.get("align_to_thrust", self.align_thruster_to_thrust)) and thrust_norm > 1e-15:
             q_des = PoseCommandGenerator.sun_track(
                 truth=truth,
                 sun_dir_eci=_unit(thrust_cmd),
@@ -1203,7 +1205,7 @@ class ControllerPointingExecution:
 
         tol_rad = _resolve_angle_tolerance_rad(self.alignment_tolerance_rad, self.alignment_tolerance_deg)
         alignment_error_rad = float("nan")
-        if float(np.linalg.norm(thrust_cmd)) > 1e-15:
+        if thrust_norm > 1e-15:
             b_dir = _unit(np.array(self.thruster_direction_body, dtype=float))
             b_to_eci = quaternion_to_dcm_bn(np.array(truth.attitude_quat_bn, dtype=float)).T
             thrust_axis_eci = _unit(b_to_eci @ b_dir)
