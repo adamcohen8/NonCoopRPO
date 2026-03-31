@@ -21,3 +21,6 @@ examples/outputs/
 # Third-party validation package (do not commit)
 validation/High Precision Orbit Propagator_4-2/
 .idea/
+
+# Local-only RED experiment framework (private)
+RED/

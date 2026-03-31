@@ -10,6 +10,7 @@ from sim.actuators import (
     SimpleActuator,
     ThrusterPulseLimits,
 )
+from sim.api import SimulationConfig, SimulationResult, SimulationSession, SimulationSnapshot
 from sim.control import (
     AttitudeAgnosticImpulsiveManeuverer,
     DeltaVManeuver,
@@ -228,6 +229,10 @@ __all__ = [
     "RobustMPCController",
     "StochasticPolicyController",
     "ZeroTorqueController",
+    "SimulationConfig",
+    "SimulationSession",
+    "SimulationResult",
+    "SimulationSnapshot",
     "SimulationProfileName",
     "SimulationProfile",
     "PROFILE_FAST",

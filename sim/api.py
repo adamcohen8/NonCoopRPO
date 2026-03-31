@@ -1,0 +1,290 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import tempfile
+from typing import Any
+
+import numpy as np
+import yaml
+
+from sim.config import SimulationScenarioConfig, load_simulation_yaml, scenario_config_from_dict
+
+
+def _closest_approach_metric(payload: dict[str, Any]) -> float:
+    from sim.master_simulator import _closest_approach_from_run_payload
+
+    return _closest_approach_from_run_payload(payload)
+
+
+def _run_single_payload(
+    cfg: SimulationScenarioConfig,
+    *,
+    step_callback: Any | None = None,
+) -> dict[str, Any]:
+    from sim.master_simulator import _run_single_config
+
+    return _run_single_config(cfg, step_callback=step_callback)
+
+
+def _run_legacy_master(config_path: Path) -> dict[str, Any]:
+    from sim.master_simulator import run_master_simulation
+
+    return run_master_simulation(config_path)
+
+
+def _as_array_map(value: Any) -> dict[str, np.ndarray]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, np.ndarray] = {}
+    for key, arr in value.items():
+        try:
+            out[str(key)] = np.array(arr, dtype=float)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _as_nested_array_map(value: Any) -> dict[str, dict[str, np.ndarray]]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, np.ndarray]] = {}
+    for key, inner in value.items():
+        if not isinstance(inner, dict):
+            continue
+        out[str(key)] = _as_array_map(inner)
+    return out
+
+
+@dataclass(frozen=True)
+class SimulationConfig:
+    scenario: SimulationScenarioConfig
+    source_path: Path | None = None
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "SimulationConfig":
+        resolved = Path(path).expanduser().resolve()
+        return cls(scenario=load_simulation_yaml(resolved), source_path=resolved)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SimulationConfig":
+        return cls(scenario=scenario_config_from_dict(dict(data)))
+
+    @property
+    def scenario_name(self) -> str:
+        return str(self.scenario.scenario_name)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.scenario.to_dict()
+
+    def to_scenario_config(self) -> SimulationScenarioConfig:
+        return self.scenario
+
+    def with_seed(self, seed: int) -> "SimulationConfig":
+        root = self.to_dict()
+        root.setdefault("metadata", {})["seed"] = int(seed)
+        return SimulationConfig(
+            scenario=scenario_config_from_dict(root),
+            source_path=self.source_path,
+        )
+
+
+@dataclass(frozen=True)
+class SimulationSnapshot:
+    step_index: int
+    time_s: float
+    truth: dict[str, np.ndarray]
+    belief: dict[str, np.ndarray]
+    applied_thrust: dict[str, np.ndarray]
+    applied_torque: dict[str, np.ndarray]
+
+    @property
+    def object_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self.truth.keys()))
+
+
+@dataclass
+class SimulationResult:
+    config: SimulationConfig
+    payload: dict[str, Any]
+
+    @property
+    def is_monte_carlo(self) -> bool:
+        return bool(dict(self.payload.get("monte_carlo", {}) or {}).get("enabled", False))
+
+    @property
+    def summary(self) -> dict[str, Any]:
+        if isinstance(self.payload.get("summary"), dict):
+            return dict(self.payload["summary"])
+        if isinstance(self.payload.get("run"), dict):
+            return dict(self.payload["run"])
+        return {}
+
+    @property
+    def time_s(self) -> np.ndarray:
+        return np.array(self.payload.get("time_s", []), dtype=float).reshape(-1)
+
+    @property
+    def truth(self) -> dict[str, np.ndarray]:
+        return _as_array_map(self.payload.get("truth_by_object", {}))
+
+    @property
+    def belief(self) -> dict[str, np.ndarray]:
+        return _as_array_map(self.payload.get("belief_by_object", {}))
+
+    @property
+    def applied_thrust(self) -> dict[str, np.ndarray]:
+        return _as_array_map(self.payload.get("applied_thrust_by_object", {}))
+
+    @property
+    def applied_torque(self) -> dict[str, np.ndarray]:
+        return _as_array_map(self.payload.get("applied_torque_by_object", {}))
+
+    @property
+    def knowledge(self) -> dict[str, dict[str, np.ndarray]]:
+        return _as_nested_array_map(self.payload.get("knowledge_by_observer", {}))
+
+    @property
+    def artifacts(self) -> dict[str, Any]:
+        if self.is_monte_carlo:
+            return dict(self.payload.get("artifacts", {}) or {})
+        summary = self.summary
+        return {
+            "plots": dict(summary.get("plot_outputs", {}) or {}),
+            "animations": dict(summary.get("animation_outputs", {}) or {}),
+        }
+
+    @property
+    def metrics(self) -> dict[str, Any]:
+        if self.is_monte_carlo:
+            return dict(self.payload.get("aggregate_stats", {}) or {})
+        out = dict(self.summary)
+        closest_approach_km = _closest_approach_metric(self.payload)
+        if np.isfinite(closest_approach_km):
+            out["closest_approach_km"] = float(closest_approach_km)
+        return out
+
+    @property
+    def num_steps(self) -> int:
+        return int(self.time_s.size)
+
+    def snapshot(self, step_index: int) -> SimulationSnapshot:
+        if self.is_monte_carlo:
+            raise RuntimeError("Snapshots are only available for single-run results.")
+        if step_index < 0 or step_index >= self.num_steps:
+            raise IndexError(f"step_index {step_index} is out of range for {self.num_steps} samples.")
+
+        truth = {oid: np.array(hist[step_index], dtype=float) for oid, hist in self.truth.items() if hist.shape[0] > step_index}
+        belief = {oid: np.array(hist[step_index], dtype=float) for oid, hist in self.belief.items() if hist.shape[0] > step_index}
+        thrust = {
+            oid: np.array(hist[step_index], dtype=float)
+            for oid, hist in self.applied_thrust.items()
+            if hist.shape[0] > step_index
+        }
+        torque = {
+            oid: np.array(hist[step_index], dtype=float)
+            for oid, hist in self.applied_torque.items()
+            if hist.shape[0] > step_index
+        }
+        return SimulationSnapshot(
+            step_index=int(step_index),
+            time_s=float(self.time_s[step_index]),
+            truth=truth,
+            belief=belief,
+            applied_thrust=thrust,
+            applied_torque=torque,
+        )
+
+
+class SimulationSession:
+    def __init__(self, config: SimulationConfig | SimulationScenarioConfig | dict[str, Any]):
+        self._base_config = self._coerce_config(config)
+        self._active_config = self._base_config
+        self._result: SimulationResult | None = None
+        self._step_index = 0
+        self._done = False
+
+    @classmethod
+    def from_config(cls, config: SimulationConfig | SimulationScenarioConfig | dict[str, Any]) -> "SimulationSession":
+        return cls(config)
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "SimulationSession":
+        return cls(SimulationConfig.from_yaml(path))
+
+    @staticmethod
+    def _coerce_config(config: SimulationConfig | SimulationScenarioConfig | dict[str, Any]) -> SimulationConfig:
+        if isinstance(config, SimulationConfig):
+            return config
+        if isinstance(config, SimulationScenarioConfig):
+            return SimulationConfig(config)
+        if isinstance(config, dict):
+            return SimulationConfig.from_dict(config)
+        raise TypeError(f"Unsupported config type: {type(config)!r}")
+
+    @property
+    def config(self) -> SimulationConfig:
+        return self._active_config
+
+    @property
+    def result(self) -> SimulationResult | None:
+        return self._result
+
+    @property
+    def done(self) -> bool:
+        return bool(self._done)
+
+    def reset(self, seed: int | None = None) -> SimulationSnapshot | None:
+        self._active_config = self._base_config.with_seed(seed) if seed is not None else self._base_config
+        self._result = None
+        self._step_index = 0
+        self._done = False
+        if self._active_config.scenario.monte_carlo.enabled:
+            return None
+        self._ensure_single_run_result()
+        assert self._result is not None
+        return self._result.snapshot(0)
+
+    def run(self, *, step_callback: Any | None = None) -> SimulationResult:
+        if self._active_config.scenario.monte_carlo.enabled:
+            payload = self._run_monte_carlo(self._active_config)
+            self._result = SimulationResult(config=self._active_config, payload=payload)
+            self._done = True
+            return self._result
+
+        self._ensure_single_run_result(step_callback=step_callback)
+        assert self._result is not None
+        self._step_index = max(self._result.num_steps - 1, 0)
+        self._done = True
+        return self._result
+
+    def step(self) -> SimulationSnapshot:
+        if self._active_config.scenario.monte_carlo.enabled:
+            raise RuntimeError("SimulationSession.step() is only available for single-run scenarios.")
+        self._ensure_single_run_result()
+        assert self._result is not None
+        if self._step_index >= max(self._result.num_steps - 1, 0):
+            self._done = True
+            return self._result.snapshot(max(self._result.num_steps - 1, 0))
+        self._step_index += 1
+        self._done = self._step_index >= max(self._result.num_steps - 1, 0)
+        return self._result.snapshot(self._step_index)
+
+    def _ensure_single_run_result(self, *, step_callback: Any | None = None) -> None:
+        if self._result is not None:
+            return
+        payload = _run_single_payload(self._active_config.to_scenario_config(), step_callback=step_callback)
+        self._result = SimulationResult(config=self._active_config, payload=payload)
+
+    @staticmethod
+    def _run_monte_carlo(config: SimulationConfig) -> dict[str, Any]:
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False, encoding="utf-8") as tmp:
+            yaml.safe_dump(config.to_dict(), tmp, sort_keys=False)
+            tmp_path = Path(tmp.name)
+        try:
+            return _run_legacy_master(tmp_path)
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
