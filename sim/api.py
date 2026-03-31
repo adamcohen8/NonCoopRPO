@@ -33,6 +33,16 @@ def _run_legacy_master(config_path: Path) -> dict[str, Any]:
     return run_master_simulation(config_path)
 
 
+def _create_single_run_engine(
+    cfg: SimulationScenarioConfig,
+    *,
+    step_callback: Any | None = None,
+) -> Any:
+    from sim.master_simulator import _SingleRunEngine
+
+    return _SingleRunEngine(cfg, step_callback=step_callback)
+
+
 def _as_array_map(value: Any) -> dict[str, np.ndarray]:
     if not isinstance(value, dict):
         return {}
@@ -203,6 +213,7 @@ class SimulationSession:
         self._result: SimulationResult | None = None
         self._step_index = 0
         self._done = False
+        self._engine: Any | None = None
 
     @classmethod
     def from_config(cls, config: SimulationConfig | SimulationScenarioConfig | dict[str, Any]) -> "SimulationSession":
@@ -232,6 +243,8 @@ class SimulationSession:
 
     @property
     def done(self) -> bool:
+        if self._engine is not None:
+            return bool(self._engine.done)
         return bool(self._done)
 
     def reset(self, seed: int | None = None) -> SimulationSnapshot | None:
@@ -239,11 +252,20 @@ class SimulationSession:
         self._result = None
         self._step_index = 0
         self._done = False
+        self._engine = None
         if self._active_config.scenario.monte_carlo.enabled:
             return None
-        self._ensure_single_run_result()
-        assert self._result is not None
-        return self._result.snapshot(0)
+        self._ensure_engine()
+        assert self._engine is not None
+        snap = self._engine.snapshot(0)
+        return SimulationSnapshot(
+            step_index=int(snap["step_index"]),
+            time_s=float(snap["time_s"]),
+            truth=dict(snap["truth"]),
+            belief=dict(snap["belief"]),
+            applied_thrust=dict(snap["applied_thrust"]),
+            applied_torque=dict(snap["applied_torque"]),
+        )
 
     def run(self, *, step_callback: Any | None = None) -> SimulationResult:
         if self._active_config.scenario.monte_carlo.enabled:
@@ -252,8 +274,10 @@ class SimulationSession:
             self._done = True
             return self._result
 
-        self._ensure_single_run_result(step_callback=step_callback)
-        assert self._result is not None
+        self._ensure_engine(step_callback=step_callback)
+        assert self._engine is not None
+        payload = self._engine.run()
+        self._result = SimulationResult(config=self._active_config, payload=payload)
         self._step_index = max(self._result.num_steps - 1, 0)
         self._done = True
         return self._result
@@ -261,20 +285,24 @@ class SimulationSession:
     def step(self) -> SimulationSnapshot:
         if self._active_config.scenario.monte_carlo.enabled:
             raise RuntimeError("SimulationSession.step() is only available for single-run scenarios.")
-        self._ensure_single_run_result()
-        assert self._result is not None
-        if self._step_index >= max(self._result.num_steps - 1, 0):
-            self._done = True
-            return self._result.snapshot(max(self._result.num_steps - 1, 0))
-        self._step_index += 1
-        self._done = self._step_index >= max(self._result.num_steps - 1, 0)
-        return self._result.snapshot(self._step_index)
+        self._ensure_engine()
+        assert self._engine is not None
+        snap = self._engine.step()
+        self._step_index = int(snap["step_index"])
+        self._done = bool(self._engine.done)
+        return SimulationSnapshot(
+            step_index=int(snap["step_index"]),
+            time_s=float(snap["time_s"]),
+            truth=dict(snap["truth"]),
+            belief=dict(snap["belief"]),
+            applied_thrust=dict(snap["applied_thrust"]),
+            applied_torque=dict(snap["applied_torque"]),
+        )
 
-    def _ensure_single_run_result(self, *, step_callback: Any | None = None) -> None:
-        if self._result is not None:
+    def _ensure_engine(self, *, step_callback: Any | None = None) -> None:
+        if self._engine is not None:
             return
-        payload = _run_single_payload(self._active_config.to_scenario_config(), step_callback=step_callback)
-        self._result = SimulationResult(config=self._active_config, payload=payload)
+        self._engine = _create_single_run_engine(self._active_config.to_scenario_config(), step_callback=step_callback)
 
     @staticmethod
     def _run_monte_carlo(config: SimulationConfig) -> dict[str, Any]:

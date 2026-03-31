@@ -1639,247 +1639,287 @@ def _format_single_run_summary(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _run_single_config(
-    cfg: SimulationScenarioConfig,
-    step_callback: Callable[[int, int], None] | None = None,
-) -> dict[str, Any]:
-    reset_attitude_guardrail_stats()
-    dt = float(cfg.simulator.dt_s)
-    n = int(np.floor(float(cfg.simulator.duration_s) / dt)) + 1
-    t_s = np.arange(n, dtype=float) * dt
-    outdir = Path(cfg.outputs.output_dir)
-    outdir.mkdir(parents=True, exist_ok=True)
+class _SingleRunEngine:
+    def __init__(
+        self,
+        cfg: SimulationScenarioConfig,
+        *,
+        step_callback: Callable[[int, int], None] | None = None,
+    ) -> None:
+        self.cfg = cfg
+        self.active_step_callback = step_callback
+        reset_attitude_guardrail_stats()
 
-    seed = int(cfg.metadata.get("seed", 123))
-    rng = np.random.default_rng(seed)
-    dynamics_cfg = dict(cfg.simulator.dynamics or {})
-    orbit_cfg = dict(dynamics_cfg.get("orbit", {}) or {})
-    att_cfg = dict(dynamics_cfg.get("attitude", {}) or {})
-    base_environment = dict(cfg.simulator.environment or {})
-    attitude_enabled = bool(att_cfg.get("enabled", True))
-    orbit_substep_s = float(max(float(orbit_cfg.get("orbit_substep_s", dt) or dt), 1e-9))
-    attitude_substep_s = float(max(float(att_cfg.get("attitude_substep_s", dt) or dt), 1e-9))
-    sim_substep_s = float(min(orbit_substep_s, attitude_substep_s)) if attitude_enabled else orbit_substep_s
-    eye6 = np.eye(6) * 1e-4
-    eye12 = np.eye(12) * 1e-4
-    zero3 = np.zeros(3, dtype=float)
+        self.dt = float(cfg.simulator.dt_s)
+        self.n = int(np.floor(float(cfg.simulator.duration_s) / self.dt)) + 1
+        self.t_s = np.arange(self.n, dtype=float) * self.dt
+        self.outdir = Path(cfg.outputs.output_dir)
+        self.outdir.mkdir(parents=True, exist_ok=True)
 
-    rocket = _create_rocket_runtime(cfg) if cfg.rocket.enabled else None
-    chaser = _create_satellite_runtime("chaser", cfg.chaser, cfg, np.random.default_rng(int(rng.integers(0, 2**31 - 1)))) if cfg.chaser.enabled else None
-    target = _create_satellite_runtime("target", cfg.target, cfg, np.random.default_rng(int(rng.integers(0, 2**31 - 1)))) if cfg.target.enabled else None
-    if chaser is not None and chaser.deploy_source == "rocket_deployment":
-        chaser.active = False
-    agents: dict[str, AgentRuntime] = {}
-    if rocket is not None:
-        agents["rocket"] = rocket
-    if target is not None:
-        agents["target"] = target
-    if chaser is not None:
-        agents["chaser"] = chaser
-    if chaser is not None and target is not None and chaser.deploy_source != "rocket_deployment":
-        _apply_chaser_relative_init_from_target(
-            chaser=chaser,
-            target=target,
-            initial_state=dict(cfg.chaser.initial_state or {}),
+        seed = int(cfg.metadata.get("seed", 123))
+        rng = np.random.default_rng(seed)
+        dynamics_cfg = dict(cfg.simulator.dynamics or {})
+        orbit_cfg = dict(dynamics_cfg.get("orbit", {}) or {})
+        att_cfg = dict(dynamics_cfg.get("attitude", {}) or {})
+        self.base_environment = dict(cfg.simulator.environment or {})
+        self.attitude_enabled = bool(att_cfg.get("enabled", True))
+        orbit_substep_s = float(max(float(orbit_cfg.get("orbit_substep_s", self.dt) or self.dt), 1e-9))
+        attitude_substep_s = float(max(float(att_cfg.get("attitude_substep_s", self.dt) or self.dt), 1e-9))
+        self.sim_substep_s = float(min(orbit_substep_s, attitude_substep_s)) if self.attitude_enabled else orbit_substep_s
+        self.eye6 = np.eye(6) * 1e-4
+        self.eye12 = np.eye(12) * 1e-4
+        self.zero3 = np.zeros(3, dtype=float)
+
+        self.rocket = _create_rocket_runtime(cfg) if cfg.rocket.enabled else None
+        self.chaser = (
+            _create_satellite_runtime("chaser", cfg.chaser, cfg, np.random.default_rng(int(rng.integers(0, 2**31 - 1))))
+            if cfg.chaser.enabled
+            else None
         )
-
-    for aid, a in agents.items():
-        cfg_src = cfg.rocket if aid == "rocket" else (cfg.chaser if aid == "chaser" else cfg.target)
-        a.knowledge_base = _build_knowledge_base(
-            observer_id=aid,
-            agent_cfg=cfg_src,
-            dt_s=dt,
-            rng=np.random.default_rng(int(rng.integers(0, 2**31 - 1))),
+        self.target = (
+            _create_satellite_runtime("target", cfg.target, cfg, np.random.default_rng(int(rng.integers(0, 2**31 - 1))))
+            if cfg.target.enabled
+            else None
         )
+        if self.chaser is not None and self.chaser.deploy_source == "rocket_deployment":
+            self.chaser.active = False
 
-    truth_hist = {aid: np.full((n, 14), np.nan) for aid in agents.keys()}
-    belief_hist = {aid: np.full((n, 6), np.nan) for aid in agents.keys()}
-    thrust_hist = {aid: np.full((n, 3), np.nan) for aid in agents.keys()}
-    torque_hist = {aid: np.full((n, 3), np.nan) for aid in agents.keys()}
-    desired_attitude_hist = {aid: np.full((n, 4), np.nan) for aid in agents.keys()}
-    throttle_hist = {"rocket": np.full(n, np.nan)} if rocket is not None else {}
-    rocket_stage_hist = np.full(n, np.nan) if rocket is not None else None
-    rocket_q_dyn_hist = np.full(n, np.nan) if rocket is not None else None
-    rocket_mach_hist = np.full(n, np.nan) if rocket is not None else None
-    knowledge_hist: dict[str, dict[str, np.ndarray]] = {}
-    bridge_hist: dict[str, list[dict[str, Any]]] = {aid: [] for aid in agents.keys()}
-    for aid, a in agents.items():
-        if a.knowledge_base is not None:
-            knowledge_hist[aid] = {}
-            for tid in a.knowledge_base.target_ids():
-                knowledge_hist[aid][tid] = np.full((n, 6), np.nan)
+        self.agents: dict[str, AgentRuntime] = {}
+        if self.rocket is not None:
+            self.agents["rocket"] = self.rocket
+        if self.target is not None:
+            self.agents["target"] = self.target
+        if self.chaser is not None:
+            self.agents["chaser"] = self.chaser
 
-    terminated_early = False
-    termination_reason = None
-    termination_time_s = None
-    termination_object_id = None
-    final_index = n - 1
-    rocket_inserted = False
-    rocket_insertion_time_s: float | None = None
-    rocket_insertion_hold_s = 0.0
-    total_dv_m_s_by_object = {aid: 0.0 for aid in agents.keys()}
-    burn_samples_by_object = {aid: 0 for aid in agents.keys()}
-    max_accel_km_s2_by_object = {aid: 0.0 for aid in agents.keys()}
+        if self.chaser is not None and self.target is not None and self.chaser.deploy_source != "rocket_deployment":
+            _apply_chaser_relative_init_from_target(
+                chaser=self.chaser,
+                target=self.target,
+                initial_state=dict(cfg.chaser.initial_state or {}),
+            )
 
-    # Initial logging
-    for aid, a in agents.items():
-        if not a.active:
-            continue
-        tr = a.truth if a.kind == "satellite" else _rocket_state_to_truth(a.rocket_state)
-        truth_hist[aid][0, :] = _state_truth_to_array(tr)
-        if a.belief is not None:
-            belief_hist[aid][0, :] = a.belief.state[:6]
-        if aid == "rocket" and a.rocket_state is not None and rocket_stage_hist is not None:
-            rocket_stage_hist[0] = float(a.rocket_state.active_stage_index)
-            if rocket_q_dyn_hist is not None:
-                rocket_q_dyn_hist[0] = float(getattr(a.rocket_state, "_last_step_q_dyn_pa", 0.0))
-            if rocket_mach_hist is not None:
-                rocket_mach_hist[0] = float(getattr(a.rocket_state, "_last_step_mach", 0.0))
+        for aid, agent in self.agents.items():
+            cfg_src = cfg.rocket if aid == "rocket" else (cfg.chaser if aid == "chaser" else cfg.target)
+            agent.knowledge_base = _build_knowledge_base(
+                observer_id=aid,
+                agent_cfg=cfg_src,
+                dt_s=self.dt,
+                rng=np.random.default_rng(int(rng.integers(0, 2**31 - 1))),
+            )
 
-    total_steps = max(n - 1, 0)
-    active_step_callback = step_callback
-    if active_step_callback is not None:
+        self.truth_hist = {aid: np.full((self.n, 14), np.nan) for aid in self.agents.keys()}
+        self.belief_hist = {aid: np.full((self.n, 6), np.nan) for aid in self.agents.keys()}
+        self.thrust_hist = {aid: np.full((self.n, 3), np.nan) for aid in self.agents.keys()}
+        self.torque_hist = {aid: np.full((self.n, 3), np.nan) for aid in self.agents.keys()}
+        self.desired_attitude_hist = {aid: np.full((self.n, 4), np.nan) for aid in self.agents.keys()}
+        self.throttle_hist = {"rocket": np.full(self.n, np.nan)} if self.rocket is not None else {}
+        self.rocket_stage_hist = np.full(self.n, np.nan) if self.rocket is not None else None
+        self.rocket_q_dyn_hist = np.full(self.n, np.nan) if self.rocket is not None else None
+        self.rocket_mach_hist = np.full(self.n, np.nan) if self.rocket is not None else None
+        self.knowledge_hist: dict[str, dict[str, np.ndarray]] = {}
+        self.bridge_hist: dict[str, list[dict[str, Any]]] = {aid: [] for aid in self.agents.keys()}
+        for aid, agent in self.agents.items():
+            if agent.knowledge_base is not None:
+                self.knowledge_hist[aid] = {}
+                for tid in agent.knowledge_base.target_ids():
+                    self.knowledge_hist[aid][tid] = np.full((self.n, 6), np.nan)
+
+        self.terminated_early = False
+        self.termination_reason: str | None = None
+        self.termination_time_s: float | None = None
+        self.termination_object_id: str | None = None
+        self.rocket_inserted = False
+        self.rocket_insertion_time_s: float | None = None
+        self.rocket_insertion_hold_s = 0.0
+        self.total_dv_m_s_by_object = {aid: 0.0 for aid in self.agents.keys()}
+        self.burn_samples_by_object = {aid: 0 for aid in self.agents.keys()}
+        self.max_accel_km_s2_by_object = {aid: 0.0 for aid in self.agents.keys()}
+        self.current_index = 0
+
+        for aid, agent in self.agents.items():
+            if not agent.active:
+                continue
+            truth = agent.truth if agent.kind == "satellite" else _rocket_state_to_truth(agent.rocket_state)
+            self.truth_hist[aid][0, :] = _state_truth_to_array(truth)
+            if agent.belief is not None:
+                self.belief_hist[aid][0, :] = agent.belief.state[:6]
+            if aid == "rocket" and agent.rocket_state is not None and self.rocket_stage_hist is not None:
+                self.rocket_stage_hist[0] = float(agent.rocket_state.active_stage_index)
+                if self.rocket_q_dyn_hist is not None:
+                    self.rocket_q_dyn_hist[0] = float(getattr(agent.rocket_state, "_last_step_q_dyn_pa", 0.0))
+                if self.rocket_mach_hist is not None:
+                    self.rocket_mach_hist[0] = float(getattr(agent.rocket_state, "_last_step_mach", 0.0))
+
+        self._emit_step_callback(0)
+
+    @property
+    def total_steps(self) -> int:
+        return max(self.n - 1, 0)
+
+    @property
+    def done(self) -> bool:
+        return bool(self.terminated_early or self.current_index >= max(self.n - 1, 0))
+
+    def _emit_step_callback(self, step: int) -> None:
+        if self.active_step_callback is None:
+            return
         try:
-            active_step_callback(0, total_steps)
+            self.active_step_callback(int(step), self.total_steps)
         except (TypeError, ValueError) as exc:
-            logger.warning("Disabling step callback after startup error: %s", exc)
-            active_step_callback = None
+            logger.warning("Disabling step callback after runtime error: %s", exc)
+            self.active_step_callback = None
 
-    for k in range(n - 1):
-        t = float(t_s[k])
-        t_next = float(t_s[k + 1])
+    def snapshot(self, step_index: int | None = None) -> dict[str, Any]:
+        idx = self.current_index if step_index is None else int(step_index)
+        if idx < 0 or idx >= self.n:
+            raise IndexError(f"step_index {idx} is out of range for {self.n} samples.")
+        return {
+            "step_index": idx,
+            "time_s": float(self.t_s[idx]),
+            "truth": {oid: np.array(hist[idx], dtype=float) for oid, hist in self.truth_hist.items()},
+            "belief": {oid: np.array(hist[idx], dtype=float) for oid, hist in self.belief_hist.items()},
+            "applied_thrust": {oid: np.array(hist[idx], dtype=float) for oid, hist in self.thrust_hist.items()},
+            "applied_torque": {oid: np.array(hist[idx], dtype=float) for oid, hist in self.torque_hist.items()},
+        }
 
-        if chaser is not None and rocket is not None and (not chaser.active):
-            if t_next >= float(chaser.deploy_time_s or 0.0):
-                _deploy_from_rocket(chaser, rocket, t_next)
+    def step(self) -> dict[str, Any]:
+        if self.done:
+            return self.snapshot()
+
+        k = int(self.current_index)
+        t = float(self.t_s[k])
+        t_next = float(self.t_s[k + 1])
+
+        if self.chaser is not None and self.rocket is not None and (not self.chaser.active):
+            if t_next >= float(self.chaser.deploy_time_s or 0.0):
+                _deploy_from_rocket(self.chaser, self.rocket, t_next)
 
         world_truth: dict[str, StateTruth] = {}
-        for aid, a in agents.items():
-            if not a.active:
+        for aid, agent in self.agents.items():
+            if not agent.active:
                 continue
-            world_truth[aid] = a.truth if a.kind == "satellite" else _rocket_state_to_truth(a.rocket_state)
+            world_truth[aid] = agent.truth if agent.kind == "satellite" else _rocket_state_to_truth(agent.rocket_state)
 
         world_truth_live = dict(world_truth)
 
-        for aid, a in agents.items():
-            if not a.active:
+        for aid, agent in self.agents.items():
+            if not agent.active:
                 continue
             tr_now = world_truth_live[aid]
             env_common = {
-                **base_environment,
+                **self.base_environment,
                 "world_truth": world_truth_live,
-                "attitude_disabled": (not attitude_enabled),
+                "attitude_disabled": (not self.attitude_enabled),
             }
-            mission_out: dict[str, Any] = {}
 
-            if a.kind == "rocket":
+            if agent.kind == "rocket":
                 mission_out = _run_mission_modules(
-                    agent=a,
+                    agent=agent,
                     world_truth=world_truth_live,
                     t_s=t_next,
-                    dt_s=dt,
+                    dt_s=self.dt,
                     env=env_common,
                 )
                 strategy_out = _run_mission_strategy(
-                    agent=a,
+                    agent=agent,
                     world_truth=world_truth_live,
                     t_s=t_next,
-                    dt_s=dt,
+                    dt_s=self.dt,
                     env=env_common,
                 )
                 mission_out.update(strategy_out)
                 execution_out = _run_mission_execution(
-                    agent=a,
+                    agent=agent,
                     intent=mission_out,
                     world_truth=world_truth_live,
                     t_s=t_next,
-                    dt_s=dt,
+                    dt_s=self.dt,
                     env=env_common,
                 )
                 mission_out.update(execution_out)
                 launch_auth = bool(mission_out.get("launch_authorized", True))
-                a.waiting_for_launch = not launch_auth
+                agent.waiting_for_launch = not launch_auth
                 if not launch_auth:
-                    a.rocket_state.t_s = float(t_next)
-                    a.truth = _rocket_state_to_truth(a.rocket_state)
-                    if a.belief is not None:
-                        a.belief.state[:6] = _truth_state6(a.truth, a.belief.state[:6])
-                        a.belief.last_update_t_s = t_next
-                    throttle_hist["rocket"][k] = 0.0
-                    thrust_hist[aid][k + 1, :] = zero3
-                    torque_hist[aid][k + 1, :] = zero3
-                    if rocket_stage_hist is not None:
-                        rocket_stage_hist[k + 1] = float(a.rocket_state.active_stage_index)
-                    if rocket_q_dyn_hist is not None:
-                        rocket_q_dyn_hist[k + 1] = 0.0
-                    if rocket_mach_hist is not None:
-                        rocket_mach_hist[k + 1] = 0.0
+                    agent.rocket_state.t_s = float(t_next)
+                    agent.truth = _rocket_state_to_truth(agent.rocket_state)
+                    if agent.belief is not None:
+                        agent.belief.state[:6] = _truth_state6(agent.truth, agent.belief.state[:6])
+                        agent.belief.last_update_t_s = t_next
+                    self.throttle_hist["rocket"][k] = 0.0
+                    self.thrust_hist[aid][k + 1, :] = self.zero3
+                    self.torque_hist[aid][k + 1, :] = self.zero3
+                    if self.rocket_stage_hist is not None:
+                        self.rocket_stage_hist[k + 1] = float(agent.rocket_state.active_stage_index)
+                    if self.rocket_q_dyn_hist is not None:
+                        self.rocket_q_dyn_hist[k + 1] = 0.0
+                    if self.rocket_mach_hist is not None:
+                        self.rocket_mach_hist[k + 1] = 0.0
                 else:
-                    cmd = a.rocket_guidance.command(a.rocket_state, a.rocket_sim.sim_cfg, a.rocket_sim.vehicle_cfg)
+                    cmd = agent.rocket_guidance.command(agent.rocket_state, agent.rocket_sim.sim_cfg, agent.rocket_sim.vehicle_cfg)
                     if "guidance_throttle" in mission_out:
                         cmd = type(cmd)(
                             throttle=float(mission_out.get("guidance_throttle", cmd.throttle)),
                             attitude_quat_bn_cmd=cmd.attitude_quat_bn_cmd,
                             torque_body_nm_cmd=cmd.torque_body_nm_cmd,
                         )
-                    throttle_hist["rocket"][k] = float(np.clip(cmd.throttle, 0.0, 1.0))
-                    a.rocket_state = a.rocket_sim.step(a.rocket_state, cmd, dt_s=dt)
-                    a.truth = _rocket_state_to_truth(a.rocket_state)
-                    if a.belief is not None:
-                        a.belief.state[:6] = _truth_state6(a.truth, a.belief.state[:6])
-                        a.belief.last_update_t_s = t_next
-                    thrust_n = float(getattr(a.rocket_state, "_last_step_thrust_n", 0.0))
-                    axis_eci = quaternion_to_dcm_bn(a.rocket_state.attitude_quat_bn).T @ np.array(a.rocket_sim.vehicle_cfg.thrust_axis_body, dtype=float)
-                    accel = (thrust_n / max(a.rocket_state.mass_kg, 1e-9)) * axis_eci / 1e3
-                    thrust_hist[aid][k + 1, :] = accel
-                    torque_hist[aid][k + 1, :] = zero3
+                    self.throttle_hist["rocket"][k] = float(np.clip(cmd.throttle, 0.0, 1.0))
+                    agent.rocket_state = agent.rocket_sim.step(agent.rocket_state, cmd, dt_s=self.dt)
+                    agent.truth = _rocket_state_to_truth(agent.rocket_state)
+                    if agent.belief is not None:
+                        agent.belief.state[:6] = _truth_state6(agent.truth, agent.belief.state[:6])
+                        agent.belief.last_update_t_s = t_next
+                    thrust_n = float(getattr(agent.rocket_state, "_last_step_thrust_n", 0.0))
+                    axis_eci = quaternion_to_dcm_bn(agent.rocket_state.attitude_quat_bn).T @ np.array(agent.rocket_sim.vehicle_cfg.thrust_axis_body, dtype=float)
+                    accel = (thrust_n / max(agent.rocket_state.mass_kg, 1e-9)) * axis_eci / 1e3
+                    self.thrust_hist[aid][k + 1, :] = accel
+                    self.torque_hist[aid][k + 1, :] = self.zero3
                     accel_mag = float(np.linalg.norm(accel))
-                    total_dv_m_s_by_object[aid] += accel_mag * dt * 1e3
-                    max_accel_km_s2_by_object[aid] = max(max_accel_km_s2_by_object[aid], accel_mag)
+                    self.total_dv_m_s_by_object[aid] += accel_mag * self.dt * 1e3
+                    self.max_accel_km_s2_by_object[aid] = max(self.max_accel_km_s2_by_object[aid], accel_mag)
                     if accel_mag > 1e-15:
-                        burn_samples_by_object[aid] += 1
-                    if rocket_stage_hist is not None:
-                        rocket_stage_hist[k + 1] = float(a.rocket_state.active_stage_index)
-                    if rocket_q_dyn_hist is not None:
-                        rocket_q_dyn_hist[k + 1] = float(getattr(a.rocket_state, "_last_step_q_dyn_pa", 0.0))
-                    if rocket_mach_hist is not None:
-                        rocket_mach_hist[k + 1] = float(getattr(a.rocket_state, "_last_step_mach", 0.0))
+                        self.burn_samples_by_object[aid] += 1
+                    if self.rocket_stage_hist is not None:
+                        self.rocket_stage_hist[k + 1] = float(agent.rocket_state.active_stage_index)
+                    if self.rocket_q_dyn_hist is not None:
+                        self.rocket_q_dyn_hist[k + 1] = float(getattr(agent.rocket_state, "_last_step_q_dyn_pa", 0.0))
+                    if self.rocket_mach_hist is not None:
+                        self.rocket_mach_hist[k + 1] = float(getattr(agent.rocket_state, "_last_step_mach", 0.0))
             else:
                 t_inner = float(t)
                 tr_inner = tr_now
-                cmd = Command.zero()
-                accel_time_integral = zero3.copy()
-                torque_time_integral = zero3.copy()
+                accel_time_integral = self.zero3.copy()
+                torque_time_integral = self.zero3.copy()
                 step_delta_v_m_s = 0.0
                 step_max_accel_km_s2 = 0.0
                 burned_this_step = False
                 world_truth_inner = world_truth_live.copy()
-                env_inner_common = {**base_environment, "world_truth": world_truth_inner}
+                env_inner_common = {**self.base_environment, "world_truth": world_truth_inner}
                 env_sensor = {"world_truth": world_truth_inner}
                 env_inner = {
-                    **base_environment,
+                    **self.base_environment,
                     "world_truth": world_truth_inner,
-                    "attitude_disabled": (not attitude_enabled),
+                    "attitude_disabled": (not self.attitude_enabled),
                 }
                 orbit_state12_scratch = np.empty(12, dtype=float)
                 attitude_state13_scratch = np.empty(13, dtype=float)
                 deputy_state6_scratch = np.empty(6, dtype=float)
                 chief_state6_scratch = np.empty(6, dtype=float)
-                orbit_belief_scratch = StateBelief(state=orbit_state12_scratch, covariance=eye12, last_update_t_s=t)
-                attitude_belief_scratch = StateBelief(state=attitude_state13_scratch, covariance=eye6, last_update_t_s=t)
+                orbit_belief_scratch = StateBelief(state=orbit_state12_scratch, covariance=self.eye12, last_update_t_s=t)
+                attitude_belief_scratch = StateBelief(state=attitude_state13_scratch, covariance=self.eye6, last_update_t_s=t)
                 while t_inner < t_next - 1e-12:
-                    h = float(min(sim_substep_s, t_next - t_inner))
+                    h = float(min(self.sim_substep_s, t_next - t_inner))
                     t_eval = t_inner + h
                     world_truth_inner[aid] = tr_inner
-                    meas = a.sensor.measure(truth=tr_inner, env=env_sensor, t_s=t_eval) if a.sensor is not None else None
-                    if a.estimator is not None and a.belief is not None:
-                        a.belief = a.estimator.update(a.belief, meas, t_eval)
-                    elif a.belief is None:
-                        a.belief = StateBelief(state=_truth_state6(tr_inner), covariance=eye6.copy(), last_update_t_s=t_eval)
-                    orb_belief = a.belief
-                    if a.orbit_controller is not None and orb_belief is not None:
+                    meas = agent.sensor.measure(truth=tr_inner, env=env_sensor, t_s=t_eval) if agent.sensor is not None else None
+                    if agent.estimator is not None and agent.belief is not None:
+                        agent.belief = agent.estimator.update(agent.belief, meas, t_eval)
+                    elif agent.belief is None:
+                        agent.belief = StateBelief(state=_truth_state6(tr_inner), covariance=self.eye6.copy(), last_update_t_s=t_eval)
+                    orb_belief = agent.belief
+                    if agent.orbit_controller is not None and orb_belief is not None:
                         chief_truth = world_truth_inner.get("target")
-                        if chief_truth is not None and aid != "target" and hasattr(a.orbit_controller, "ric_curv_state_slice"):
+                        if chief_truth is not None and aid != "target" and hasattr(agent.orbit_controller, "ric_curv_state_slice"):
                             orbit_belief_scratch.last_update_t_s = orb_belief.last_update_t_s
                             orbit_belief_scratch.state = _relative_orbit_state12(
                                 chief_truth=chief_truth,
@@ -1889,8 +1929,8 @@ def _run_single_config(
                                 chief_state6=chief_state6_scratch,
                             )
                             orb_belief = orbit_belief_scratch
-                    att_belief = a.belief
-                    if attitude_enabled and att_belief is not None and att_belief.state.size < 13:
+                    att_belief = agent.belief
+                    if self.attitude_enabled and att_belief is not None and att_belief.state.size < 13:
                         attitude_belief_scratch.covariance = att_belief.covariance
                         attitude_belief_scratch.last_update_t_s = att_belief.last_update_t_s
                         attitude_belief_scratch.state = _attitude_state13_from_belief(
@@ -1899,84 +1939,83 @@ def _run_single_config(
                             out=attitude_state13_scratch,
                         )
                         att_belief = attitude_belief_scratch
-                    if not attitude_enabled:
+                    if not self.attitude_enabled:
                         att_belief = None
                     mission_out = _run_mission_modules(
-                        agent=a,
+                        agent=agent,
                         world_truth=world_truth_inner,
                         t_s=t_eval,
                         dt_s=h,
                         env=env_inner_common,
-                        orbit_controller=a.orbit_controller,
-                        attitude_controller=(a.attitude_controller if attitude_enabled else None),
+                        orbit_controller=agent.orbit_controller,
+                        attitude_controller=(agent.attitude_controller if self.attitude_enabled else None),
                         orb_belief=orb_belief,
                         att_belief=att_belief,
                     )
                     strategy_out = _run_mission_strategy(
-                        agent=a,
+                        agent=agent,
                         world_truth=world_truth_inner,
                         t_s=t_eval,
                         dt_s=h,
                         env=env_inner_common,
-                        orbit_controller=a.orbit_controller,
-                        attitude_controller=(a.attitude_controller if attitude_enabled else None),
+                        orbit_controller=agent.orbit_controller,
+                        attitude_controller=(agent.attitude_controller if self.attitude_enabled else None),
                         orb_belief=orb_belief,
                         att_belief=att_belief,
                     )
                     mission_out.update(strategy_out)
                     execution_out = _run_mission_execution(
-                        agent=a,
+                        agent=agent,
                         intent=mission_out,
                         world_truth=world_truth_inner,
                         t_s=t_eval,
                         dt_s=h,
                         env=env_inner_common,
-                        orbit_controller=a.orbit_controller,
-                        attitude_controller=(a.attitude_controller if attitude_enabled else None),
+                        orbit_controller=agent.orbit_controller,
+                        attitude_controller=(agent.attitude_controller if self.attitude_enabled else None),
                         orb_belief=orb_belief,
                         att_belief=att_belief,
                     )
                     mission_out.update(execution_out)
-                    # Mission module can set attitude targets on compatible controllers.
-                    if attitude_enabled and "desired_attitude_quat_bn" in mission_out and a.attitude_controller is not None:
+                    if self.attitude_enabled and "desired_attitude_quat_bn" in mission_out and agent.attitude_controller is not None:
                         q_des = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)
-                        if q_des.size == 4 and hasattr(a.attitude_controller, "set_target"):
+                        if q_des.size == 4 and hasattr(agent.attitude_controller, "set_target"):
                             try:
-                                a.attitude_controller.set_target(q_des)
+                                agent.attitude_controller.set_target(q_des)
                             except (TypeError, ValueError, AttributeError) as exc:
                                 logger.warning("Failed to set desired_attitude_quat_bn on %s controller: %s", aid, exc)
-                    if attitude_enabled and "desired_attitude_quat_bn" in mission_out:
+                    if self.attitude_enabled and "desired_attitude_quat_bn" in mission_out:
                         q_des_log = np.array(mission_out["desired_attitude_quat_bn"], dtype=float).reshape(-1)
                         if q_des_log.size == 4 and np.all(np.isfinite(q_des_log)):
-                            desired_attitude_hist[aid][k + 1, :] = q_des_log
-                    if attitude_enabled and "desired_attitude_quat_br" in mission_out and a.attitude_controller is not None:
+                            self.desired_attitude_hist[aid][k + 1, :] = q_des_log
+                    if self.attitude_enabled and "desired_attitude_quat_br" in mission_out and agent.attitude_controller is not None:
                         q_des_r = np.array(mission_out["desired_attitude_quat_br"], dtype=float).reshape(-1)
-                        if q_des_r.size == 4 and hasattr(a.attitude_controller, "set_target"):
+                        if q_des_r.size == 4 and hasattr(agent.attitude_controller, "set_target"):
                             try:
-                                a.attitude_controller.set_target(q_des_r)
+                                agent.attitude_controller.set_target(q_des_r)
                             except (TypeError, ValueError, AttributeError) as exc:
                                 logger.warning("Failed to set desired_attitude_quat_br on %s controller: %s", aid, exc)
                     if (
-                        attitude_enabled
+                        self.attitude_enabled
                         and "desired_ric_euler_rad" in mission_out
-                        and a.attitude_controller is not None
-                        and hasattr(a.attitude_controller, "set_desired_ric_state")
+                        and agent.attitude_controller is not None
+                        and hasattr(agent.attitude_controller, "set_desired_ric_state")
                     ):
                         e = np.array(mission_out["desired_ric_euler_rad"], dtype=float).reshape(-1)
                         if e.size == 3:
                             try:
-                                a.attitude_controller.set_desired_ric_state(float(e[0]), float(e[1]), float(e[2]))
+                                agent.attitude_controller.set_desired_ric_state(float(e[0]), float(e[1]), float(e[2]))
                             except (TypeError, ValueError, AttributeError) as exc:
                                 logger.warning("Failed to set desired_ric_euler_rad on %s controller: %s", aid, exc)
                     use_integrated_cmd = bool(mission_out.get("mission_use_integrated_command", False))
                     c_orb = (
-                        a.orbit_controller.act(orb_belief, t_eval, 2.0)
-                        if (not use_integrated_cmd) and a.orbit_controller is not None and orb_belief is not None
+                        agent.orbit_controller.act(orb_belief, t_eval, 2.0)
+                        if (not use_integrated_cmd) and agent.orbit_controller is not None and orb_belief is not None
                         else Command.zero()
                     )
                     c_att = (
-                        a.attitude_controller.act(att_belief, t_eval, 2.0)
-                        if attitude_enabled and (not use_integrated_cmd) and a.attitude_controller is not None and att_belief is not None
+                        agent.attitude_controller.act(att_belief, t_eval, 2.0)
+                        if self.attitude_enabled and (not use_integrated_cmd) and agent.attitude_controller is not None and att_belief is not None
                         else Command.zero()
                     )
                     if use_integrated_cmd:
@@ -1996,27 +2035,23 @@ def _run_single_config(
                             cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
                         if "torque_body_nm" in mission_out:
                             cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
-                    if not attitude_enabled:
-                        cmd.torque_body_nm = zero3
+                    if not self.attitude_enabled:
+                        cmd.torque_body_nm = self.zero3
                     cmd_step = Command(
                         thrust_eci_km_s2=np.array(cmd.thrust_eci_km_s2, dtype=float),
-                        torque_body_nm=(zero3.copy() if not attitude_enabled else np.array(cmd.torque_body_nm, dtype=float)),
+                        torque_body_nm=(self.zero3.copy() if not self.attitude_enabled else np.array(cmd.torque_body_nm, dtype=float)),
                         mode_flags=dict(cmd.mode_flags or {}),
                     )
                     min_mass_kg = 0.0
-                    if a.dry_mass_kg is not None and np.isfinite(float(a.dry_mass_kg)):
-                        min_mass_kg = float(max(float(a.dry_mass_kg), 0.0))
+                    if agent.dry_mass_kg is not None and np.isfinite(float(agent.dry_mass_kg)):
+                        min_mass_kg = float(max(float(agent.dry_mass_kg), 0.0))
                     fuel_depleted = bool(tr_inner.mass_kg <= (min_mass_kg + 1e-12))
                     if fuel_depleted:
                         cmd_step.thrust_eci_km_s2 = np.zeros(3, dtype=float)
                         cmd_step.mode_flags["fuel_depleted"] = True
                     cmd_step.mode_flags["min_mass_kg"] = float(min_mass_kg)
-                    isp_s = a.orbital_isp_s
-                    if (
-                        isp_s is not None
-                        and float(isp_s) > 0.0
-                        and "delta_mass_kg" not in cmd_step.mode_flags
-                    ):
+                    isp_s = agent.orbital_isp_s
+                    if isp_s is not None and float(isp_s) > 0.0 and "delta_mass_kg" not in cmd_step.mode_flags:
                         g0_m_s2 = 9.80665
                         a_mag_m_s2 = float(np.linalg.norm(cmd_step.thrust_eci_km_s2) * 1e3)
                         thrust_n = float(max(tr_inner.mass_kg, 0.0) * a_mag_m_s2)
@@ -2024,7 +2059,7 @@ def _run_single_config(
                         delta_mass_kg = float(max(mdot_kg_s, 0.0) * h)
                         available_propellant_kg = float(max(tr_inner.mass_kg - min_mass_kg, 0.0))
                         cmd_step.mode_flags["delta_mass_kg"] = float(min(delta_mass_kg, available_propellant_kg))
-                    tr_inner = a.dynamics.step(state=tr_inner, command=cmd_step, env=env_inner, dt_s=h)
+                    tr_inner = agent.dynamics.step(state=tr_inner, command=cmd_step, env=env_inner, dt_s=h)
                     applied_thrust = np.array(cmd_step.thrust_eci_km_s2, dtype=float)
                     applied_torque = np.array(cmd_step.torque_body_nm, dtype=float)
                     accel_time_integral += applied_thrust * h
@@ -2035,203 +2070,217 @@ def _run_single_config(
                     burned_this_step = burned_this_step or (accel_mag > 1e-15)
                     t_inner = t_eval
 
-                a.truth = tr_inner
-                thrust_hist[aid][k + 1, :] = accel_time_integral / dt
-                torque_hist[aid][k + 1, :] = zero3 if not attitude_enabled else (torque_time_integral / dt)
-                total_dv_m_s_by_object[aid] += step_delta_v_m_s
-                max_accel_km_s2_by_object[aid] = max(max_accel_km_s2_by_object[aid], step_max_accel_km_s2)
+                agent.truth = tr_inner
+                self.thrust_hist[aid][k + 1, :] = accel_time_integral / self.dt
+                self.torque_hist[aid][k + 1, :] = self.zero3 if not self.attitude_enabled else (torque_time_integral / self.dt)
+                self.total_dv_m_s_by_object[aid] += step_delta_v_m_s
+                self.max_accel_km_s2_by_object[aid] = max(self.max_accel_km_s2_by_object[aid], step_max_accel_km_s2)
                 if burned_this_step:
-                    burn_samples_by_object[aid] += 1
+                    self.burn_samples_by_object[aid] += 1
 
-            world_truth_live[aid] = a.truth if a.kind == "satellite" else _rocket_state_to_truth(a.rocket_state)
+            world_truth_live[aid] = agent.truth if agent.kind == "satellite" else _rocket_state_to_truth(agent.rocket_state)
 
-            if a.bridge is not None:
+            if agent.bridge is not None:
                 evt = {"t_s": t_next, "object_id": aid}
-                if hasattr(a.bridge, "step"):
+                if hasattr(agent.bridge, "step"):
                     try:
-                        ret = a.bridge.step(evt)
+                        ret = agent.bridge.step(evt)
                         if ret is not None:
                             evt["bridge"] = ret
                     except Exception as ex:
                         evt["bridge_error"] = str(ex)
-                bridge_hist[aid].append(evt)
+                self.bridge_hist[aid].append(evt)
 
-        for aid, a in agents.items():
-            if not a.active or a.knowledge_base is None:
+        for aid, agent in self.agents.items():
+            if not agent.active or agent.knowledge_base is None:
                 continue
             observer_truth = world_truth_live.get(aid)
             if observer_truth is None:
                 continue
-            a.knowledge_base.update(observer_truth=observer_truth, world_truth=world_truth_live, t_s=t_next)
-            snap = a.knowledge_base.snapshot()
-            for tid, hist in knowledge_hist.get(aid, {}).items():
-                b = snap.get(tid)
-                if b is not None:
-                    hist[k + 1, :] = b.state[:6]
+            agent.knowledge_base.update(observer_truth=observer_truth, world_truth=world_truth_live, t_s=t_next)
+            snap = agent.knowledge_base.snapshot()
+            for tid, hist in self.knowledge_hist.get(aid, {}).items():
+                belief = snap.get(tid)
+                if belief is not None:
+                    hist[k + 1, :] = belief.state[:6]
                 elif k > 0:
                     hist[k + 1, :] = hist[k, :]
 
-        if active_step_callback is not None:
-            try:
-                active_step_callback(k + 1, total_steps)
-            except (TypeError, ValueError) as exc:
-                logger.warning("Disabling step callback after runtime error: %s", exc)
-                active_step_callback = None
-
-        # Log k+1
-        for aid, a in agents.items():
-            if not a.active:
+        for aid, agent in self.agents.items():
+            if not agent.active:
                 continue
-            tr = a.truth if a.kind == "satellite" else _rocket_state_to_truth(a.rocket_state)
-            truth_hist[aid][k + 1, :] = _state_truth_to_array(tr)
-            if a.belief is not None:
-                belief_hist[aid][k + 1, :] = a.belief.state[:6]
+            truth = agent.truth if agent.kind == "satellite" else _rocket_state_to_truth(agent.rocket_state)
+            self.truth_hist[aid][k + 1, :] = _state_truth_to_array(truth)
+            if agent.belief is not None:
+                self.belief_hist[aid][k + 1, :] = agent.belief.state[:6]
 
-        if bool(cfg.simulator.termination.get("earth_impact_enabled", True)):
-            re = float(cfg.simulator.termination.get("earth_radius_km", EARTH_RADIUS_KM))
-            for aid, a in agents.items():
-                if not a.active:
+        self.current_index = k + 1
+        self._emit_step_callback(self.current_index)
+
+        if bool(self.cfg.simulator.termination.get("earth_impact_enabled", True)):
+            re = float(self.cfg.simulator.termination.get("earth_radius_km", EARTH_RADIUS_KM))
+            for aid, agent in self.agents.items():
+                if not agent.active:
                     continue
-                if a.kind == "rocket" and a.waiting_for_launch:
+                if agent.kind == "rocket" and agent.waiting_for_launch:
                     continue
-                tr = a.truth if a.kind == "satellite" else _rocket_state_to_truth(a.rocket_state)
-                impact = float(np.linalg.norm(tr.position_eci_km)) <= re
-                if a.kind == "rocket" and a.rocket_sim is not None:
-                    impact = bool(_rocket_altitude_km(tr.position_eci_km, tr.t_s, a.rocket_sim.sim_cfg) <= 0.0)
+                truth = agent.truth if agent.kind == "satellite" else _rocket_state_to_truth(agent.rocket_state)
+                impact = float(np.linalg.norm(truth.position_eci_km)) <= re
+                if agent.kind == "rocket" and agent.rocket_sim is not None:
+                    impact = bool(_rocket_altitude_km(truth.position_eci_km, truth.t_s, agent.rocket_sim.sim_cfg) <= 0.0)
                 if impact:
-                    terminated_early = True
-                    termination_reason = "earth_impact"
-                    termination_time_s = t_next
-                    termination_object_id = aid
-                    final_index = k + 1
-                    break
-            if terminated_early:
-                break
+                    self.terminated_early = True
+                    self.termination_reason = "earth_impact"
+                    self.termination_time_s = t_next
+                    self.termination_object_id = aid
+                    return self.snapshot()
 
-        if rocket is not None and rocket.active and (not rocket.waiting_for_launch) and rocket.rocket_state is not None and rocket.rocket_sim is not None:
-            rs = rocket.rocket_state
-            sim_cfg = rocket.rocket_sim.sim_cfg
+        if (
+            self.rocket is not None
+            and self.rocket.active
+            and (not self.rocket.waiting_for_launch)
+            and self.rocket.rocket_state is not None
+            and self.rocket.rocket_sim is not None
+        ):
+            rs = self.rocket.rocket_state
+            sim_cfg = self.rocket.rocket_sim.sim_cfg
             alt_km = _rocket_altitude_km(rs.position_eci_km, rs.t_s, sim_cfg)
             near_alt = abs(float(alt_km) - float(sim_cfg.target_altitude_km)) <= float(sim_cfg.target_altitude_tolerance_km)
             _, ecc_now = _orbital_elements_basic(np.array(rs.position_eci_km, dtype=float), np.array(rs.velocity_eci_km_s, dtype=float))
             low_e = float(ecc_now) <= float(sim_cfg.target_eccentricity_max)
-            stages_done = int(rs.active_stage_index) >= len(rocket.rocket_sim.vehicle_cfg.stack.stages)
+            stages_done = int(rs.active_stage_index) >= len(self.rocket.rocket_sim.vehicle_cfg.stack.stages)
             if near_alt and low_e and stages_done:
-                rocket_insertion_hold_s += float(dt)
-                if (not rocket_inserted) and rocket_insertion_hold_s >= float(sim_cfg.insertion_hold_time_s):
-                    rocket_inserted = True
-                    rocket_insertion_time_s = float(t_next)
+                self.rocket_insertion_hold_s += float(self.dt)
+                if (not self.rocket_inserted) and self.rocket_insertion_hold_s >= float(sim_cfg.insertion_hold_time_s):
+                    self.rocket_inserted = True
+                    self.rocket_insertion_time_s = float(t_next)
             else:
-                rocket_insertion_hold_s = 0.0
+                self.rocket_insertion_hold_s = 0.0
 
-            if rocket_inserted and str(cfg.simulator.scenario_type).strip().lower() == "rocket_ascent":
-                terminated_early = True
-                termination_reason = "rocket_orbit_insertion"
-                termination_time_s = float(rocket_insertion_time_s if rocket_insertion_time_s is not None else t_next)
-                termination_object_id = "rocket"
-                final_index = k + 1
-                break
+            if self.rocket_inserted and str(self.cfg.simulator.scenario_type).strip().lower() == "rocket_ascent":
+                self.terminated_early = True
+                self.termination_reason = "rocket_orbit_insertion"
+                self.termination_time_s = float(self.rocket_insertion_time_s if self.rocket_insertion_time_s is not None else t_next)
+                self.termination_object_id = "rocket"
 
-    n_used = final_index + 1
-    t_out = t_s[:n_used].copy()
-    truth_out = {k: v[:n_used, :].copy() for k, v in truth_hist.items()}
-    belief_out = {k: v[:n_used, :].copy() for k, v in belief_hist.items()}
-    thrust_out = {k: v[:n_used, :].copy() for k, v in thrust_hist.items()}
-    torque_out = {k: v[:n_used, :].copy() for k, v in torque_hist.items()}
-    desired_attitude_out = {k: v[:n_used, :].copy() for k, v in desired_attitude_hist.items()}
-    knowledge_out = {obs: {tgt: arr[:n_used, :].copy() for tgt, arr in by_tgt.items()} for obs, by_tgt in knowledge_hist.items()}
-    rocket_metrics_out: dict[str, np.ndarray] = {}
-    if rocket is not None:
-        if rocket_stage_hist is not None:
-            rocket_metrics_out["stage_index"] = rocket_stage_hist[:n_used].copy()
-        if rocket_q_dyn_hist is not None:
-            rocket_metrics_out["q_dyn_pa"] = rocket_q_dyn_hist[:n_used].copy()
-        if rocket_mach_hist is not None:
-            rocket_metrics_out["mach"] = rocket_mach_hist[:n_used].copy()
-        if "rocket" in throttle_hist:
-            rocket_metrics_out["throttle_cmd"] = throttle_hist["rocket"][:n_used].copy()
+        return self.snapshot()
 
-    plot_outputs = _plot_outputs(
-        cfg=cfg,
-        t_s=t_out,
-        truth_hist=truth_out,
-        thrust_hist=thrust_out,
-        desired_attitude_hist=desired_attitude_out,
-        knowledge_hist=knowledge_out,
-        rocket_metrics=rocket_metrics_out if rocket_metrics_out else None,
-        outdir=outdir,
-    )
-    if cfg.outputs.mode in ("interactive", "both") and bool(cfg.outputs.plots.get("enabled", True)):
-        try:
-            import matplotlib.pyplot as plt
+    def run(self) -> dict[str, Any]:
+        while not self.done:
+            self.step()
+        return self.build_payload()
 
-            plt.show()
-        except (ImportError, AttributeError) as exc:
-            logger.warning("Skipping interactive plot display because Matplotlib is unavailable: %s", exc)
-    animation_outputs = _animate_outputs(
-        cfg=cfg,
-        t_s=t_out,
-        truth_hist=truth_out,
-        outdir=outdir,
-    )
+    def build_payload(self) -> dict[str, Any]:
+        n_used = self.current_index + 1
+        t_out = self.t_s[:n_used].copy()
+        truth_out = {k: v[:n_used, :].copy() for k, v in self.truth_hist.items()}
+        belief_out = {k: v[:n_used, :].copy() for k, v in self.belief_hist.items()}
+        thrust_out = {k: v[:n_used, :].copy() for k, v in self.thrust_hist.items()}
+        torque_out = {k: v[:n_used, :].copy() for k, v in self.torque_hist.items()}
+        desired_attitude_out = {k: v[:n_used, :].copy() for k, v in self.desired_attitude_hist.items()}
+        knowledge_out = {
+            obs: {tgt: arr[:n_used, :].copy() for tgt, arr in by_tgt.items()}
+            for obs, by_tgt in self.knowledge_hist.items()
+        }
+        rocket_metrics_out: dict[str, np.ndarray] = {}
+        if self.rocket is not None:
+            if self.rocket_stage_hist is not None:
+                rocket_metrics_out["stage_index"] = self.rocket_stage_hist[:n_used].copy()
+            if self.rocket_q_dyn_hist is not None:
+                rocket_metrics_out["q_dyn_pa"] = self.rocket_q_dyn_hist[:n_used].copy()
+            if self.rocket_mach_hist is not None:
+                rocket_metrics_out["mach"] = self.rocket_mach_hist[:n_used].copy()
+            if "rocket" in self.throttle_hist:
+                rocket_metrics_out["throttle_cmd"] = self.throttle_hist["rocket"][:n_used].copy()
 
-    thrust_stats: dict[str, dict[str, float | int]] = {}
-    for oid in thrust_out.keys():
-        thrust_stats[oid] = {
-            "burn_samples": int(burn_samples_by_object.get(oid, 0)),
-            "max_accel_km_s2": float(max_accel_km_s2_by_object.get(oid, 0.0)),
-            "total_dv_m_s": float(total_dv_m_s_by_object.get(oid, 0.0)),
+        plot_outputs = _plot_outputs(
+            cfg=self.cfg,
+            t_s=t_out,
+            truth_hist=truth_out,
+            thrust_hist=thrust_out,
+            desired_attitude_hist=desired_attitude_out,
+            knowledge_hist=knowledge_out,
+            rocket_metrics=rocket_metrics_out if rocket_metrics_out else None,
+            outdir=self.outdir,
+        )
+        if self.cfg.outputs.mode in ("interactive", "both") and bool(self.cfg.outputs.plots.get("enabled", True)):
+            try:
+                import matplotlib.pyplot as plt
+
+                plt.show()
+            except (ImportError, AttributeError) as exc:
+                logger.warning("Skipping interactive plot display because Matplotlib is unavailable: %s", exc)
+        animation_outputs = _animate_outputs(
+            cfg=self.cfg,
+            t_s=t_out,
+            truth_hist=truth_out,
+            outdir=self.outdir,
+        )
+
+        thrust_stats: dict[str, dict[str, float | int]] = {}
+        for oid in thrust_out.keys():
+            thrust_stats[oid] = {
+                "burn_samples": int(self.burn_samples_by_object.get(oid, 0)),
+                "max_accel_km_s2": float(self.max_accel_km_s2_by_object.get(oid, 0.0)),
+                "total_dv_m_s": float(self.total_dv_m_s_by_object.get(oid, 0.0)),
+            }
+
+        summary = {
+            "scenario_name": self.cfg.scenario_name,
+            "objects": sorted(list(self.agents.keys())),
+            "samples": int(n_used),
+            "dt_s": self.dt,
+            "duration_s": float(t_out[-1]) if t_out.size else 0.0,
+            "terminated_early": self.terminated_early,
+            "termination_reason": self.termination_reason,
+            "termination_time_s": self.termination_time_s,
+            "termination_object_id": self.termination_object_id,
+            "rocket_insertion_achieved": bool(self.rocket_inserted),
+            "rocket_insertion_time_s": self.rocket_insertion_time_s,
+            "thrust_stats": thrust_stats,
+            "attitude_guardrail_stats": get_attitude_guardrail_stats(),
+            "knowledge_detection_by_observer": {
+                aid: agent.knowledge_base.detection_summary()
+                for aid, agent in self.agents.items()
+                if agent.knowledge_base is not None
+            },
+            "knowledge_consistency_by_observer": {
+                aid: agent.knowledge_base.consistency_summary()
+                for aid, agent in self.agents.items()
+                if agent.knowledge_base is not None
+            },
+            "plot_outputs": plot_outputs,
+            "animation_outputs": animation_outputs,
         }
 
-    summary = {
-        "scenario_name": cfg.scenario_name,
-        "objects": sorted(list(agents.keys())),
-        "samples": int(n_used),
-        "dt_s": dt,
-        "duration_s": float(t_out[-1]) if t_out.size else 0.0,
-        "terminated_early": terminated_early,
-        "termination_reason": termination_reason,
-        "termination_time_s": termination_time_s,
-        "termination_object_id": termination_object_id,
-        "rocket_insertion_achieved": bool(rocket_inserted),
-        "rocket_insertion_time_s": rocket_insertion_time_s,
-        "thrust_stats": thrust_stats,
-        "attitude_guardrail_stats": get_attitude_guardrail_stats(),
-        "knowledge_detection_by_observer": {
-            aid: a.knowledge_base.detection_summary()
-            for aid, a in agents.items()
-            if a.knowledge_base is not None
-        },
-        "knowledge_consistency_by_observer": {
-            aid: a.knowledge_base.consistency_summary()
-            for aid, a in agents.items()
-            if a.knowledge_base is not None
-        },
-        "plot_outputs": plot_outputs,
-        "animation_outputs": animation_outputs,
-    }
+        payload = {
+            "summary": summary,
+            "time_s": t_out.tolist(),
+            "truth_by_object": {k: v.tolist() for k, v in truth_out.items()},
+            "belief_by_object": {k: v.tolist() for k, v in belief_out.items()},
+            "applied_thrust_by_object": {k: v.tolist() for k, v in thrust_out.items()},
+            "applied_torque_by_object": {k: v.tolist() for k, v in torque_out.items()},
+            "knowledge_by_observer": {o: {t: a.tolist() for t, a in bt.items()} for o, bt in knowledge_out.items()},
+            "knowledge_detection_by_observer": dict(summary.get("knowledge_detection_by_observer", {}) or {}),
+            "knowledge_consistency_by_observer": dict(summary.get("knowledge_consistency_by_observer", {}) or {}),
+            "bridge_events_by_object": self.bridge_hist,
+            "rocket_throttle_cmd": self.throttle_hist.get("rocket", np.array([])).tolist() if self.throttle_hist else [],
+            "rocket_metrics": {k: v.tolist() for k, v in rocket_metrics_out.items()},
+        }
+        if bool(self.cfg.outputs.stats.get("save_json", True)):
+            write_json(str(self.outdir / "master_run_summary.json"), summary)
+        if bool(self.cfg.outputs.stats.get("save_full_log", True)):
+            write_json(str(self.outdir / "master_run_log.json"), payload)
+        if bool(self.cfg.outputs.stats.get("print_summary", True)):
+            print(_format_single_run_summary(summary))
+        return payload
 
-    payload = {
-        "summary": summary,
-        "time_s": t_out.tolist(),
-        "truth_by_object": {k: v.tolist() for k, v in truth_out.items()},
-        "belief_by_object": {k: v.tolist() for k, v in belief_out.items()},
-        "applied_thrust_by_object": {k: v.tolist() for k, v in thrust_out.items()},
-        "applied_torque_by_object": {k: v.tolist() for k, v in torque_out.items()},
-        "knowledge_by_observer": {o: {t: a.tolist() for t, a in bt.items()} for o, bt in knowledge_out.items()},
-        "knowledge_detection_by_observer": dict(summary.get("knowledge_detection_by_observer", {}) or {}),
-        "knowledge_consistency_by_observer": dict(summary.get("knowledge_consistency_by_observer", {}) or {}),
-        "bridge_events_by_object": bridge_hist,
-        "rocket_throttle_cmd": throttle_hist.get("rocket", np.array([])).tolist() if throttle_hist else [],
-        "rocket_metrics": {k: v.tolist() for k, v in rocket_metrics_out.items()},
-    }
-    if bool(cfg.outputs.stats.get("save_json", True)):
-        write_json(str(outdir / "master_run_summary.json"), summary)
-    if bool(cfg.outputs.stats.get("save_full_log", True)):
-        write_json(str(outdir / "master_run_log.json"), payload)
-    if bool(cfg.outputs.stats.get("print_summary", True)):
-        print(_format_single_run_summary(summary))
-    return payload
+
+def _run_single_config(
+    cfg: SimulationScenarioConfig,
+    step_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    return _SingleRunEngine(cfg, step_callback=step_callback).run()
 
 
 def _is_truthy_env(name: str) -> bool:

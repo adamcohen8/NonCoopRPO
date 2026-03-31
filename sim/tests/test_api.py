@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 import numpy as np
 import yaml
@@ -106,6 +107,19 @@ class TestSimulationApi:
             assert result.summary["samples"] == 3
             assert result.metrics["scenario_name"] == "api_smoke"
             assert np.isfinite(result.truth["target"]).all()
+
+    def test_session_step_uses_live_engine_not_full_run_replay(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SimulationConfig.from_dict(_api_config(Path(tmpdir)))
+            session = SimulationSession.from_config(cfg)
+
+            with patch("sim.master_simulator._run_single_config", side_effect=AssertionError("full run helper should not be used")):
+                snap0 = session.reset()
+                snap1 = session.step()
+
+            assert snap0 is not None
+            assert snap1.step_index == 1
+            assert snap1.time_s == 1.0
 
     def test_session_run_monte_carlo_scenario(self):
         with tempfile.TemporaryDirectory() as tmpdir:
