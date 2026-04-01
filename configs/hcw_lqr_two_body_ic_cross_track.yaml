@@ -1,0 +1,102 @@
+scenario_name: "hcw_lqr_two_body_ic_cross_track"
+
+metadata:
+  owner: "controller_lab"
+  notes: "Two-body HCW LQR rendezvous case with cross-track offset."
+
+rocket:
+  enabled: false
+  role: "rocket"
+
+chaser:
+  enabled: true
+  role: "chaser"
+  specs:
+    preset_satellite: "BASIC_SATELLITE"
+    dry_mass_kg: 180.0
+    fuel_mass_kg: 20.0
+    thruster: "BASIC_CHEMICAL_Z_BOTTOM"
+  initial_state:
+    relative_to_target_ric:
+      frame: "curv"
+      state: [0.0, -3.0, 0.8, 0.0, 0.0, 0.0]
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.lqr"
+    class_name: "HCWLQRController"
+    params:
+      mean_motion_rad_s: 0.001078
+      max_accel_km_s2: 2.0e-5
+      design_dt_s: 1.0
+      ric_curv_state_slice: [0, 6]
+      chief_eci_state_slice: [6, 12]
+
+target:
+  enabled: true
+  role: "target"
+  specs:
+    preset_satellite: "BASIC_SATELLITE"
+    dry_mass_kg: 360.0
+    fuel_mass_kg: 0.0
+  initial_state:
+    coes:
+      a_km: 7000.0
+      ecc: 0.0
+      inc_deg: 45.0
+      raan_deg: 0.0
+      argp_deg: 0.0
+      true_anomaly_deg: 0.0
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.zero_controller"
+    class_name: "ZeroController"
+    params: {}
+
+simulator:
+  scenario_type: "auto"
+  duration_s: 6000.0
+  dt_s: 1.0
+  dynamics:
+    orbit:
+      model: "two_body"
+      orbit_substep_s: 1.0
+      j2: false
+      j3: false
+      j4: false
+      drag: false
+      srp: false
+      third_body_sun: false
+      third_body_moon: false
+    attitude:
+      enabled: false
+    rocket:
+      enabled: false
+  environment:
+    ephemeris_mode: "analytic_simple"
+    atmosphere_env: {}
+  plugin_validation:
+    strict: true
+  termination:
+    earth_impact_enabled: false
+
+outputs:
+  output_dir: "outputs/hcw_lqr_two_body_ic_cross_track"
+  mode: "save"
+  stats:
+    enabled: true
+    print_summary: true
+    save_json: true
+    save_csv: false
+    save_full_log: true
+  plots:
+    enabled: false
+    figure_ids: []
+  animations:
+    enabled: false
+    types: []
+
+monte_carlo:
+  enabled: false
+  iterations: 1
+  base_seed: 123
+  variations: []

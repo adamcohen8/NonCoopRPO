@@ -26,6 +26,7 @@ class ControllerBenchMetric:
     object_id: str = ""
     reference_object_id: str = ""
     desired_quat_bn: tuple[float, float, float, float] | None = None
+    keepout_radius_km: float | None = None
 
 
 @dataclass(frozen=True)
@@ -36,12 +37,33 @@ class ControllerBenchPassCriterion:
 
 
 @dataclass(frozen=True)
+class ControllerBenchObjective:
+    kind: str
+    name: str = ""
+    object_id: str = ""
+    reference_object_id: str = ""
+    desired_quat_bn: tuple[float, float, float, float] | None = None
+    keepout_radius_km: float | None = None
+    max_final_attitude_error_deg: float | None = None
+    max_rms_attitude_error_deg: float | None = None
+    max_final_body_rate_norm_rad_s: float | None = None
+    max_final_relative_distance_km: float | None = None
+    max_rms_relative_distance_km: float | None = None
+    max_final_relative_speed_km_s: float | None = None
+    max_time_inside_keepout_s: float | None = None
+    max_total_dv_m_s: float | None = None
+    max_fuel_used_kg: float | None = None
+    require_not_terminated_early: bool = False
+
+
+@dataclass(frozen=True)
 class ControllerBenchCase:
     name: str
     config_path: Path
     description: str = ""
     metrics: tuple[ControllerBenchMetric, ...] = ()
     pass_criteria: tuple[ControllerBenchPassCriterion, ...] = ()
+    objectives: tuple[ControllerBenchObjective, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,7 +78,10 @@ class ControllerBenchConfig:
     cases: tuple[ControllerBenchCase, ...] = ()
     metrics: tuple[ControllerBenchMetric, ...] = ()
     pass_criteria: tuple[ControllerBenchPassCriterion, ...] = ()
+    objectives: tuple[ControllerBenchObjective, ...] = ()
     save_run_payloads: bool = True
     disable_plots: bool = True
     disable_animations: bool = True
     print_individual_run_summaries: bool = False
+    parallel_enabled: bool = False
+    parallel_workers: int = 0

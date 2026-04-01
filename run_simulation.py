@@ -586,6 +586,12 @@ def _print_controller_bench_summary(out: dict) -> None:
     _print_field("Target", f"{target.get('object_id', 'target')}.{target.get('slot', 'attitude_control')}")
     _print_field("Cases", str(len(list(out.get("cases", []) or []))))
     _print_field("Variants", str(len(list(out.get("variants", []) or []))))
+    execution = dict(out.get("execution", {}) or {})
+    if execution:
+        if bool(execution.get("parallel_enabled", False)):
+            _print_field("Execution", f"Parallel ({int(execution.get('parallel_workers', 1))} workers)")
+        elif bool(execution.get("parallel_requested", False)):
+            _print_field("Execution", "Serial (parallel fallback)")
     print("-" * 102)
     print("Variant Summary")
     for summary in list(out.get("variant_summaries", []) or []):
@@ -594,7 +600,7 @@ def _print_controller_bench_summary(out: dict) -> None:
         if metric_txt:
             metric_txt = f"  {metric_txt}"
         print(
-            f"{str(summary.get('variant_name', 'unknown')):<20}"
+            f"{str(summary.get('variant_name', 'unknown')):<24} "
             f"pass_rate={100.0 * float(summary.get('pass_rate', 0.0)):>6.1f}%  "
             f"runs={int(summary.get('run_count', 0)):>3d}{metric_txt}"
         )

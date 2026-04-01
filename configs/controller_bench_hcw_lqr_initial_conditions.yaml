@@ -1,0 +1,85 @@
+suite_name: hcw_lqr_initial_condition_bench
+description: Compare HCW LQR variants across a small set of two-body rendezvous initial conditions.
+output_dir: outputs/controller_bench_hcw_lqr_initial_conditions
+
+controller_target:
+  object_id: chaser
+  slot: orbit_control
+
+save_run_payloads: true
+disable_plots: true
+disable_animations: true
+print_individual_run_summaries: false
+parallel_enabled: true
+parallel_workers: 0
+
+variants:
+  - name: hcw_lqr_baseline
+    description: Baseline HCW LQR gains from the perfect two-body scenario.
+    controller:
+      module: sim.control.orbit.lqr
+      class_name: HCWLQRController
+      params:
+        mean_motion_rad_s: 0.001078
+        max_accel_km_s2: 2.0e-5
+        design_dt_s: 1.0
+        ric_curv_state_slice: [0, 6]
+        chief_eci_state_slice: [6, 12]
+
+  - name: hcw_lqr_conservative
+    description: Lower acceleration authority and slower design cadence.
+    controller:
+      module: sim.control.orbit.lqr
+      class_name: HCWLQRController
+      params:
+        mean_motion_rad_s: 0.001078
+        max_accel_km_s2: 1.0e-5
+        design_dt_s: 5.0
+        ric_curv_state_slice: [0, 6]
+        chief_eci_state_slice: [6, 12]
+
+  - name: hcw_lqr_aggressive
+    description: Higher state penalty and lower control penalty for tighter tracking.
+    controller:
+      module: sim.control.orbit.lqr
+      class_name: HCWLQRController
+      params:
+        mean_motion_rad_s: 0.001078
+        max_accel_km_s2: 2.5e-5
+        design_dt_s: 1.0
+        ric_curv_state_slice: [0, 6]
+        chief_eci_state_slice: [6, 12]
+        q_weights: [15000.0, 15000.0, 15000.0, 2500.0, 2500.0, 2500.0]
+        r_weights: [1.0e13, 1.0e13, 1.0e13]
+
+objectives:
+  - kind: relative_rendezvous
+    name: safe_rendezvous
+    object_id: chaser
+    reference_object_id: target
+    keepout_radius_km: 0.5
+    max_time_inside_keepout_s: 0.0
+    max_final_relative_distance_km: 2.0
+    max_final_relative_speed_km_s: 0.01
+    max_total_dv_m_s: 10.0
+    require_not_terminated_early: true
+
+cases:
+  - name: nominal
+    description: Baseline along-track separation with zero relative velocity.
+    config_path: hcw_lqr_two_body_perfect.yaml
+  - name: far_along_track
+    description: Larger along-track separation to test long-range convergence.
+    config_path: hcw_lqr_two_body_ic_far_along_track.yaml
+  - name: radial_offset
+    description: Positive radial displacement with nominal along-track separation.
+    config_path: hcw_lqr_two_body_ic_radial_offset.yaml
+  - name: cross_track_offset
+    description: Out-of-plane displacement to test cross-track correction.
+    config_path: hcw_lqr_two_body_ic_cross_track.yaml
+  - name: closing_velocity
+    description: Nominal separation with an initial relative velocity component.
+    config_path: hcw_lqr_two_body_ic_closing_velocity.yaml
+  - name: coupled_offset_velocity
+    description: Combined radial, along-track, cross-track, and velocity offset.
+    config_path: hcw_lqr_two_body_ic_coupled.yaml

@@ -36,6 +36,59 @@ def _normalize_quaternion(q: np.ndarray) -> np.ndarray:
     return arr / nrm
 
 
+def _relative_series(
+    payload: dict[str, Any],
+    object_id: str,
+    reference_object_id: str,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    truth_map = dict(payload.get("truth_by_object", {}) or {})
+    truth = np.array(truth_map.get(object_id, []), dtype=float)
+    ref = np.array(truth_map.get(reference_object_id, []), dtype=float)
+    if truth.ndim != 2 or ref.ndim != 2 or truth.shape[0] == 0 or ref.shape[0] == 0:
+        return None
+    n = int(min(truth.shape[0], ref.shape[0]))
+    if truth.shape[1] < 6 or ref.shape[1] < 6 or n <= 0:
+        return None
+    dr = truth[:n, :3] - ref[:n, :3]
+    dv = truth[:n, 3:6] - ref[:n, 3:6]
+    return dr, dv
+
+
+def _relative_distance_series(payload: dict[str, Any], object_id: str, reference_object_id: str) -> np.ndarray:
+    rel = _relative_series(payload, object_id, reference_object_id)
+    if rel is None:
+        return np.array([], dtype=float)
+    dr, _ = rel
+    return np.linalg.norm(dr, axis=1)
+
+
+def _relative_speed_series(payload: dict[str, Any], object_id: str, reference_object_id: str) -> np.ndarray:
+    rel = _relative_series(payload, object_id, reference_object_id)
+    if rel is None:
+        return np.array([], dtype=float)
+    _, dv = rel
+    return np.linalg.norm(dv, axis=1)
+
+
+def _time_s(payload: dict[str, Any]) -> np.ndarray:
+    return np.array(payload.get("time_s", []), dtype=float).reshape(-1)
+
+
+def _median_dt_s(time_s: np.ndarray) -> float:
+    if time_s.size < 2:
+        return 0.0
+    dt = np.diff(time_s)
+    finite = dt[np.isfinite(dt)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.median(finite))
+
+
+def _finite_tail(series: np.ndarray) -> np.ndarray:
+    arr = np.array(series, dtype=float).reshape(-1)
+    return arr[np.isfinite(arr)]
+
+
 def _quat_error_deg_series(truth_hist: np.ndarray, desired_q: np.ndarray) -> np.ndarray:
     q_des = _normalize_quaternion(desired_q)
     q_hist = np.array(truth_hist[:, 6:10], dtype=float)
@@ -96,15 +149,66 @@ def evaluate_metric(metric: ControllerBenchMetric, payload: dict[str, Any]) -> A
             return float(np.sqrt(np.mean(finite**2)))
         return float(np.max(finite))
 
-    if kind in {"final_relative_distance_km", "min_relative_distance_km"}:
-        truth = np.array(truth_map.get(object_id, []), dtype=float)
-        ref = np.array(truth_map.get(ref_id, []), dtype=float)
-        if truth.ndim != 2 or ref.ndim != 2 or truth.shape[0] == 0 or ref.shape[0] == 0:
+    if kind in {
+        "final_relative_distance_km",
+        "min_relative_distance_km",
+        "max_relative_distance_km",
+        "mean_relative_distance_km",
+        "rms_relative_distance_km",
+        "closest_approach_km",
+    }:
+        dist = _finite_tail(_relative_distance_series(payload, object_id, ref_id))
+        if dist.size == 0:
             return float("nan")
-        n = int(min(truth.shape[0], ref.shape[0]))
-        dist = np.linalg.norm(truth[:n, :3] - ref[:n, :3], axis=1)
         if kind == "final_relative_distance_km":
             return float(dist[-1])
-        return float(np.min(dist))
+        if kind in {"min_relative_distance_km", "closest_approach_km"}:
+            return float(np.min(dist))
+        if kind == "max_relative_distance_km":
+            return float(np.max(dist))
+        if kind == "mean_relative_distance_km":
+            return float(np.mean(dist))
+        return float(np.sqrt(np.mean(dist**2)))
+
+    if kind in {
+        "final_relative_speed_km_s",
+        "max_relative_speed_km_s",
+        "mean_relative_speed_km_s",
+        "rms_relative_speed_km_s",
+    }:
+        speed = _finite_tail(_relative_speed_series(payload, object_id, ref_id))
+        if speed.size == 0:
+            return float("nan")
+        if kind == "final_relative_speed_km_s":
+            return float(speed[-1])
+        if kind == "max_relative_speed_km_s":
+            return float(np.max(speed))
+        if kind == "mean_relative_speed_km_s":
+            return float(np.mean(speed))
+        return float(np.sqrt(np.mean(speed**2)))
+
+    if kind == "time_inside_keepout_s":
+        keepout_radius_km = metric.keepout_radius_km
+        if keepout_radius_km is None:
+            return float("nan")
+        dist = _finite_tail(_relative_distance_series(payload, object_id, ref_id))
+        if dist.size == 0:
+            return float("nan")
+        t_s = _time_s(payload)
+        n = min(dist.size, t_s.size if t_s.size else dist.size)
+        if n <= 0:
+            return float("nan")
+        dt_s = _median_dt_s(t_s[:n]) if t_s.size else 0.0
+        return float(np.sum(dist[:n] < float(keepout_radius_km)) * dt_s)
+
+    if kind == "fuel_used_kg":
+        truth = np.array(truth_map.get(object_id, []), dtype=float)
+        if truth.ndim != 2 or truth.shape[1] < 14 or truth.shape[0] == 0:
+            return float("nan")
+        mass = truth[:, 13]
+        finite = _finite_tail(mass)
+        if finite.size == 0:
+            return float("nan")
+        return float(max(0.0, finite[0] - finite[-1]))
 
     return None

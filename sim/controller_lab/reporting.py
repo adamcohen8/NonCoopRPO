@@ -56,6 +56,30 @@ def write_controller_bench_reports(result: dict[str, Any], outdir: Path) -> dict
             f"{int(summary.get('passed_runs', 0))} | "
             f"{int(summary.get('run_count', 0))} |"
         )
+    objective_names: list[str] = []
+    for summary in list(result.get("variant_summaries", []) or []):
+        for name in dict(summary.get("objective_pass_rates", {}) or {}).keys():
+            if name not in objective_names:
+                objective_names.append(str(name))
+    if objective_names:
+        lines.extend(
+            [
+                "",
+                "## Objective Pass Rates",
+                "",
+                "| Variant | Objective | Pass Rate |",
+                "| --- | --- | ---: |",
+            ]
+        )
+        for summary in list(result.get("variant_summaries", []) or []):
+            objective_pass_rates = dict(summary.get("objective_pass_rates", {}) or {})
+            for name in objective_names:
+                if name not in objective_pass_rates:
+                    continue
+                lines.append(
+                    f"| {summary.get('variant_name')} | {name} | "
+                    f"{100.0 * float(objective_pass_rates.get(name, 0.0)):.1f}% |"
+                )
     lines.extend(
         [
             "",

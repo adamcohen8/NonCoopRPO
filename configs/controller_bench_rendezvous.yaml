@@ -1,0 +1,49 @@
+suite_name: rendezvous_hcw_bench
+description: Compare orbit controllers on short safe-rendezvous benchmark cases.
+output_dir: outputs/controller_bench_rendezvous
+controller_target:
+  object_id: chaser
+  slot: orbit_control
+save_run_payloads: true
+disable_plots: true
+disable_animations: true
+print_individual_run_summaries: false
+variants:
+  - name: hcw_lqr_conservative
+    description: Lower-authority HCW LQR pursuit gains
+    controller:
+      module: sim.control.orbit.lqr
+      class_name: HCWLQRController
+      params:
+        mean_motion_rad_s: 0.001078
+        max_accel_km_s2: 1.0e-5
+        design_dt_s: 5.0
+        ric_curv_state_slice: [0, 6]
+        chief_eci_state_slice: [6, 12]
+  - name: hcw_lqr_aggressive
+    description: Higher-authority HCW LQR pursuit gains
+    controller:
+      module: sim.control.orbit.lqr
+      class_name: HCWLQRController
+      params:
+        mean_motion_rad_s: 0.001078
+        max_accel_km_s2: 2.0e-5
+        design_dt_s: 1.0
+        ric_curv_state_slice: [0, 6]
+        chief_eci_state_slice: [6, 12]
+objectives:
+  - kind: relative_rendezvous
+    name: safe_rendezvous
+    object_id: chaser
+    reference_object_id: target
+    keepout_radius_km: 0.5
+    max_time_inside_keepout_s: 0.0
+    max_final_relative_distance_km: 3.5
+    max_final_relative_speed_km_s: 0.02
+    max_total_dv_m_s: 20.0
+    require_not_terminated_early: true
+cases:
+  - name: nominal
+    config_path: controller_bench_rendezvous_case_nominal.yaml
+  - name: cross_track_offset
+    config_path: controller_bench_rendezvous_case_cross_track.yaml
