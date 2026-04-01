@@ -584,6 +584,8 @@ class MainWindow(QMainWindow):
         self._connect_dirty_tracking()
         self.mc_enabled_check.toggled.connect(self._refresh_outputs_mode_ui)
         self.analysis_study_type_combo.currentTextChanged.connect(self._refresh_outputs_mode_ui)
+        self.analysis_study_type_combo.currentTextChanged.connect(self._refresh_analysis_editor_ui)
+        self.sensitivity_method_combo.currentTextChanged.connect(self._refresh_analysis_editor_ui)
         self.orbit_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         self.attitude_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         for combo in (
@@ -770,6 +772,7 @@ class MainWindow(QMainWindow):
             self.output_dir_edit,
             self.reference_object_edit,
             self.mc_baseline_summary_json,
+            self.analysis_baseline_path_edit,
             self.save_path_edit,
             self.yaml_editor,
             self.target_knowledge_targets_edit,
@@ -780,10 +783,15 @@ class MainWindow(QMainWindow):
             signal = getattr(widget, "textChanged", None)
             if signal is not None:
                 signal.connect(self._mark_dirty)
+        for widget in (
+            self.analysis_metrics_edit,
+        ):
+            widget.textChanged.connect(self._mark_dirty)
         combo_boxes = [
             self.orbit_integrator_combo,
             self.output_mode_combo,
             self.analysis_study_type_combo,
+            self.sensitivity_method_combo,
             self.chaser_init_mode,
             self.target_preset,
             self.chaser_preset,
@@ -805,6 +813,7 @@ class MainWindow(QMainWindow):
         check_boxes = [
             self.mc_enabled_check,
             self.mc_parallel_check,
+            self.analysis_baseline_enable_check,
             self.orbit_substep_enabled_check,
             self.attitude_substep_enabled_check,
             self.attitude_enabled_check,
@@ -876,6 +885,7 @@ class MainWindow(QMainWindow):
             self.mc_gate_max_duration,
             self.mc_gate_max_total_dv,
             self.mc_gate_max_guardrail_events,
+            self.analysis_lhs_samples_spin,
             self.target_knowledge_refresh_rate,
             self.target_knowledge_max_range,
             self.target_knowledge_dropout_prob,
@@ -1041,11 +1051,13 @@ class MainWindow(QMainWindow):
         self.mc_enabled_check = QCheckBox("Enable Analysis")
         self.analysis_study_type_combo = QComboBox()
         self.analysis_study_type_combo.addItems(["Monte Carlo", "Sensitivity"])
+        self.analysis_count_label = QLabel("Iterations")
         self.mc_iterations_spin = QSpinBox()
         self.mc_iterations_spin.setRange(1, 1000000)
         self.mc_parallel_check = QCheckBox("Parallel")
         self.mc_workers_spin = QSpinBox()
         self.mc_workers_spin.setRange(0, 1024)
+        self.analysis_seed_label = QLabel("Base Seed")
         self.mc_base_seed_spin = QSpinBox()
         self.mc_base_seed_spin.setRange(0, 2**31 - 1)
         execution_row = QHBoxLayout()
@@ -1054,17 +1066,51 @@ class MainWindow(QMainWindow):
         execution_row.addWidget(QLabel("Study"))
         execution_row.addWidget(self.analysis_study_type_combo)
         execution_row.addSpacing(12)
-        execution_row.addWidget(QLabel("Iterations"))
+        execution_row.addWidget(self.analysis_count_label)
         execution_row.addWidget(self.mc_iterations_spin)
         execution_row.addSpacing(12)
         execution_row.addWidget(self.mc_parallel_check)
         execution_row.addWidget(QLabel("Workers (0=auto)"))
         execution_row.addWidget(self.mc_workers_spin)
         execution_row.addSpacing(12)
-        execution_row.addWidget(QLabel("Base Seed"))
+        execution_row.addWidget(self.analysis_seed_label)
         execution_row.addWidget(self.mc_base_seed_spin)
         execution_row.addStretch(1)
         layout.addLayout(execution_row)
+
+        self.analysis_settings_box = QGroupBox("Study Settings")
+        analysis_settings_layout = QFormLayout(self.analysis_settings_box)
+        self.sensitivity_method_combo = QComboBox()
+        self.sensitivity_method_combo.addItems(["One-at-a-Time", "Latin Hypercube"])
+        self.analysis_lhs_samples_spin = QSpinBox()
+        self.analysis_lhs_samples_spin.setRange(1, 1000000)
+        self.analysis_metrics_edit = QPlainTextEdit()
+        self.analysis_metrics_edit.setPlaceholderText(
+            "summary.duration_s\n"
+            "derived.closest_approach_km\n"
+            "summary.thrust_stats.chaser.total_dv_m_s"
+        )
+        self.analysis_metrics_edit.setMaximumHeight(78)
+        self.analysis_baseline_enable_check = QCheckBox("Enable Baseline Comparison")
+        self.analysis_baseline_path_edit = QLineEdit()
+        self.analysis_baseline_path_edit.setPlaceholderText("Optional baseline summary JSON")
+        self.analysis_baseline_browse_button = QPushButton("Browse...")
+        self.analysis_baseline_browse_button.clicked.connect(self._browse_analysis_baseline_summary)
+        baseline_row = QWidget()
+        baseline_row_layout = QHBoxLayout(baseline_row)
+        baseline_row_layout.setContentsMargins(0, 0, 0, 0)
+        baseline_row_layout.setSpacing(6)
+        baseline_row_layout.addWidget(self.analysis_baseline_path_edit, 1)
+        baseline_row_layout.addWidget(self.analysis_baseline_browse_button)
+        self.analysis_help_label = QLabel("")
+        self.analysis_help_label.setWordWrap(True)
+        analysis_settings_layout.addRow("Sensitivity Method", self.sensitivity_method_combo)
+        analysis_settings_layout.addRow("LHS Samples", self.analysis_lhs_samples_spin)
+        analysis_settings_layout.addRow("Tracked Metrics", self.analysis_metrics_edit)
+        analysis_settings_layout.addRow(self.analysis_baseline_enable_check)
+        analysis_settings_layout.addRow("Baseline Summary", baseline_row)
+        analysis_settings_layout.addRow("Notes", self.analysis_help_label)
+        layout.addWidget(self.analysis_settings_box)
 
         variations_split = QHBoxLayout()
         group_box_style = (
@@ -1079,7 +1125,8 @@ class MainWindow(QMainWindow):
             " top: -3px;"
             "}"
         )
-        variations_box = QGroupBox("Study Inputs")
+        self.analysis_inputs_box = QGroupBox("Study Inputs")
+        variations_box = self.analysis_inputs_box
         variations_box.setStyleSheet(group_box_style)
         variations_box_layout = QVBoxLayout(variations_box)
         self.mc_variations_list = QListWidget()
@@ -1087,7 +1134,8 @@ class MainWindow(QMainWindow):
         variations_box_layout.addWidget(self.mc_variations_list)
         variations_split.addWidget(variations_box, 2)
 
-        editor_box = QGroupBox("Input Editor")
+        self.analysis_editor_box = QGroupBox("Input Editor")
+        editor_box = self.analysis_editor_box
         editor_box.setStyleSheet(group_box_style)
         editor_box_layout = QHBoxLayout(editor_box)
         editor_box_layout.setContentsMargins(8, 16, 8, 8)
@@ -1157,6 +1205,7 @@ class MainWindow(QMainWindow):
         self._rebuild_mc_category_combo()
         self._refresh_mc_parameter_options()
         self._refresh_mc_mode_ui()
+        self._refresh_analysis_editor_ui()
         return tab
 
     def _build_objects_tab(self) -> QWidget:
@@ -2219,6 +2268,107 @@ class MainWindow(QMainWindow):
         self.mc_parameter_combo.setVisible(not custom)
         self._refresh_mc_variation_button_state()
 
+    def _selected_sensitivity_method(self) -> str:
+        raw = self.sensitivity_method_combo.currentText().strip().lower()
+        return "lhs" if "latin" in raw else "one_at_a_time"
+
+    def _format_analysis_metrics_text(self, metrics: list[object] | tuple[object, ...]) -> str:
+        return "\n".join(str(metric).strip() for metric in metrics if str(metric).strip())
+
+    def _parse_analysis_metrics_text(self) -> list[str]:
+        raw = self.analysis_metrics_edit.toPlainText().strip()
+        if not raw:
+            return []
+        metrics: list[str] = []
+        for line in raw.splitlines():
+            for token in line.split(","):
+                metric = token.strip()
+                if metric:
+                    metrics.append(metric)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for metric in metrics:
+            if metric not in seen:
+                deduped.append(metric)
+                seen.add(metric)
+        return deduped
+
+    def _browse_analysis_baseline_summary(self) -> None:
+        start_dir = self.repo_root
+        current_text = self.analysis_baseline_path_edit.text().strip()
+        if current_text:
+            candidate = Path(current_text).expanduser()
+            if not candidate.is_absolute():
+                candidate = (self.repo_root / candidate).resolve()
+            if candidate.exists():
+                start_dir = candidate.parent if candidate.is_file() else candidate
+            elif candidate.parent.exists():
+                start_dir = candidate.parent
+        path_str, _ = QFileDialog.getOpenFileName(self, "Select Baseline Summary", str(start_dir), "JSON Files (*.json)")
+        if path_str:
+            self.analysis_baseline_path_edit.setText(path_str)
+
+    def _refresh_analysis_editor_ui(self) -> None:
+        study_type = self._selected_analysis_study_type()
+        sensitivity_active = study_type == "sensitivity"
+        lhs_active = sensitivity_active and self._selected_sensitivity_method() == "lhs"
+        if sensitivity_active and not lhs_active:
+            auto_runs = 0
+            for variation in self.mc_variations:
+                mode = str(dict(variation or {}).get("mode", "choice") or "choice").strip().lower()
+                if mode == "choice":
+                    auto_runs += len(list(dict(variation or {}).get("options", []) or []))
+                elif mode in {"uniform", "normal"}:
+                    auto_runs += 2 if mode == "uniform" else 3
+            self.mc_iterations_spin.setValue(max(auto_runs, 1))
+        self.analysis_lhs_samples_spin.setValue(int(self.mc_iterations_spin.value()))
+
+        self.analysis_settings_box.setVisible(sensitivity_active)
+        self.analysis_count_label.setText("Iterations" if study_type == "monte_carlo" else ("Samples" if lhs_active else "Runs (auto)"))
+        self.analysis_seed_label.setText("Base Seed" if study_type == "monte_carlo" else ("Seed" if lhs_active else "Seed"))
+        self.mc_iterations_spin.setEnabled(study_type == "monte_carlo" or lhs_active)
+        self.mc_base_seed_spin.setEnabled(study_type == "monte_carlo" or lhs_active)
+        self.analysis_lhs_samples_spin.setEnabled(False)
+        self.analysis_lhs_samples_spin.setVisible(False)
+        lhs_label = self.analysis_settings_box.layout().labelForField(self.analysis_lhs_samples_spin)
+        if lhs_label is not None:
+            lhs_label.setVisible(False)
+        self.sensitivity_method_combo.setEnabled(sensitivity_active)
+
+        if study_type == "monte_carlo":
+            self.analysis_inputs_box.setTitle("Monte Carlo Variations")
+            self.analysis_editor_box.setTitle("Variation Editor")
+            self.analysis_help_label.setText(
+                "Configure random variations, iteration count, and campaign execution settings for Monte Carlo studies."
+            )
+        elif lhs_active:
+            self.analysis_inputs_box.setTitle("LHS Parameters")
+            self.analysis_editor_box.setTitle("Distribution Editor")
+            self.analysis_help_label.setText(
+                "Latin hypercube sampling draws one stratified sample per parameter per run. Use uniform or normal distributions."
+            )
+        else:
+            self.analysis_inputs_box.setTitle("Sensitivity Parameters")
+            self.analysis_editor_box.setTitle("Parameter Editor")
+            self.analysis_help_label.setText(
+                "One-at-a-time sensitivity varies one parameter at a time. Choice mode uses explicit values; uniform/normal provide quick helpers."
+            )
+
+        allowed_modes = ["uniform", "normal"] if lhs_active else ["choice", "uniform", "normal"]
+        current_mode = self.mc_mode_combo.currentText().strip().lower()
+        if [self.mc_mode_combo.itemText(i) for i in range(self.mc_mode_combo.count())] != allowed_modes:
+            self.mc_mode_combo.blockSignals(True)
+            self.mc_mode_combo.clear()
+            self.mc_mode_combo.addItems(allowed_modes)
+            self.mc_mode_combo.blockSignals(False)
+        if current_mode not in allowed_modes:
+            current_mode = allowed_modes[0]
+        self.mc_mode_combo.setCurrentText(current_mode)
+        mode_label = self.mc_variation_form.labelForField(self.mc_mode_combo)
+        if mode_label is not None:
+            mode_label.setText("Distribution" if lhs_active else "Mode")
+        self._refresh_mc_mode_ui()
+
     def _refresh_mc_mode_ui(self) -> None:
         mode = self.mc_mode_combo.currentText().strip().lower()
         mode_to_index = {"choice": 0, "uniform": 1, "normal": 2}
@@ -2243,13 +2393,16 @@ class MainWindow(QMainWindow):
         path = str(variation.get("parameter_path", "") or "")
         mode = str(variation.get("mode", "choice") or "choice").lower()
         label = self._mc_path_display_name(path)
+        lhs_active = self._selected_analysis_study_type() == "sensitivity" and self._selected_sensitivity_method() == "lhs"
         if mode == "choice":
             options = list(variation.get("options", []) or [])
             return f"{label} | choice | {len(options)} option(s)"
         if mode == "uniform":
-            return f"{label} | uniform | {variation.get('low')} to {variation.get('high')}"
+            prefix = "distribution" if lhs_active else "uniform"
+            return f"{label} | {prefix} | {variation.get('low')} to {variation.get('high')}"
         if mode == "normal":
-            return f"{label} | normal | mean {variation.get('mean')} std {variation.get('std')}"
+            prefix = "distribution" if lhs_active else "normal"
+            return f"{label} | {prefix} | mean {variation.get('mean')} std {variation.get('std')}"
         return f"{label} | {mode}"
 
     def _refresh_mc_variations_list(self) -> None:
@@ -2262,6 +2415,7 @@ class MainWindow(QMainWindow):
             self.mc_variations_list.setCurrentRow(selected_row)
         self.mc_variations_list.blockSignals(False)
         self._refresh_mc_variation_button_state()
+        self._refresh_analysis_editor_ui()
 
     def _set_mc_variation_path_selection(self, parameter_path: str) -> None:
         matched_category: str | None = None
@@ -2296,7 +2450,9 @@ class MainWindow(QMainWindow):
         variation = dict(self.mc_variations[row] or {})
         self._set_mc_variation_path_selection(str(variation.get("parameter_path", "") or ""))
         mode = str(variation.get("mode", "choice") or "choice").lower()
-        self.mc_mode_combo.setCurrentText(mode if mode in {"choice", "uniform", "normal"} else "choice")
+        allowed_modes = [self.mc_mode_combo.itemText(i) for i in range(self.mc_mode_combo.count())]
+        fallback_mode = allowed_modes[0] if allowed_modes else "choice"
+        self.mc_mode_combo.setCurrentText(mode if mode in set(allowed_modes) else fallback_mode)
         self.mc_choice_options_edit.setText(", ".join(str(v) for v in list(variation.get("options", []) or [])))
         self.mc_uniform_low_spin.setValue(float(variation.get("low", 0.0) or 0.0))
         self.mc_uniform_high_spin.setValue(float(variation.get("high", 0.0) or 0.0))
@@ -2314,7 +2470,8 @@ class MainWindow(QMainWindow):
             self.mc_category_combo.setCurrentIndex(0)
         self._refresh_mc_parameter_options()
         self.mc_custom_path_edit.clear()
-        self.mc_mode_combo.setCurrentText("choice")
+        default_mode = "uniform" if (self._selected_analysis_study_type() == "sensitivity" and self._selected_sensitivity_method() == "lhs") else "choice"
+        self.mc_mode_combo.setCurrentText(default_mode)
         self.mc_choice_options_edit.clear()
         self.mc_uniform_low_spin.setValue(0.0)
         self.mc_uniform_high_spin.setValue(0.0)
@@ -2344,10 +2501,13 @@ class MainWindow(QMainWindow):
         else:
             parameter_path = str(self.mc_parameter_combo.currentData() or "").strip()
         if not parameter_path:
-            raise ValueError("Select a Monte Carlo parameter or enter a custom path.")
+            raise ValueError("Select a parameter or enter a custom path.")
         mode = self.mc_mode_combo.currentText().strip().lower()
+        lhs_active = self._selected_analysis_study_type() == "sensitivity" and self._selected_sensitivity_method() == "lhs"
         variation: dict[str, object] = {"parameter_path": parameter_path, "mode": mode}
         if mode == "choice":
+            if lhs_active:
+                raise ValueError("LHS parameters must use uniform or normal distributions.")
             variation["options"] = self._parse_mc_choice_options()
         elif mode == "uniform":
             variation["low"] = float(self.mc_uniform_low_spin.value())
@@ -2373,9 +2533,10 @@ class MainWindow(QMainWindow):
             self._refresh_mc_variations_list()
             self.mc_variations_list.setCurrentRow(row)
             self._mark_dirty()
-            self.statusBar().showMessage(f"{action} Monte Carlo variation.", 5000)
+            noun = "analysis input" if self._selected_analysis_study_type() == "monte_carlo" else "analysis parameter"
+            self.statusBar().showMessage(f"{action} {noun}.", 5000)
         except Exception as exc:
-            self._show_error("Invalid Monte Carlo Variation", str(exc))
+            self._show_error("Invalid Analysis Input", str(exc))
 
     def _on_remove_mc_variation(self) -> None:
         row = self.mc_variations_list.currentRow()
@@ -2388,7 +2549,7 @@ class MainWindow(QMainWindow):
         else:
             self._clear_mc_variation_editor()
         self._mark_dirty()
-        self.statusBar().showMessage("Removed Monte Carlo variation.", 5000)
+        self.statusBar().showMessage("Removed analysis input.", 5000)
 
     def _load_config_into_widgets(self, cfg: dict) -> None:
         self._suppress_dirty_tracking = True
@@ -2408,36 +2569,81 @@ class MainWindow(QMainWindow):
         self.output_dir_edit.setText(str(outputs.get("output_dir", "outputs/gui_run")))
         analysis_enabled = bool(analysis.get("enabled", False))
         study_type = str(analysis.get("study_type", "monte_carlo") or "monte_carlo").strip().lower()
+        analysis_metrics = list(analysis.get("metrics", []) or [])
+        analysis_baseline = dict(analysis.get("baseline", {}) or {})
+        sensitivity = dict(analysis.get("sensitivity", {}) or {})
+        sensitivity_method = str(sensitivity.get("method", "one_at_a_time") or "one_at_a_time").strip().lower()
         if not analysis_enabled and not bool(mc.get("enabled", False)):
             study_type = "monte_carlo"
         self.mc_enabled_check.setChecked(bool(analysis_enabled or mc.get("enabled", False)))
         self.analysis_study_type_combo.setCurrentText("Sensitivity" if study_type == "sensitivity" else "Monte Carlo")
+        self.sensitivity_method_combo.setCurrentText("Latin Hypercube" if sensitivity_method == "lhs" else "One-at-a-Time")
+        self.analysis_metrics_edit.setPlainText(self._format_analysis_metrics_text(analysis_metrics))
+        self.analysis_baseline_enable_check.setChecked(bool(analysis_baseline.get("enabled", False)))
+        self.analysis_baseline_path_edit.setText(str(analysis_baseline.get("summary_json", "") or ""))
         if study_type == "sensitivity" and analysis_enabled:
             execution = dict(analysis.get("execution", {}) or {})
-            sensitivity = dict(analysis.get("sensitivity", {}) or {})
             params = list(sensitivity.get("parameters", []) or [])
-            self.mc_iterations_spin.setValue(max(sum(len(list(dict(p or {}).get("values", []) or [])) for p in params), 1))
+            lhs_samples = int(sensitivity.get("samples", 0) or 0)
+            self.analysis_lhs_samples_spin.setValue(max(lhs_samples, 1))
+            if sensitivity_method == "lhs":
+                self.mc_iterations_spin.setValue(max(lhs_samples, 1))
+                self.mc_base_seed_spin.setValue(int(sensitivity.get("seed", 0) or 0))
+            else:
+                self.mc_iterations_spin.setValue(max(sum(len(list(dict(p or {}).get("values", []) or [])) for p in params), 1))
+                self.mc_base_seed_spin.setValue(int(sensitivity.get("seed", 0) or 0))
             self.mc_parallel_check.setChecked(bool(execution.get("parallel_enabled", False)))
             self.mc_workers_spin.setValue(int(execution.get("parallel_workers", 0)))
-            self.mc_base_seed_spin.setValue(int(dict(analysis.get("monte_carlo", {}) or {}).get("base_seed", mc.get("base_seed", 0)) or 0))
-            self.mc_variations = [
-                {
-                    "parameter_path": str(dict(param or {}).get("parameter_path", dict(param or {}).get("path", "")) or ""),
-                    "mode": "choice",
-                    "options": list(dict(param or {}).get("values", []) or []),
-                }
-                for param in params
-            ]
+            self.mc_variations = []
+            for param in params:
+                param_dict = dict(param or {})
+                parameter_path = str(param_dict.get("parameter_path", param_dict.get("path", "")) or "")
+                if not parameter_path:
+                    continue
+                if sensitivity_method == "lhs":
+                    distribution = str(param_dict.get("distribution", "uniform") or "uniform").strip().lower()
+                    variation = {"parameter_path": parameter_path, "mode": distribution}
+                    if distribution == "uniform":
+                        variation["low"] = float(param_dict.get("low", 0.0) or 0.0)
+                        variation["high"] = float(param_dict.get("high", 0.0) or 0.0)
+                    else:
+                        variation["mean"] = float(param_dict.get("mean", 0.0) or 0.0)
+                        variation["std"] = float(param_dict.get("std", 0.0) or 0.0)
+                else:
+                    values = list(param_dict.get("values", []) or [])
+                    if values:
+                        variation = {
+                            "parameter_path": parameter_path,
+                            "mode": "choice",
+                            "options": values,
+                        }
+                    elif param_dict.get("distribution") == "normal":
+                        variation = {
+                            "parameter_path": parameter_path,
+                            "mode": "normal",
+                            "mean": float(param_dict.get("mean", 0.0) or 0.0),
+                            "std": float(param_dict.get("std", 0.0) or 0.0),
+                        }
+                    else:
+                        variation = {
+                            "parameter_path": parameter_path,
+                            "mode": "uniform",
+                            "low": float(param_dict.get("low", 0.0) or 0.0),
+                            "high": float(param_dict.get("high", 0.0) or 0.0),
+                        }
+                self.mc_variations.append(variation)
         else:
             self.mc_iterations_spin.setValue(int(mc.get("iterations", 1)))
             self.mc_parallel_check.setChecked(bool(mc.get("parallel_enabled", False)))
             self.mc_workers_spin.setValue(int(mc.get("parallel_workers", 0)))
             self.mc_base_seed_spin.setValue(int(mc.get("base_seed", 0)))
+            self.analysis_lhs_samples_spin.setValue(max(int(sensitivity.get("samples", 0) or 0), 1))
             self.mc_variations = [dict(v or {}) for v in list(mc.get("variations", []) or [])]
         self._rebuild_mc_category_combo()
         self._refresh_mc_parameter_options()
         self._refresh_mc_variations_list()
         self._clear_mc_variation_editor()
+        self._refresh_analysis_editor_ui()
         dynamics = dict(sim.get("dynamics", {}) or {})
         orbit_dyn = dict(dynamics.get("orbit", {}) or {})
         att_dyn = dict(dynamics.get("attitude", {}) or {})
@@ -2632,18 +2838,36 @@ class MainWindow(QMainWindow):
             "parallel_enabled": bool(self.mc_parallel_check.isChecked()),
             "parallel_workers": int(self.mc_workers_spin.value()),
         }
-        analysis.setdefault("metrics", list(dict(self.current_config.get("analysis", {}) or {}).get("metrics", []) or []))
-        analysis.setdefault("baseline", dict(dict(self.current_config.get("analysis", {}) or {}).get("baseline", {}) or {}))
+        analysis["metrics"] = self._parse_analysis_metrics_text()
+        analysis["baseline"] = {
+            "enabled": bool(self.analysis_baseline_enable_check.isChecked()),
+            "summary_json": self.analysis_baseline_path_edit.text().strip(),
+        }
         analysis["monte_carlo"] = {
             "iterations": int(self.mc_iterations_spin.value()),
             "base_seed": int(self.mc_base_seed_spin.value()),
             "variations": copy.deepcopy(self.mc_variations),
         }
-        if study_type == "sensitivity":
-            params = []
-            for variation in self.mc_variations:
+        sensitivity_method = self._selected_sensitivity_method()
+        params = []
+        for variation in self.mc_variations:
+            parameter_path = str(dict(variation or {}).get("parameter_path", "") or "")
+            if not parameter_path:
+                continue
+            mode = str(dict(variation or {}).get("mode", "choice") or "choice").strip().lower()
+            if sensitivity_method == "lhs":
+                param_entry = {
+                    "parameter_path": parameter_path,
+                    "distribution": mode if mode in {"uniform", "normal"} else "uniform",
+                }
+                if mode == "normal":
+                    param_entry["mean"] = float(dict(variation or {}).get("mean", 0.0) or 0.0)
+                    param_entry["std"] = float(dict(variation or {}).get("std", 0.0) or 0.0)
+                else:
+                    param_entry["low"] = float(dict(variation or {}).get("low", 0.0) or 0.0)
+                    param_entry["high"] = float(dict(variation or {}).get("high", 0.0) or 0.0)
+            else:
                 values = list(dict(variation or {}).get("options", []) or [])
-                mode = str(dict(variation or {}).get("mode", "choice") or "choice").strip().lower()
                 if mode == "uniform":
                     values = [dict(variation or {}).get("low"), dict(variation or {}).get("high")]
                 elif mode == "normal":
@@ -2651,18 +2875,24 @@ class MainWindow(QMainWindow):
                     std = dict(variation or {}).get("std")
                     if isinstance(mean, (int, float)) and isinstance(std, (int, float)):
                         values = [float(mean) - float(std), float(mean), float(mean) + float(std)]
-                params.append(
-                    {
-                        "parameter_path": str(dict(variation or {}).get("parameter_path", "") or ""),
-                        "values": [v for v in values if v is not None],
-                    }
-                )
-            analysis["sensitivity"] = {
-                "method": "one_at_a_time",
-                "parameters": params,
-            }
-        else:
-            analysis["sensitivity"] = dict(dict(self.current_config.get("analysis", {}) or {}).get("sensitivity", {}) or {})
+                param_entry = {
+                    "parameter_path": parameter_path,
+                    "values": [v for v in values if v is not None],
+                    "distribution": mode if mode in {"uniform", "normal"} else "uniform",
+                }
+                if mode == "uniform":
+                    param_entry["low"] = float(dict(variation or {}).get("low", 0.0) or 0.0)
+                    param_entry["high"] = float(dict(variation or {}).get("high", 0.0) or 0.0)
+                elif mode == "normal":
+                    param_entry["mean"] = float(dict(variation or {}).get("mean", 0.0) or 0.0)
+                    param_entry["std"] = float(dict(variation or {}).get("std", 0.0) or 0.0)
+            params.append(param_entry)
+        analysis["sensitivity"] = {
+            "method": sensitivity_method,
+            "samples": int(self.mc_iterations_spin.value()),
+            "seed": int(self.mc_base_seed_spin.value()),
+            "parameters": params,
+        }
 
         target["enabled"] = bool(self.target_enabled.isChecked())
         target.setdefault("specs", {})["preset_satellite"] = self.target_preset.currentText().strip()
@@ -3212,6 +3442,14 @@ class MainWindow(QMainWindow):
         return temp_config_path
 
     def _monte_carlo_path_warning(self, cfg_dict: dict) -> str:
+        analysis = dict(cfg_dict.get("analysis", {}) or {})
+        if bool(analysis.get("enabled", False)) and str(analysis.get("study_type", "")).strip().lower() == "sensitivity":
+            sensitivity = dict(analysis.get("sensitivity", {}) or {})
+            for param in list(sensitivity.get("parameters", []) or []):
+                path = str(dict(param or {}).get("parameter_path", "") or "").strip()
+                if path and not self._path_exists(cfg_dict, path):
+                    return f"Warning: analysis parameter path missing: {path}"
+            return ""
         mc = dict(cfg_dict.get("monte_carlo", {}) or {})
         if not bool(mc.get("enabled", False)):
             return ""
@@ -3410,7 +3648,7 @@ class MainWindow(QMainWindow):
             self.outputs_stack.setCurrentIndex(1)
             if study_type == "sensitivity":
                 self.outputs_mode_label.setText(
-                    "Sensitivity analysis is enabled. Configure campaign outputs here, and use Advanced YAML for tracked metrics or baseline settings."
+                    "Sensitivity analysis is enabled. Configure campaign outputs here; tracked metrics, method, and baseline options live in the Analysis tab."
                 )
             else:
                 self.outputs_mode_label.setText(
