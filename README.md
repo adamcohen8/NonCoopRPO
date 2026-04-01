@@ -1,35 +1,140 @@
 # NonCooperativeRPO
 
-Modular orbital engagement simulation framework for closed-loop SIL/HIL-oriented development.
+Integrated spacecraft simulation and analysis framework for rendezvous, proximity operations, control development, and mission concept prototyping.
 
-## What This Project Is
+## Overview
 
-This repository provides a simulation stack for:
+This repository is best thought of as an engineering sandbox for spacecraft GNC and mission simulation. It combines:
 
-- orbital dynamics (from two-body through higher-fidelity perturbations),
+- orbital dynamics, from two-body through higher-fidelity perturbations,
 - attitude dynamics and control,
-- sensing and estimation,
-- actuator constraints and command application,
-- multi-object interaction and rendezvous-style scenarios,
-- validation and controller experimentation (including RL and gain tuning).
+- sensing, estimation, and object knowledge,
+- actuator limits and command application,
+- multi-object scenarios including rendezvous-style engagements,
+- campaign analysis such as Monte Carlo and sensitivity studies, and
+- validation, RL experimentation, and GUI-driven workflows.
 
-The core intent is to support realistic control algorithm development and mission concept prototyping.
+The goal is not just to propagate trajectories. The goal is to support closed-loop simulation where dynamics, estimation, control, mission behavior, and outputs all interact in one place.
 
-## Current Architecture
+## Best Fit
+
+This repository is strongest for:
+
+- spacecraft rendezvous and proximity operations research,
+- integrated orbit-attitude control development,
+- controller comparison and mission-logic prototyping,
+- Monte Carlo and sensitivity campaign analysis,
+- simulation-backed validation against higher-fidelity references, and
+- RL or autonomy experiments that need access to a live simulation stack.
+
+It is less optimized for:
+
+- minimal, highly polished SDK-style workflows,
+- flight-qualified or high-assurance operational software, and
+- narrowly scoped single-purpose orbit tools.
+
+## Primary Workflows
+
+There are five main ways to use the project:
+
+1. CLI single-run simulation via [`run_simulation.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/run_simulation.py)
+2. Native desktop GUI via [`run_gui.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/run_gui.py)
+3. Programmatic API via [`sim/api.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/sim/api.py)
+4. Analysis campaigns using the `analysis` config section for Monte Carlo or sensitivity/LHS studies
+5. Validation workflows via [`validation/automated_validation_harness.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/validation/automated_validation_harness.py) and [`validation/hpop_compare.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/validation/hpop_compare.py)
+
+## Quick Start
+
+### 1) Create and activate a virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+```
+
+### 2) Run a representative CLI scenario
+
+```bash
+python run_simulation.py --config configs/automation_smoke.yaml
+```
+
+### 3) Open the desktop GUI
+
+```bash
+python run_gui.py
+```
+
+The GUI lets you:
+
+- load and edit YAML-backed scenario configs,
+- run the existing CLI entrypoint from a desktop workflow,
+- configure Analysis studies, including sensitivity and LHS,
+- inspect output artifacts and summaries.
+
+### 4) Use the public API
+
+```python
+from sim import SimulationConfig, SimulationSession
+
+cfg = SimulationConfig.from_yaml("configs/automation_smoke.yaml")
+session = SimulationSession.from_config(cfg)
+result = session.run()
+
+print(result.summary["scenario_name"])
+```
+
+### 5) Run campaign analysis
+
+Monte Carlo and sensitivity studies now live under the top-level `analysis` section in scenario configs.
+
+Sensitivity supports:
+
+- one-at-a-time parameter studies,
+- tracked metrics,
+- optional baseline comparison, and
+- Latin hypercube sampling (LHS).
+
+### 6) Run validation tooling
+
+Smoke validation suite:
+
+```bash
+python validation/automated_validation_harness.py --spec configs/validation_harness_smoke.yaml
+```
+
+HPOP comparison:
+
+```bash
+python validation/hpop_compare.py --model two_body --dt 1 --duration-min 150 --plot-mode interactive
+```
+
+## Architecture At A Glance
 
 Each simulation step follows a deterministic order in [sim/core/kernel.py](/Users/adamcohen/Downloads/NonCooperativeRPO/sim/core/kernel.py):
 
-1. Truth propagation (dynamics)
-2. Sensor measurement generation
-3. Estimator update
-4. Controller execution (with runtime budget/deadline logic)
-5. Actuator application (limits/saturation/lag)
-6. Logging/metrics capture
+1. truth propagation,
+2. sensor measurement generation,
+3. estimator update,
+4. controller execution,
+5. actuator application, and
+6. logging and metrics capture.
+
+The broader project flow is:
+
+- scenario config defines vehicles, dynamics, outputs, and analysis settings,
+- the simulation engine executes a single run or campaign,
+- summaries, plots, animations, and analysis artifacts are written to the configured output directory,
+- validation and RL wrappers reuse the same underlying simulation stack rather than duplicating a separate physics engine.
 
 ## Repository Layout
 
 - `sim/core/` kernel, models, scheduling
-- `sim/config/` shared simulation fidelity profiles (`fast`, `ops`, `high_fidelity`)
+- `sim/config/` config schema, fidelity profiles, plugin validation
+- `sim/api.py` public programmatic simulation API
+- `sim/master_simulator.py` orchestration and campaign execution
+- `sim/master_outputs.py` plotting and animation helpers
 - `sim/dynamics/orbit/` orbital forces, integrators, atmosphere, spherical harmonics
 - `sim/dynamics/attitude/` rigid body dynamics and disturbance torques
 - `sim/actuators/` orbital and attitude actuator models
@@ -41,82 +146,47 @@ Each simulation step follows a deterministic order in [sim/core/kernel.py](/User
 - `sim/metrics/` scoring and engagement metrics
 - `sim/optimization/` gain tuning and PSO framework
 - `sim/rocket/` dedicated ascent engine
-- `sim/tests/` unit/regression tests
+- `sim_gui/` native desktop GUI
+- `machine_learning/` RL environments and training helpers
+- `validation/` validation tooling and external reference-model workflows
 - `examples/` runnable scripts and demos
 - `presets/` reusable parameter presets
-- `integrations/` external integration stubs (including cFS SIL bridge)
-- `validation/` validation tooling and external reference-model workflows
-- `archive/` legacy code retained out of active path
+- `integrations/` external integration stubs, including a cFS SIL bridge
+- `sim/tests/` unit and regression tests
 
-## Implemented Capability Snapshot
+## Capability Snapshot
 
-### Simulation Kernel
+### Simulation and Dynamics
 
-- Multi-object deterministic simulation loop
-- Controller compute budget tracking with overrun skip behavior
-- Runtime and skip logging per object
+- multi-object deterministic simulation loop,
+- two-body through higher-fidelity orbital propagation,
+- quaternion rigid-body attitude propagation,
+- drag, SRP, third-body, and spherical harmonics support,
+- actuator limits, lag, saturation, and mass depletion,
+- optional rectangular-prism coupling for drag/SRP projected area and torque effects.
 
-### Orbital Dynamics
+### Estimation, Control, and Mission Logic
 
-- Two-body ECI propagation
-- J2, J3, J4 perturbations
-- Generic spherical harmonics perturbation pipeline
-- Drag, SRP, third-body (Sun/Moon) plugins
-- Earth rotation in drag relative velocity calculation
-- Fixed-step RK4 and adaptive integration support
-- Atmosphere models:
-  - exponential
-  - USSA 1976
-  - NRLMSISE-00 (optional backend dependency)
-  - JB2008 (backend callable hook)
+- orbit EKF/UKF and attitude/joint estimation paths,
+- quaternion PD/PID, LQR, RIC wrappers, and snap-style attitude modes,
+- HCW LQR, stationkeeping, and predictive burn orbital control,
+- mission execution and objective composition for rocket and satellite scenarios,
+- object knowledge tracking with cadence, access conditions, and noise models.
 
-### Attitude Dynamics
+### Analysis and Validation
 
-- Quaternion + body rate rigid-body propagation
-- Disturbance torques:
-  - gravity-gradient
-  - magnetic dipole proxy
-  - drag torque
-  - SRP torque
-- Reaction wheel-compatible torque application path
-- Optional rectangular-prism coupling for drag/SRP projected area and face-based torques
+- single-run summaries, plots, and animations,
+- Monte Carlo campaigns with serial or parallel execution,
+- sensitivity studies including one-at-a-time and LHS methods,
+- HPOP cross-validation and config-driven validation suites,
+- JSON and Markdown reporting for automated validation runs.
 
-### Actuators and Maneuvering
+### Interfaces
 
-- Orbital actuator limits, lag, throttle dynamics, impulse-bit, mass depletion
-- Reaction wheel limits and momentum saturation
-- Impulsive and thrust-limited delta-V logic
-- Attitude-gated thrusting with angular tolerance
-- Integrated orbital-attitude maneuver coordination flow
-
-### Estimation and Knowledge
-
-- Orbit EKF/UKF
-- Attitude EKF and joint state estimators
-- Object knowledge tracking with update cadence, access conditions, and noise models
-
-### Control
-
-- Attitude:
-  - quaternion PD
-  - reaction wheel PD/PID
-  - small-angle LQR
-  - RIC-frame wrappers
-  - snap/snap-and-hold modes
-- Orbit:
-  - HCW LQR variants
-  - stationkeeping and safety-oriented controllers
-  - predictive burn scheduling
-
-### Mission Pose Command Generation
-
-Quaternion-only mission pointing commands are available in [pose_commands.py](/Users/adamcohen/Downloads/NonCooperativeRPO/sim/control/attitude/pose_commands.py):
-
-- `PoseCommandGenerator.sun_track(...)`
-- `PoseCommandGenerator.spotlight_latlon(...)`
-- `PoseCommandGenerator.spotlight_ric_direction(...)`
-
-These commands return desired `q_bn` targets and do not directly actuate the vehicle.
+- CLI entrypoint for scriptable runs,
+- desktop GUI for scenario editing and analysis workflows,
+- public Python API for programmatic runs and live stepping,
+- RL wrappers for Gymnasium-style and vectorized environments.
 
 ## Validation Status
 
@@ -136,7 +206,7 @@ For spherical harmonics parity, the validator can use HPOP’s `GGM03C.txt` coef
 
 ## Automated Validation Harness
 
-You can now run a config-driven validation suite that combines:
+You can run a config-driven validation suite that combines:
 
 - plugin/config validation,
 - end-to-end simulation runs, and
@@ -156,7 +226,7 @@ Default suite:
 python validation/automated_validation_harness.py --spec configs/validation_harness_default.yaml
 ```
 
-The default suite now includes:
+The default suite includes:
 
 - plugin validation,
 - a single-run integrated rendezvous benchmark,
@@ -171,26 +241,11 @@ Artifacts are written under the suite `output_dir`, including:
 - `validation_harness_report.json`
 - `validation_harness_report.md`
 
-## Quick Start
+## Additional Notes
 
-### 1) Create and activate venv
+### Headless automation and CI
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -r requirements.txt
-```
-
-### 2) Run a representative demo
-
-```bash
-python examples/Full_Framework_Demo.py
-```
-
-### 2a) Headless automation/CI run
-
-For non-interactive environments, use the automation smoke config:
+For non-interactive environments, use a save-mode config such as:
 
 ```bash
 python run_simulation.py --config configs/automation_smoke.yaml
@@ -198,27 +253,9 @@ python run_simulation.py --config configs/automation_smoke.yaml
 
 `run_master_simulation` also auto-switches `outputs.mode: interactive` to `save` when `SIM_AUTOMATION=1` or `CI=1`.
 
-### 2d) Native Desktop GUI
+### Fidelity profiles
 
-For a native operator-console workflow closer to a traditional desktop simulator, use the `PySide6` launcher:
-
-```bash
-python run_gui.py
-```
-
-This opens a local desktop window, not a browser page. The GUI:
-
-- loads and edits YAML-backed scenario configs
-- saves the current config to a chosen path
-- launches the existing [`run_simulation.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/run_simulation.py) entrypoint
-- streams console output into the application
-- lists generated output artifacts from the configured output directory
-
-This path is parallel to the CLI and does not replace it.
-
-### 2b) Use fidelity profiles
-
-Most modern demos now support a shared profile selector:
+Many demos support a shared profile selector:
 
 ```bash
 python examples/Full_Framework_Demo.py --profile ops
@@ -228,11 +265,11 @@ python examples/Orbit_SphericalHarmonics_8x8_Demo.py --profile high_fidelity
 
 Profiles:
 
-- `fast`: quickest turnaround (larger steps, minimal default modeling)
+- `fast`: quickest turnaround
 - `ops`: mission-engineering default balance
 - `high_fidelity`: tighter integration settings for validation-style runs
 
-### 2c) Initialize with Julian Date (epoch-aware dynamics)
+### Epoch-aware simulation time
 
 You can now initialize simulation time with a Julian date using `SimConfig.initial_jd_utc` or by setting `env["jd_utc_start"]`.
 When provided, the kernel populates `env["jd_utc"]` each step and enables simple analytic Sun/Moon ephemerides (`ephemeris_mode="analytic_simple"` by default), improving time dependence for:
@@ -256,12 +293,6 @@ Planetary third-body perturbations:
   - `ephemeris_mode="spice"` (with kernels), or
   - explicit `env["<planet>_pos_eci_km"]`, or
   - custom `env["ephemeris_body_callable"]` / `env["spice_body_ephemeris_callable"]`.
-
-### 3) Run a validation comparison against HPOP output
-
-```bash
-python validation/hpop_compare.py --model two_body --dt 1 --duration-min 150 --plot-mode interactive
-```
 
 ## Example Scripts
 
