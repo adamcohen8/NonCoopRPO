@@ -21,31 +21,31 @@ This folder contains a first-pass wiring pattern for running NASA cFS against th
 ### 1) Run mock cFS endpoint (no external cFS required)
 
 ```bash
-python /Users/adamcohen/Downloads/NonCooperativeRPO/integrations/cfs_sil/mock_cfs_endpoint.py --mode hold
+python integrations/cfs_sil/mock_cfs_endpoint.py --mode hold
 ```
 
 or with a simple prograde thrust command:
 
 ```bash
-python /Users/adamcohen/Downloads/NonCooperativeRPO/integrations/cfs_sil/mock_cfs_endpoint.py --mode prograde --accel-mag-km-s2 2e-6
+python integrations/cfs_sil/mock_cfs_endpoint.py --mode prograde --accel-mag-km-s2 2e-6
 ```
 
 ### 1b) Single-terminal launcher (starts both mock endpoint and sim loop)
 
 ```bash
-python /Users/adamcohen/Downloads/NonCooperativeRPO/integrations/cfs_sil/run_mock_sil_stack.py --mock-mode hold
+python integrations/cfs_sil/run_mock_sil_stack.py --mock-mode hold
 ```
 
 ### 2) (Optional) Run bridge demo endpoint
 
 ```bash
-python /Users/adamcohen/Downloads/NonCooperativeRPO/integrations/cfs_sil/python_bridge.py --demo
+python integrations/cfs_sil/python_bridge.py --demo
 ```
 
 ### 3) Run simulator loop with truth->bridge->command feedback
 
 ```bash
-python /Users/adamcohen/Downloads/NonCooperativeRPO/examples/CFS_SIL_SingleSat_Loop_Demo.py --plot-mode interactive
+python examples/CFS_SIL_SingleSat_Loop_Demo.py --plot-mode interactive
 ```
 
 This loop:

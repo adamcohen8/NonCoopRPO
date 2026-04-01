@@ -1,4 +1,4 @@
-# NonCooperativeRPO
+# Orbital Engagement Lab
 
 Integrated spacecraft simulation and analysis framework for rendezvous, proximity operations, control development, and mission concept prototyping.
 
@@ -37,11 +37,11 @@ It is less optimized for:
 
 There are five main ways to use the project:
 
-1. CLI single-run simulation via [`run_simulation.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/run_simulation.py)
-2. Native desktop GUI via [`run_gui.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/run_gui.py)
-3. Programmatic API via [`sim/api.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/sim/api.py)
+1. CLI single-run simulation via [`run_simulation.py`](run_simulation.py)
+2. Native desktop GUI via [`run_gui.py`](run_gui.py)
+3. Programmatic API via [`sim/api.py`](sim/api.py)
 4. Analysis campaigns using the `analysis` config section for Monte Carlo or sensitivity/LHS studies
-5. Validation workflows via [`validation/automated_validation_harness.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/validation/automated_validation_harness.py) and [`validation/hpop_compare.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/validation/hpop_compare.py)
+5. Validation workflows via [`validation/automated_validation_harness.py`](validation/automated_validation_harness.py) and [`validation/hpop_compare.py`](validation/hpop_compare.py)
 
 ## Quick Start
 
@@ -112,7 +112,7 @@ python validation/hpop_compare.py --model two_body --dt 1 --duration-min 150 --p
 
 ## Architecture At A Glance
 
-Each simulation step follows a deterministic order in [sim/core/kernel.py](/Users/adamcohen/Downloads/NonCooperativeRPO/sim/core/kernel.py):
+Each simulation step follows a deterministic order in [`sim/core/kernel.py`](sim/core/kernel.py):
 
 1. truth propagation,
 2. sensor measurement generation,
@@ -192,7 +192,7 @@ The broader project flow is:
 
 You have an active HPOP cross-validation workflow:
 
-- Comparison script: [hpop_compare.py](/Users/adamcohen/Downloads/NonCooperativeRPO/validation/hpop_compare.py)
+- Comparison script: [`hpop_compare.py`](validation/hpop_compare.py)
 - Supports model-by-model comparisons (`two_body`, `drag`, `srp`, `j2`, `j3`, `j4`, `j2j3`, `sh8x8`)
 - Uses fixed validation grid defaults:
   - `dt = 1 s`
@@ -326,7 +326,7 @@ Common entry points in `examples/`:
 
 ## Generic RL Environment
 
-There is now an MVP Gymnasium-style RL wrapper in [`machine_learning/gym_env.py`](/Users/adamcohen/Downloads/NonCooperativeRPO/machine_learning/gym_env.py).
+There is now an MVP Gymnasium-style RL wrapper in [`machine_learning/gym_env.py`](machine_learning/gym_env.py).
 
 It supports:
 
@@ -539,4 +539,4 @@ Use this as the base for extending to real cFS message interfaces.
 
 ## Roadmap Context
 
-The project is already beyond the initial kernel-only stage in [simulation_framework_roadmap.txt](/Users/adamcohen/Downloads/NonCooperativeRPO/simulation_framework_roadmap.txt), with most phases implemented and active validation now in progress.
+The project is already beyond the initial kernel-only stage in [`simulation_framework_roadmap.txt`](simulation_framework_roadmap.txt), with most phases implemented and active validation now in progress.

@@ -610,7 +610,7 @@ class MainWindow(QMainWindow):
         self._update_window_title()
 
     def _build_ui(self) -> None:
-        self.setWindowTitle("NonCooperativeRPO Operator Console")
+        self.setWindowTitle("Orbital Engagement Lab Operator Console")
         self.resize(1360, 900)
 
         central = QWidget(self)
@@ -3426,7 +3426,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message, 10000)
 
     def _build_preview_run_config(self, cfg_dict: dict, saved_config_path: Path) -> Path:
-        self.preview_temp_dir = tempfile.TemporaryDirectory(prefix="noncoop_gui_preview_")
+        self.preview_temp_dir = tempfile.TemporaryDirectory(prefix="orbital_engagement_lab_preview_")
         preview_root = Path(self.preview_temp_dir.name)
         run_cfg = copy.deepcopy(cfg_dict)
         run_cfg.setdefault("outputs", {})
@@ -3489,7 +3489,7 @@ class MainWindow(QMainWindow):
 
     def _update_window_title(self) -> None:
         marker = "*" if self.is_dirty else ""
-        self.setWindowTitle(f"{marker}{self.loaded_config_path.name} - NonCooperativeRPO Operator Console")
+        self.setWindowTitle(f"{marker}{self.loaded_config_path.name} - Orbital Engagement Lab Operator Console")
 
     def _prompt_discard_changes(self) -> bool:
         if not self.is_dirty:

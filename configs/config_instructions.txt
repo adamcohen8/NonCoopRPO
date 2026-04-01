@@ -15,9 +15,9 @@ Quick Start
    cp configs/simulation_template.yaml configs/my_scenario.yaml
 2. Edit your scenario values in configs/my_scenario.yaml.
 3. Validate load/parsing:
-   .venv/bin/python examples/Simulation_Config_Load_Demo.py --config /Users/adamcohen/Downloads/NonCooperativeRPO/configs/my_scenario.yaml
+   .venv/bin/python examples/Simulation_Config_Load_Demo.py --config configs/my_scenario.yaml
 4. Run the master simulator from config only:
-   .venv/bin/python run_simulation.py --config /Users/adamcohen/Downloads/NonCooperativeRPO/configs/my_scenario.yaml
+   .venv/bin/python run_simulation.py --config configs/my_scenario.yaml
 
 Top-Level Sections
 - scenario_name: Human-readable scenario label.

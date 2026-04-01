@@ -1,2 +1,1 @@
-"""Native desktop GUI for NonCooperativeRPO."""
-
+"""Native desktop GUI for Orbital Engagement Lab."""

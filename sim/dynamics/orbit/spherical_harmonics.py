@@ -308,8 +308,12 @@ def _cached_real_terms(
     if coeff_path:
         path = Path(coeff_path).expanduser().resolve()
     else:
-        cache_dir = Path.home() / ".noncooprpo" / "gravity_models"
-        path = cache_dir / f"{model.upper()}.gfc"
+        preferred_cache_dir = Path.home() / ".orbital_engagement_lab" / "gravity_models"
+        legacy_cache_dir = Path.home() / ".noncooprpo" / "gravity_models"
+        preferred_path = preferred_cache_dir / f"{model.upper()}.gfc"
+        legacy_path = legacy_cache_dir / f"{model.upper()}.gfc"
+        # Preserve older cached downloads while moving new cache writes to the renamed project namespace.
+        path = legacy_path if not preferred_path.exists() and legacy_path.exists() else preferred_path
         if not path.exists():
             if not allow_download:
                 raise FileNotFoundError(

@@ -1,5 +1,5 @@
 Verification and Validation (V&V) Plan
-Project: NonCooperativeRPO
+Project: Orbital Engagement Lab
 Use Case: ASAT missile + interceptor with proprietary guidance
 Date: 2026-03-12
 
@@ -122,4 +122,3 @@ Immediate Next 4 Tasks (Recommended)
 2. Define envelope-specific tolerance tables (LEO, high-LEO, cislunar) and wire them into the harness.
 3. Add EKF consistency tests (NIS/NEES) and include them in CI.
 4. Stand up first integrated ASAT benchmark campaign and produce a baseline validation report template.
-
