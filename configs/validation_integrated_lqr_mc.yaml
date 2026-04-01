@@ -1,0 +1,230 @@
+scenario_name: "validation_integrated_lqr_mc"
+
+metadata:
+  owner: "validation"
+  notes: "Monte Carlo benchmark for EKF-fed HCW LQR rendezvous pursuit."
+
+rocket:
+  enabled: false
+  role: "rocket"
+
+chaser:
+  enabled: true
+  role: "chaser"
+  specs:
+    preset_satellite: "BASIC_SATELLITE"
+    dry_mass_kg: 180.0
+    fuel_mass_kg: 20.0
+    thruster: "BASIC_CHEMICAL_Z_BOTTOM"
+    attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
+  initial_state:
+    relative_to_target_ric:
+      frame: "curv"
+      state: [0.0, -3.0, 0.0, 0.0, 0.0, 0.0]
+    attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+    angular_rate_body_rad_s: [0.0, 0.0, 0.0]
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.lqr"
+    class_name: "HCWLQRController"
+    params:
+      mean_motion_rad_s: 0.001078
+      max_accel_km_s2: 2.0e-5
+      design_dt_s: 10.0
+      ric_curv_state_slice: [0, 6]
+      chief_eci_state_slice: [6, 12]
+  attitude_control:
+    kind: "python"
+    module: "sim.control.attitude.surrogate_snap"
+    class_name: "SurrogateSnapECIController"
+    params:
+      desired_attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+      cancel_rate_mag_rad_s2: 1.0
+      rate_tolerance_rad_s: 1.0e-3
+      slew_time_180_s: 1.0
+      pointing_sigma_deg: 0.05
+      default_dt_s: 0.05
+      rng_seed: 7
+  mission_strategy:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "PursuitMissionStrategy"
+    params:
+      target_id: "target"
+      use_knowledge_for_targeting: true
+      max_accel_km_s2: 2.0e-5
+      align_to_thrust: true
+  mission_execution:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "PredictiveBurnExecution"
+    params:
+      target_id: "target"
+      use_knowledge_for_targeting: true
+      lead_time_s: 0.0
+      predict_dt_s: 1.0
+      orbit_controller_budget_ms: 40.0
+      attitude_controller_budget_ms: 10.0
+      thruster_direction_body: [1.0, 0.0, 0.0]
+      alignment_tolerance_deg: 15.0
+      min_burn_accel_km_s2: 1.0e-10
+  mission_objectives: []
+  knowledge:
+    refresh_rate_s: 1.0
+    targets: ["target"]
+    conditions:
+      require_line_of_sight: true
+      max_range_km: 10000.0
+    sensor_error:
+      pos_sigma_km: [0.005, 0.005, 0.005]
+      vel_sigma_km_s: [0.00005, 0.00005, 0.00005]
+    estimation:
+      type: "ekf"
+
+target:
+  enabled: true
+  role: "target"
+  specs:
+    preset_satellite: "BASIC_SATELLITE"
+    dry_mass_kg: 360.0
+    fuel_mass_kg: 0.0
+    attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
+  initial_state:
+    coes:
+      a_km: 7000.0
+      ecc: 0.0
+      inc_deg: 45.0
+      raan_deg: 0.0
+      argp_deg: 0.0
+      true_anomaly_deg: 0.0
+    attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+    angular_rate_body_rad_s: [0.0, 0.0, 0.0]
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.zero_controller"
+    class_name: "ZeroController"
+    params: {}
+  attitude_control:
+    kind: "python"
+    module: "sim.control.attitude.surrogate_snap"
+    class_name: "SurrogateSnapECIController"
+    params:
+      desired_attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+      cancel_rate_mag_rad_s2: 1.0
+      rate_tolerance_rad_s: 1.0e-3
+      slew_time_180_s: 1.0
+      pointing_sigma_deg: 0.05
+      default_dt_s: 0.05
+      rng_seed: 3
+  mission_strategy:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "HoldMissionStrategy"
+    params:
+      attitude_mode: "sun_track"
+      boresight_body: [1.0, 0.0, 0.0]
+  mission_execution:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "ControllerPointingExecution"
+    params:
+      thruster_direction_body: [1.0, 0.0, 0.0]
+      alignment_tolerance_deg: 10.0
+      require_attitude_alignment: false
+  mission_objectives: []
+  knowledge:
+    refresh_rate_s: 5.0
+    targets: ["chaser"]
+    conditions:
+      require_line_of_sight: true
+      max_range_km: 50000.0
+    sensor_error:
+      pos_sigma_km: [0.02, 0.02, 0.02]
+      vel_sigma_km_s: [0.0002, 0.0002, 0.0002]
+    estimation:
+      type: "ekf"
+
+simulator:
+  scenario_type: "auto"
+  duration_s: 1000.0
+  dt_s: 5.0
+  dynamics:
+    orbit:
+      orbit_substep_s: 5.0
+      model: "two_body"
+      j2: false
+      j3: false
+      j4: false
+      drag: false
+      srp: false
+    attitude:
+      enabled: true
+      attitude_substep_s: 0.1
+      disturbance_torques:
+        gravity_gradient: false
+        magnetic: false
+        drag: false
+        srp: false
+    rocket:
+      enabled: false
+  environment:
+    ephemeris_mode: "analytic_simple"
+    atmosphere_env: {}
+  plugin_validation:
+    strict: true
+  termination:
+    earth_impact_enabled: true
+    earth_radius_km: 6378.137
+
+outputs:
+  output_dir: "outputs/validation_integrated_lqr_mc"
+  mode: "save"
+  stats:
+    enabled: true
+    print_summary: false
+    save_json: false
+    save_csv: false
+    save_full_log: false
+  plots:
+    enabled: false
+    figure_ids: []
+  animations:
+    enabled: false
+    types: []
+  monte_carlo:
+    save_iteration_summaries: false
+    save_aggregate_summary: true
+    save_histograms: false
+    display_histograms: false
+    save_ops_dashboard: false
+    display_ops_dashboard: false
+    save_raw_runs: false
+    baseline_summary_json: ""
+    success_termination_reasons: ["rocket_orbit_insertion"]
+    catastrophic_failure_reasons: ["terminated_early:earth_impact"]
+    require_rocket_insertion: false
+    gates:
+      min_closest_approach_km: 0.20
+      max_duration_s: 1500.0
+      max_total_dv_m_s: 250.0
+      max_guardrail_events: 10
+
+monte_carlo:
+  enabled: true
+  iterations: 8
+  base_seed: 3200
+  parallel_enabled: false
+  parallel_workers: 1
+  variations:
+    - parameter_path: "chaser.initial_state.relative_to_target_ric.state[1]"
+      mode: "normal"
+      mean: -3.0
+      std: 0.5
+    - parameter_path: "chaser.initial_state.relative_to_target_ric.state[0]"
+      mode: "normal"
+      mean: 0.0
+      std: 0.2
+    - parameter_path: "chaser.initial_state.relative_to_target_ric.state[5]"
+      mode: "normal"
+      mean: 0.0
+      std: 0.0005

@@ -1,0 +1,36 @@
+suite_name: "validation_harness_smoke"
+output_dir: "../outputs/validation_harness_smoke"
+
+benchmarks:
+  - name: "plugin_validation_smoke"
+    kind: "plugin_validation"
+    description: "Validate plugin pointers on the automation smoke scenario."
+    config_path: "automation_smoke.yaml"
+    checks:
+      valid:
+        equals: true
+      error_count:
+        equals: 0
+
+  - name: "simulation_smoke"
+    kind: "simulation"
+    description: "Run the automation smoke scenario and assert a clean nominal completion."
+    config_path: "automation_smoke.yaml"
+    checks:
+      monte_carlo.enabled:
+        equals: false
+      run.terminated_early:
+        equals: false
+      run.duration_s:
+        max: 120.0
+
+  - name: "hpop_two_body_leo"
+    kind: "hpop"
+    description: "Cross-check the two-body orbit propagator against the bundled HPOP reference."
+    envelope: "leo"
+    hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
+    params:
+      model: "two_body"
+      plot_mode: "save"
+      dt_s: 1.0
+      duration_s: 600.0

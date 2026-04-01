@@ -1,0 +1,158 @@
+suite_name: "validation_harness_default"
+output_dir: "../outputs/validation_harness_default"
+
+tolerance_tables:
+  leo:
+    pos_err_rms_m:
+      max: 50000.0
+    pos_err_max_m:
+      max: 150000.0
+    vel_err_rms_mm_s:
+      max: 20000.0
+    vel_err_max_mm_s:
+      max: 50000.0
+  integrated_rpo:
+    derived.closest_approach_km:
+      max: 10.0
+    derived.total_dv_m_s:
+      max: 250.0
+    derived.guardrail_events:
+      max: 10
+    derived.knowledge_finite_fraction.chaser.target:
+      min: 0.95
+    run.knowledge_consistency_by_observer.chaser.target.update_rate:
+      min: 0.90
+    run.knowledge_consistency_by_observer.chaser.target.nis_mean:
+      max: 250.0
+    run.knowledge_consistency_by_observer.chaser.target.nees_mean:
+      max: 200.0
+    run.knowledge_consistency_by_observer.chaser.target.pos_error_rms_km:
+      max: 0.10
+  monte_carlo_rpo:
+    aggregate_stats.pass_rate:
+      min: 0.60
+    aggregate_stats.p_catastrophic_outcome:
+      max: 0.0
+    aggregate_stats.p_exceed_dv_budget:
+      max: 0.25
+    aggregate_stats.guardrail_violation_rate:
+      max: 0.50
+    commander_brief.analysis_confidence.unique_seed_count:
+      min: 4
+    aggregate_stats.knowledge_consistency_by_observer.chaser.target.update_rate:
+      min: 0.90
+    aggregate_stats.knowledge_consistency_by_observer.chaser.target.nis_mean:
+      max: 250.0
+    aggregate_stats.knowledge_consistency_by_observer.chaser.target.nees_mean:
+      max: 200.0
+    aggregate_stats.knowledge_consistency_by_observer.chaser.target.pos_error_rms_km:
+      max: 0.15
+  monte_carlo_orbit:
+    aggregate_stats.pass_rate:
+      min: 0.75
+    aggregate_stats.terminated_early_rate:
+      max: 0.0
+    aggregate_stats.total_dv_m_s_p95:
+      max: 0.10
+    commander_brief.analysis_confidence.unique_seed_count:
+      min: 4
+
+benchmarks:
+  - name: "plugin_validation_smoke"
+    kind: "plugin_validation"
+    description: "Validate plugin wiring on the headless smoke scenario."
+    config_path: "automation_smoke.yaml"
+    checks:
+      valid:
+        equals: true
+      error_count:
+        equals: 0
+
+  - name: "simulation_smoke"
+    kind: "simulation"
+    description: "Run the smoke scenario and ensure the nominal single-run path completes."
+    config_path: "automation_smoke.yaml"
+    checks:
+      monte_carlo.enabled:
+        equals: false
+      run.terminated_early:
+        equals: false
+      run.duration_s:
+        max: 120.0
+
+  - name: "integrated_lqr_single"
+    kind: "simulation"
+    description: "Single-run integrated rendezvous benchmark with EKF-fed HCW LQR control."
+    envelope: "integrated_rpo"
+    config_path: "validation_integrated_lqr_single.yaml"
+    checks:
+      monte_carlo.enabled:
+        equals: false
+      run.terminated_early:
+        equals: false
+
+  - name: "integrated_lqr_mc"
+    kind: "simulation"
+    description: "Monte Carlo rendezvous benchmark for integrated guidance, control, and knowledge stack."
+    envelope: "monte_carlo_rpo"
+    config_path: "validation_integrated_lqr_mc.yaml"
+    checks:
+      monte_carlo.enabled:
+        equals: true
+      aggregate_stats.closest_approach_km_p50:
+        max: 5.0
+
+  - name: "orbit_high_fidelity_mc"
+    kind: "simulation"
+    description: "Monte Carlo stability benchmark for high-fidelity orbit perturbation stack."
+    envelope: "monte_carlo_orbit"
+    config_path: "validation_orbit_high_fidelity_mc.yaml"
+    checks:
+      monte_carlo.enabled:
+        equals: true
+      aggregate_stats.closest_approach_km_p05:
+        min: 0.20
+
+  - name: "hpop_two_body_leo"
+    kind: "hpop"
+    description: "Two-body parity against bundled HPOP reference."
+    envelope: "leo"
+    hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
+    params:
+      model: "two_body"
+      plot_mode: "save"
+      dt_s: 1.0
+      duration_s: 600.0
+
+  - name: "hpop_j2_leo"
+    kind: "hpop"
+    description: "J2 parity against bundled HPOP reference."
+    envelope: "leo"
+    hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
+    params:
+      model: "j2"
+      plot_mode: "save"
+      dt_s: 1.0
+      duration_s: 600.0
+
+  - name: "hpop_j3_leo"
+    kind: "hpop"
+    description: "J3 parity against bundled HPOP reference."
+    envelope: "leo"
+    hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
+    params:
+      model: "j3"
+      plot_mode: "save"
+      dt_s: 1.0
+      duration_s: 600.0
+
+  - name: "hpop_sh8x8_leo"
+    kind: "hpop"
+    description: "8x8 spherical harmonics parity against bundled HPOP reference."
+    envelope: "leo"
+    hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
+    params:
+      model: "sh8x8"
+      plot_mode: "save"
+      dt_s: 1.0
+      duration_s: 600.0
