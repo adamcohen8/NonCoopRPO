@@ -67,6 +67,7 @@ def ensure_sections(data: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("simulator", {})
     out.setdefault("outputs", {})
     out.setdefault("monte_carlo", {})
+    out.setdefault("analysis", {})
     out["simulator"].setdefault("dynamics", {})
     out["outputs"].setdefault("stats", {})
     out["outputs"].setdefault("plots", {})

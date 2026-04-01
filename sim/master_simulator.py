@@ -12,6 +12,7 @@ import multiprocessing as mp
 import os
 from pathlib import Path
 import queue as queue_mod
+from statistics import NormalDist
 import subprocess
 import time
 from typing import Any, Callable
@@ -278,6 +279,27 @@ def _deep_set(root: dict[str, Any], path: str, value: Any) -> None:
         cur = cur[tok]
 
 
+def _deep_get(root: dict[str, Any], path: str, default: Any = None) -> Any:
+    parts = path.split(".")
+    cur: Any = root
+    for tok in parts:
+        if "[" in tok and tok.endswith("]"):
+            key, idx_txt = tok[:-1].split("[", 1)
+            idx = int(idx_txt)
+            if key:
+                if not isinstance(cur, dict) or key not in cur:
+                    return default
+                cur = cur[key]
+            if not isinstance(cur, list) or idx < 0 or idx >= len(cur):
+                return default
+            cur = cur[idx]
+            continue
+        if not isinstance(cur, dict) or tok not in cur:
+            return default
+        cur = cur[tok]
+    return cur
+
+
 def _closest_approach_from_run_payload(run_output: dict[str, Any]) -> float:
     closest_approach_km = float("nan")
     try:
@@ -319,6 +341,319 @@ def _relative_range_series_from_run_payload(run_output: dict[str, Any]) -> dict[
         }
     except (TypeError, ValueError, KeyError, IndexError):
         return None
+
+
+def _analysis_study_type(cfg: SimulationScenarioConfig) -> str:
+    if bool(cfg.analysis.enabled):
+        return str(cfg.analysis.study_type or "monte_carlo").strip().lower()
+    if bool(cfg.monte_carlo.enabled):
+        return "monte_carlo"
+    return "single_run"
+
+
+def _analysis_parallel_settings(cfg: SimulationScenarioConfig) -> tuple[bool, int]:
+    if bool(cfg.analysis.enabled):
+        return bool(cfg.analysis.execution.parallel_enabled), int(cfg.analysis.execution.parallel_workers or 0)
+    return bool(cfg.monte_carlo.parallel_enabled), int(cfg.monte_carlo.parallel_workers or 0)
+
+
+def _analysis_metrics(cfg: SimulationScenarioConfig) -> list[str]:
+    metrics = [str(x).strip() for x in list(cfg.analysis.metrics or []) if str(x).strip()]
+    if metrics:
+        return metrics
+    return [
+        "summary.duration_s",
+        "summary.terminated_early",
+        "summary.termination_reason",
+        "derived.closest_approach_km",
+    ]
+
+
+def _extract_analysis_metric(run_payload: dict[str, Any], metric_path: str) -> Any:
+    path = str(metric_path or "").strip()
+    if not path:
+        return None
+    if path == "derived.closest_approach_km":
+        value = _closest_approach_from_run_payload(run_payload)
+        return float(value) if np.isfinite(value) else None
+    if path.startswith("summary."):
+        return _deep_get(dict(run_payload.get("summary", {}) or {}), path[len("summary."):], default=None)
+    if path.startswith("payload."):
+        return _deep_get(run_payload, path[len("payload."):], default=None)
+    return _deep_get(run_payload, path, default=None)
+
+
+def _extract_analysis_metrics(run_payload: dict[str, Any], metric_paths: list[str]) -> dict[str, Any]:
+    return {path: _extract_analysis_metric(run_payload, path) for path in metric_paths}
+
+
+def _serialize_analysis_value(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.12g}"
+    if isinstance(value, (int, bool)):
+        return str(value)
+    if value is None:
+        return "null"
+    return json.dumps(value, sort_keys=True)
+
+
+def _prepare_analysis_run_config(
+    cdict: dict[str, Any],
+    *,
+    outdir: Path,
+    run_prefix: str,
+    iteration: int,
+) -> dict[str, Any]:
+    mode = str(cdict.get("outputs", {}).get("mode", "interactive"))
+    if mode == "interactive":
+        cdict.setdefault("outputs", {})["mode"] = "save"
+    cdict.setdefault("outputs", {})["output_dir"] = str(outdir / f"{run_prefix}_{iteration:04d}")
+    return cdict
+
+
+def _prepare_oaat_sensitivity_runs(
+    *,
+    cfg: SimulationScenarioConfig,
+    root: dict[str, Any],
+    outdir: Path,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    iteration = 0
+    for param in cfg.analysis.sensitivity.parameters:
+        parameter_path = str(param.parameter_path)
+        if not parameter_path:
+            raise ValueError("analysis.sensitivity.parameters[*].parameter_path must be non-empty.")
+        values = list(param.values or [])
+        if not values:
+            raise ValueError(f"analysis.sensitivity.parameters[{parameter_path!r}] must provide at least one value.")
+        for value_index, value in enumerate(values):
+            cdict = _prepare_analysis_run_config(
+                deepcopy(root),
+                outdir=outdir,
+                run_prefix="sensitivity_run",
+                iteration=iteration,
+            )
+            _deep_set(cdict, parameter_path, value)
+            prepared.append(
+                {
+                    "iteration": iteration,
+                    "parameter_path": parameter_path,
+                    "parameter_value": value,
+                    "value_index": value_index,
+                    "sampled_parameters": {parameter_path: value},
+                    "config_dict": cdict,
+                }
+            )
+            iteration += 1
+    return prepared
+
+
+def _lhs_parameter_value(param: Any, unit_sample: float) -> float:
+    u = float(np.clip(float(unit_sample), 1.0e-12, 1.0 - 1.0e-12))
+    distribution = str(getattr(param, "distribution", "uniform") or "uniform").strip().lower()
+    if distribution == "uniform":
+        low = getattr(param, "low", None)
+        high = getattr(param, "high", None)
+        if low is None or high is None:
+            raise ValueError(f"LHS parameter '{param.parameter_path}' requires low/high for uniform distribution.")
+        return float(low) + u * (float(high) - float(low))
+    if distribution == "normal":
+        mean = getattr(param, "mean", None)
+        std = getattr(param, "std", None)
+        if mean is None or std is None or float(std) <= 0.0:
+            raise ValueError(f"LHS parameter '{param.parameter_path}' requires mean/std with std > 0.")
+        return float(NormalDist(mu=float(mean), sigma=float(std)).inv_cdf(u))
+    raise ValueError(f"Unsupported LHS distribution '{distribution}' for parameter '{param.parameter_path}'.")
+
+
+def _prepare_lhs_sensitivity_runs(
+    *,
+    cfg: SimulationScenarioConfig,
+    root: dict[str, Any],
+    outdir: Path,
+) -> list[dict[str, Any]]:
+    params = list(cfg.analysis.sensitivity.parameters or [])
+    samples = int(cfg.analysis.sensitivity.samples or 0)
+    if samples <= 0:
+        raise ValueError("analysis.sensitivity.samples must be > 0 for method='lhs'.")
+    if not params:
+        raise ValueError("analysis.sensitivity.parameters must contain at least one parameter.")
+
+    rng = np.random.default_rng(int(cfg.analysis.sensitivity.seed))
+    sampled_columns: dict[str, np.ndarray] = {}
+    for param in params:
+        bins = np.arange(samples, dtype=float)
+        unit_samples = (rng.permutation(samples).astype(float) + rng.random(samples)) / float(samples)
+        sampled_columns[str(param.parameter_path)] = np.array(
+            [_lhs_parameter_value(param, unit) for unit in unit_samples],
+            dtype=float,
+        )
+
+    prepared: list[dict[str, Any]] = []
+    for iteration in range(samples):
+        cdict = _prepare_analysis_run_config(
+            deepcopy(root),
+            outdir=outdir,
+            run_prefix="sensitivity_lhs_run",
+            iteration=iteration,
+        )
+        sampled_parameters: dict[str, Any] = {}
+        for param in params:
+            parameter_path = str(param.parameter_path)
+            value = float(sampled_columns[parameter_path][iteration])
+            _deep_set(cdict, parameter_path, value)
+            sampled_parameters[parameter_path] = value
+        prepared.append(
+            {
+                "iteration": iteration,
+                "parameter_path": None,
+                "parameter_value": None,
+                "value_index": iteration,
+                "sampled_parameters": sampled_parameters,
+                "config_dict": cdict,
+            }
+        )
+    return prepared
+
+
+def _build_lhs_parameter_summaries(
+    *,
+    cfg: SimulationScenarioConfig,
+    metric_paths: list[str],
+    run_details: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not run_details:
+        return [], []
+    summaries: list[dict[str, Any]] = []
+    rankings: list[dict[str, Any]] = []
+    for param in cfg.analysis.sensitivity.parameters:
+        parameter_path = str(param.parameter_path)
+        x_vals: list[float] = []
+        for detail in run_details:
+            value = dict(detail.get("sampled_parameters", {}) or {}).get(parameter_path)
+            if isinstance(value, bool):
+                x_vals.append(1.0 if value else 0.0)
+            elif isinstance(value, (int, float, np.integer, np.floating)):
+                x_vals.append(float(value))
+            else:
+                x_vals.append(float("nan"))
+        x = np.array(x_vals, dtype=float)
+        finite_x = np.isfinite(x)
+        metric_correlations: dict[str, dict[str, float]] = {}
+        max_abs_corr = 0.0
+        for metric_path in metric_paths:
+            y_vals: list[float] = []
+            for detail in run_details:
+                value = dict(detail.get("metrics", {}) or {}).get(metric_path)
+                if isinstance(value, bool):
+                    y_vals.append(1.0 if value else 0.0)
+                elif isinstance(value, (int, float, np.integer, np.floating)):
+                    y_vals.append(float(value))
+                else:
+                    y_vals.append(float("nan"))
+            y = np.array(y_vals, dtype=float)
+            finite = finite_x & np.isfinite(y)
+            corr = float("nan")
+            if int(np.sum(finite)) >= 3:
+                x_ok = x[finite]
+                y_ok = y[finite]
+                if not np.allclose(np.std(x_ok), 0.0) and not np.allclose(np.std(y_ok), 0.0):
+                    corr = float(np.corrcoef(x_ok, y_ok)[0, 1])
+            abs_corr = abs(corr) if np.isfinite(corr) else float("nan")
+            if np.isfinite(abs_corr):
+                max_abs_corr = max(max_abs_corr, abs_corr)
+            metric_correlations[metric_path] = {
+                "correlation": corr,
+                "abs_correlation": abs_corr,
+            }
+        finite_param = x[finite_x]
+        summary = {
+            "parameter_path": parameter_path,
+            "distribution": str(param.distribution),
+            "sample_count": int(finite_param.size),
+            "value_stats": {
+                "mean": float(np.mean(finite_param)) if finite_param.size else float("nan"),
+                "min": float(np.min(finite_param)) if finite_param.size else float("nan"),
+                "max": float(np.max(finite_param)) if finite_param.size else float("nan"),
+                "std": float(np.std(finite_param)) if finite_param.size else float("nan"),
+            },
+            "metric_correlations": metric_correlations,
+        }
+        summaries.append(summary)
+        rankings.append(
+            {
+                "parameter_path": parameter_path,
+                "distribution": str(param.distribution),
+                "sample_count": int(finite_param.size),
+                "max_abs_correlation": float(max_abs_corr),
+            }
+        )
+    rankings.sort(key=lambda row: float(row.get("max_abs_correlation", 0.0)), reverse=True)
+    return summaries, rankings
+
+
+def _aggregate_sensitivity_parameter_runs(
+    *,
+    parameter_path: str,
+    metric_paths: list[str],
+    run_details: list[dict[str, Any]],
+    baseline_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for detail in run_details:
+        if str(detail.get("parameter_path", "")) != parameter_path:
+            continue
+        value = detail.get("parameter_value")
+        value_key = _serialize_analysis_value(value)
+        bucket = grouped.setdefault(
+            value_key,
+            {
+                "parameter_value": value,
+                "runs": [],
+                "metrics": {},
+            },
+        )
+        bucket["runs"].append(detail)
+
+    for bucket in grouped.values():
+        metric_summary: dict[str, Any] = {}
+        for metric_path in metric_paths:
+            values = [run["metrics"].get(metric_path) for run in bucket["runs"]]
+            numeric = np.array(
+                [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and np.isfinite(float(v))],
+                dtype=float,
+            )
+            entry: dict[str, Any] = {"sample_count": int(len(values))}
+            if numeric.size:
+                entry["mean"] = float(np.mean(numeric))
+                entry["min"] = float(np.min(numeric))
+                entry["max"] = float(np.max(numeric))
+                baseline_value = baseline_metrics.get(metric_path)
+                if isinstance(baseline_value, (int, float)) and not isinstance(baseline_value, bool) and np.isfinite(float(baseline_value)):
+                    entry["delta_from_baseline"] = float(np.mean(numeric) - float(baseline_value))
+            else:
+                non_null = [v for v in values if v is not None]
+                if non_null:
+                    entry["values"] = non_null
+                    baseline_value = baseline_metrics.get(metric_path)
+                    if baseline_value is not None:
+                        entry["matches_baseline"] = bool(all(v == baseline_value for v in non_null))
+            metric_summary[metric_path] = entry
+        bucket["metrics"] = metric_summary
+
+    response_curve = [grouped[key] for key in sorted(grouped.keys())]
+    max_abs_delta = 0.0
+    for bucket in response_curve:
+        for metric_entry in dict(bucket.get("metrics", {}) or {}).values():
+            delta = metric_entry.get("delta_from_baseline")
+            if isinstance(delta, (int, float)) and np.isfinite(float(delta)):
+                max_abs_delta = max(max_abs_delta, abs(float(delta)))
+    return {
+        "parameter_path": parameter_path,
+        "value_count": int(len(response_curve)),
+        "max_abs_delta_from_baseline": float(max_abs_delta),
+        "response_curve": response_curve,
+    }
 
 
 def _mc_initial_relative_ric_curv_samples(
@@ -1585,11 +1920,14 @@ def _write_commander_brief_markdown(path: Path, brief: dict[str, Any]) -> None:
 
 def _format_single_run_summary(summary: dict[str, Any]) -> str:
     lines: list[str] = []
+    scenario_description = str(summary.get("scenario_description", "") or "").strip()
     lines.append("")
     lines.append("=" * 72)
     lines.append("MASTER SIMULATION SUMMARY")
     lines.append("=" * 72)
     lines.append(f"Scenario   : {summary.get('scenario_name', 'unknown')}")
+    if scenario_description:
+        lines.append(f"Desc       : {scenario_description}")
     lines.append(f"Objects    : {', '.join(summary.get('objects', []))}")
     lines.append(f"Samples    : {summary.get('samples', 0)}")
     lines.append(
@@ -2227,6 +2565,7 @@ class _SingleRunEngine:
 
         summary = {
             "scenario_name": self.cfg.scenario_name,
+            "scenario_description": self.cfg.scenario_description,
             "objects": sorted(list(self.agents.keys())),
             "samples": int(n_used),
             "dt_s": self.dt,
@@ -2298,6 +2637,244 @@ def _coerce_noninteractive_for_automation(cfg: SimulationScenarioConfig) -> Simu
     return scenario_config_from_dict(root)
 
 
+def _run_sensitivity_analysis(
+    *,
+    config_path: str | Path,
+    cfg: SimulationScenarioConfig,
+    step_callback: Callable[[int, int], None] | None = None,
+    batch_callback: Callable[[int, int], None] | None = None,
+    batch_progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    sensitivity_method = str(cfg.analysis.sensitivity.method).strip().lower()
+    if sensitivity_method not in {"one_at_a_time", "lhs"}:
+        raise ValueError("analysis.sensitivity.method must be one of: one_at_a_time, lhs.")
+    if not cfg.analysis.sensitivity.parameters:
+        raise ValueError("analysis.sensitivity.parameters must contain at least one parameter.")
+
+    root = cfg.to_dict()
+    outdir = Path(cfg.outputs.output_dir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    metric_paths = _analysis_metrics(cfg)
+
+    if sensitivity_method == "lhs":
+        prepared = _prepare_lhs_sensitivity_runs(cfg=cfg, root=root, outdir=outdir)
+    else:
+        prepared = _prepare_oaat_sensitivity_runs(cfg=cfg, root=root, outdir=outdir)
+
+    baseline: dict[str, Any] | None = None
+    baseline_summary_json = str(cfg.analysis.baseline.summary_json or "").strip()
+    strict_plugins = bool(cfg.simulator.plugin_validation.get("strict", True))
+    if baseline_summary_json:
+        bpath = Path(baseline_summary_json)
+        if not bpath.is_absolute():
+            bpath = Path(config_path).resolve().parent / bpath
+        baseline_payload = _load_json_file(bpath)
+        if baseline_payload is not None:
+            baseline = {
+                "source": "file",
+                "path": str(bpath),
+                "summary": dict(baseline_payload.get("summary", baseline_payload.get("run", {})) or {}),
+                "metrics": dict(baseline_payload.get("aggregate_stats", {}) or {}),
+            }
+    elif bool(cfg.analysis.baseline.enabled):
+        baseline_root = deepcopy(root)
+        mode = str(baseline_root.get("outputs", {}).get("mode", "interactive"))
+        if mode == "interactive":
+            baseline_root.setdefault("outputs", {})["mode"] = "save"
+        baseline_root.setdefault("outputs", {})["output_dir"] = str(outdir / "sensitivity_baseline")
+        baseline_payload = _run_single_config(scenario_config_from_dict(baseline_root))
+        baseline = {
+            "source": "run",
+            "summary": dict(baseline_payload.get("summary", {}) or {}),
+            "metrics": _extract_analysis_metrics(baseline_payload, metric_paths),
+        }
+
+    parallel_enabled, max_workers_cfg = _analysis_parallel_settings(cfg)
+    total_iters = int(len(prepared))
+    default_workers = max(1, (os.cpu_count() or 1) - 1)
+    parallel_workers = max_workers_cfg if max_workers_cfg > 0 else default_workers
+    parallel_workers = max(1, min(parallel_workers, max(total_iters, 1)))
+    parallel_active = bool(parallel_enabled and total_iters > 1)
+    parallel_fallback_reason: str | None = None
+    completed: dict[int, dict[str, Any]] = {}
+
+    if parallel_active:
+        manager = None
+        progress_queue = None
+        thread_env_prev = _set_parallel_worker_thread_limits(default_threads="1")
+        try:
+            manager = mp.Manager()
+            progress_queue = manager.Queue()
+            tasks = [
+                {
+                    "iteration": p["iteration"],
+                    "config_dict": p["config_dict"],
+                    "strict_plugins": strict_plugins,
+                    "progress_queue": progress_queue,
+                    "progress_emit_every": 20,
+                }
+                for p in prepared
+            ]
+            with ProcessPoolExecutor(max_workers=parallel_workers) as ex:
+                fut_to_idx = {ex.submit(_run_mc_iteration_from_dict, t): int(t["iteration"]) for t in tasks}
+                pending = set(fut_to_idx.keys())
+                while pending:
+                    done_now, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                    for fut in done_now:
+                        idx = fut_to_idx[fut]
+                        completed[idx] = fut.result()
+                        if batch_callback is not None:
+                            try:
+                                batch_callback(len(completed), total_iters)
+                            except Exception as exc:
+                                logger.warning("Disabling analysis callback after runtime error: %s", exc)
+                                batch_callback = None
+                    if progress_queue is not None:
+                        while True:
+                            try:
+                                evt = progress_queue.get_nowait()
+                            except queue_mod.Empty:
+                                break
+                            except Exception:
+                                break
+                            if batch_progress_callback is not None:
+                                try:
+                                    batch_progress_callback(dict(evt or {}))
+                                except Exception as exc:
+                                    logger.warning("Disabling analysis progress callback after runtime error: %s", exc)
+                                    batch_progress_callback = None
+        except (OSError, PermissionError, NotImplementedError, EOFError) as exc:
+            parallel_active = False
+            parallel_fallback_reason = f"{type(exc).__name__}: {exc}"
+            logger.warning("Parallel sensitivity analysis unavailable, falling back to serial execution: %s", exc)
+        finally:
+            if progress_queue is not None:
+                try:
+                    while True:
+                        evt = progress_queue.get_nowait()
+                        if batch_progress_callback is not None:
+                            batch_progress_callback(dict(evt or {}))
+                except Exception:
+                    pass
+            if manager is not None:
+                try:
+                    manager.shutdown()
+                except Exception:
+                    pass
+            _restore_env_vars(thread_env_prev)
+
+    if not parallel_active:
+        completed_count = 0
+        for prepared_run in prepared:
+            run_cfg = scenario_config_from_dict(dict(prepared_run["config_dict"]))
+            if strict_plugins:
+                errs = validate_scenario_plugins(run_cfg)
+                if errs:
+                    msg = (
+                        "Plugin validation failed in sensitivity run {i}:\n- ".format(i=int(prepared_run["iteration"]))
+                        + "\n- ".join(errs)
+                    )
+                    raise ValueError(msg)
+            run_payload = _run_single_config(run_cfg, step_callback=step_callback)
+            completed[int(prepared_run["iteration"])] = {
+                "iteration": int(prepared_run["iteration"]),
+                "summary": dict(run_payload.get("summary", {}) or {}),
+                "closest_approach_km": _closest_approach_from_run_payload(run_payload),
+                "payload": run_payload,
+            }
+            completed_count += 1
+            if batch_callback is not None:
+                try:
+                    batch_callback(completed_count, total_iters)
+                except Exception as exc:
+                    logger.warning("Disabling analysis callback after runtime error: %s", exc)
+                    batch_callback = None
+
+    runs: list[dict[str, Any]] = []
+    for prepared_run in sorted(prepared, key=lambda entry: int(entry["iteration"])):
+        idx = int(prepared_run["iteration"])
+        completed_run = dict(completed.get(idx, {}) or {})
+        payload = dict(completed_run.get("payload", {}) or {})
+        if not payload:
+            payload = {
+                "summary": dict(completed_run.get("summary", {}) or {}),
+            }
+        metrics = _extract_analysis_metrics(payload, metric_paths)
+        run_entry = {
+            "iteration": idx,
+            "parameter_path": prepared_run.get("parameter_path"),
+            "parameter_value": prepared_run.get("parameter_value"),
+            "value_index": int(prepared_run["value_index"]),
+            "sampled_parameters": dict(prepared_run.get("sampled_parameters", {}) or {}),
+            "summary": dict(completed_run.get("summary", payload.get("summary", {})) or {}),
+            "closest_approach_km": _safe_float(completed_run.get("closest_approach_km")),
+            "metrics": metrics,
+        }
+        runs.append(run_entry)
+
+    baseline_metrics = dict(baseline.get("metrics", {}) or {}) if baseline is not None else {}
+    if sensitivity_method == "lhs":
+        parameter_summaries, parameter_rankings = _build_lhs_parameter_summaries(
+            cfg=cfg,
+            metric_paths=metric_paths,
+            run_details=runs,
+        )
+    else:
+        parameter_summaries = [
+            _aggregate_sensitivity_parameter_runs(
+                parameter_path=str(param.parameter_path),
+                metric_paths=metric_paths,
+                run_details=runs,
+                baseline_metrics=baseline_metrics,
+            )
+            for param in cfg.analysis.sensitivity.parameters
+        ]
+        parameter_rankings = sorted(
+            (
+                {
+                    "parameter_path": str(summary.get("parameter_path", "")),
+                    "max_abs_delta_from_baseline": float(summary.get("max_abs_delta_from_baseline", 0.0)),
+                    "value_count": int(summary.get("value_count", 0)),
+                }
+                for summary in parameter_summaries
+            ),
+            key=lambda entry: float(entry["max_abs_delta_from_baseline"]),
+            reverse=True,
+        )
+
+    agg = {
+        "config_path": str(Path(config_path).resolve()),
+        "scenario_name": cfg.scenario_name,
+        "scenario_description": cfg.scenario_description,
+        "analysis": {
+            "enabled": True,
+            "study_type": "sensitivity",
+            "method": sensitivity_method,
+            "parallel_enabled": bool(parallel_active),
+            "parallel_requested": bool(parallel_enabled and total_iters > 1),
+            "parallel_workers": int(parallel_workers if parallel_active else 1),
+            "metrics": metric_paths,
+            "parameter_count": int(len(cfg.analysis.sensitivity.parameters)),
+            "run_count": int(len(runs)),
+            "samples": int(cfg.analysis.sensitivity.samples if sensitivity_method == "lhs" else len(runs)),
+            "seed": int(cfg.analysis.sensitivity.seed),
+        },
+        "monte_carlo": {"enabled": False},
+        "baseline": baseline,
+        "parameter_summaries": parameter_summaries,
+        "parameter_rankings": parameter_rankings,
+        "runs": runs,
+        "artifacts": {},
+    }
+    if parallel_fallback_reason is not None:
+        agg["analysis"]["parallel_fallback_reason"] = str(parallel_fallback_reason)
+
+    summary_path = outdir / "master_analysis_sensitivity_summary.json"
+    write_json(str(summary_path), agg)
+    agg["artifacts"]["summary_json"] = str(summary_path)
+    return agg
+
+
 def run_master_simulation(
     config_path: str | Path,
     step_callback: Callable[[int, int], None] | None = None,
@@ -2311,7 +2888,16 @@ def run_master_simulation(
         if errs:
             msg = "Plugin validation failed:\n- " + "\n- ".join(errs)
             raise ValueError(msg)
-    if not cfg.monte_carlo.enabled:
+    study_type = _analysis_study_type(cfg)
+    if study_type == "sensitivity":
+        return _run_sensitivity_analysis(
+            config_path=config_path,
+            cfg=cfg,
+            step_callback=step_callback,
+            batch_callback=mc_callback,
+            batch_progress_callback=mc_progress_callback,
+        )
+    if study_type != "monte_carlo":
         from sim.api import SimulationConfig, SimulationSession
 
         session = SimulationSession.from_config(SimulationConfig(cfg, source_path=Path(config_path).resolve()))
@@ -2319,6 +2905,7 @@ def run_master_simulation(
         return {
             "config_path": str(Path(config_path).resolve()),
             "scenario_name": cfg.scenario_name,
+            "scenario_description": cfg.scenario_description,
             "monte_carlo": {"enabled": False},
             "run": result.summary,
         }
@@ -2745,6 +3332,7 @@ def run_master_simulation(
     agg = {
         "config_path": str(Path(config_path).resolve()),
         "scenario_name": cfg.scenario_name,
+        "scenario_description": cfg.scenario_description,
         "monte_carlo": {
             "enabled": True,
             "iterations": int(cfg.monte_carlo.iterations),

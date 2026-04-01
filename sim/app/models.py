@@ -13,6 +13,8 @@ class ConfigSummary:
     objects: list[str] = field(default_factory=list)
     output_dir: str = "outputs"
     output_mode: str = "interactive"
+    analysis_enabled: bool = False
+    analysis_study_type: str = "single_run"
     monte_carlo_enabled: bool = False
     mc_iterations: int = 1
 
@@ -32,4 +34,3 @@ class RunResult:
     elapsed_s: float = 0.0
     output_dir: str | None = None
     scenario_name: str | None = None
-

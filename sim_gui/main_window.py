@@ -583,6 +583,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_dirty_tracking()
         self.mc_enabled_check.toggled.connect(self._refresh_outputs_mode_ui)
+        self.analysis_study_type_combo.currentTextChanged.connect(self._refresh_outputs_mode_ui)
         self.orbit_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         self.attitude_substep_enabled_check.toggled.connect(self._refresh_substep_visibility)
         for combo in (
@@ -701,7 +702,7 @@ class MainWindow(QMainWindow):
 
         self.tabs.addTab(self._build_scenario_tab(), "Scenario")
         self.tabs.addTab(self._build_objects_tab(), "Objects")
-        self.tabs.addTab(self._build_monte_carlo_tab(), "Monte Carlo")
+        self.tabs.addTab(self._build_monte_carlo_tab(), "Analysis")
         self.tabs.addTab(self._build_outputs_tab(), "Outputs")
         self.tabs.addTab(self._build_yaml_tab(), "Advanced YAML")
         self.tabs.addTab(self._build_results_tab(), "Results")
@@ -728,10 +729,10 @@ class MainWindow(QMainWindow):
         objects_item.addChild(self._nav_item("Chaser", 1))
         objects_item.addChild(self._nav_item("Rocket", 1))
 
-        mc_item = QTreeWidgetItem(["Monte Carlo"])
+        mc_item = QTreeWidgetItem(["Analysis"])
         mc_item.setData(0, Qt.UserRole, 2)
         mc_item.addChild(self._nav_item("Execution", 2))
-        mc_item.addChild(self._nav_item("Variations", 2))
+        mc_item.addChild(self._nav_item("Study Inputs", 2))
 
         outputs_item = QTreeWidgetItem(["Outputs"])
         outputs_item.setData(0, Qt.UserRole, 3)
@@ -765,6 +766,7 @@ class MainWindow(QMainWindow):
     def _connect_dirty_tracking(self) -> None:
         line_edits = [
             self.scenario_name_edit,
+            self.scenario_description_edit,
             self.output_dir_edit,
             self.reference_object_edit,
             self.mc_baseline_summary_json,
@@ -781,6 +783,7 @@ class MainWindow(QMainWindow):
         combo_boxes = [
             self.orbit_integrator_combo,
             self.output_mode_combo,
+            self.analysis_study_type_combo,
             self.chaser_init_mode,
             self.target_preset,
             self.chaser_preset,
@@ -921,6 +924,8 @@ class MainWindow(QMainWindow):
         self.scenario_form_layout = layout
         self.scenario_name_edit = QLineEdit()
         self.scenario_name_edit.setMinimumWidth(320)
+        self.scenario_description_edit = QLineEdit()
+        self.scenario_description_edit.setMinimumWidth(320)
         self.duration_spin = QDoubleSpinBox()
         self.duration_spin.setRange(0.001, 1.0e9)
         self.duration_spin.setDecimals(3)
@@ -961,6 +966,7 @@ class MainWindow(QMainWindow):
         self.att_srp_check = QCheckBox("SRP Torque")
 
         layout.addRow("Scenario Name", self.scenario_name_edit)
+        layout.addRow("Scenario Description", self.scenario_description_edit)
         layout.addRow("Duration (s)", self.duration_spin)
         layout.addRow("dt (s)", self.dt_spin)
         layout.addRow("Orbit Integrator", self.orbit_integrator_combo)
@@ -1032,7 +1038,9 @@ class MainWindow(QMainWindow):
     def _build_monte_carlo_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        self.mc_enabled_check = QCheckBox("Enable Monte Carlo")
+        self.mc_enabled_check = QCheckBox("Enable Analysis")
+        self.analysis_study_type_combo = QComboBox()
+        self.analysis_study_type_combo.addItems(["Monte Carlo", "Sensitivity"])
         self.mc_iterations_spin = QSpinBox()
         self.mc_iterations_spin.setRange(1, 1000000)
         self.mc_parallel_check = QCheckBox("Parallel")
@@ -1042,6 +1050,10 @@ class MainWindow(QMainWindow):
         self.mc_base_seed_spin.setRange(0, 2**31 - 1)
         execution_row = QHBoxLayout()
         execution_row.addWidget(self.mc_enabled_check)
+        execution_row.addSpacing(12)
+        execution_row.addWidget(QLabel("Study"))
+        execution_row.addWidget(self.analysis_study_type_combo)
+        execution_row.addSpacing(12)
         execution_row.addWidget(QLabel("Iterations"))
         execution_row.addWidget(self.mc_iterations_spin)
         execution_row.addSpacing(12)
@@ -1067,7 +1079,7 @@ class MainWindow(QMainWindow):
             " top: -3px;"
             "}"
         )
-        variations_box = QGroupBox("Variations")
+        variations_box = QGroupBox("Study Inputs")
         variations_box.setStyleSheet(group_box_style)
         variations_box_layout = QVBoxLayout(variations_box)
         self.mc_variations_list = QListWidget()
@@ -1075,7 +1087,7 @@ class MainWindow(QMainWindow):
         variations_box_layout.addWidget(self.mc_variations_list)
         variations_split.addWidget(variations_box, 2)
 
-        editor_box = QGroupBox("Variation Editor")
+        editor_box = QGroupBox("Input Editor")
         editor_box.setStyleSheet(group_box_style)
         editor_box_layout = QHBoxLayout(editor_box)
         editor_box_layout.setContentsMargins(8, 16, 8, 8)
@@ -2383,21 +2395,45 @@ class MainWindow(QMainWindow):
         sim = cfg.get("simulator", {})
         outputs = cfg.get("outputs", {})
         mc = cfg.get("monte_carlo", {})
+        analysis = dict(cfg.get("analysis", {}) or {})
         target = cfg.get("target", {})
         chaser = cfg.get("chaser", {})
         rocket = cfg.get("rocket", {})
 
         self.scenario_name_edit.setText(str(cfg.get("scenario_name", "")))
+        self.scenario_description_edit.setText(str(cfg.get("scenario_description", "") or ""))
         self.duration_spin.setValue(float(sim.get("duration_s", 3600.0)))
         self.dt_spin.setValue(float(sim.get("dt_s", 1.0)))
         self.output_mode_combo.setCurrentText(str(outputs.get("mode", "interactive")))
         self.output_dir_edit.setText(str(outputs.get("output_dir", "outputs/gui_run")))
-        self.mc_enabled_check.setChecked(bool(mc.get("enabled", False)))
-        self.mc_iterations_spin.setValue(int(mc.get("iterations", 1)))
-        self.mc_parallel_check.setChecked(bool(mc.get("parallel_enabled", False)))
-        self.mc_workers_spin.setValue(int(mc.get("parallel_workers", 0)))
-        self.mc_base_seed_spin.setValue(int(mc.get("base_seed", 0)))
-        self.mc_variations = [dict(v or {}) for v in list(mc.get("variations", []) or [])]
+        analysis_enabled = bool(analysis.get("enabled", False))
+        study_type = str(analysis.get("study_type", "monte_carlo") or "monte_carlo").strip().lower()
+        if not analysis_enabled and not bool(mc.get("enabled", False)):
+            study_type = "monte_carlo"
+        self.mc_enabled_check.setChecked(bool(analysis_enabled or mc.get("enabled", False)))
+        self.analysis_study_type_combo.setCurrentText("Sensitivity" if study_type == "sensitivity" else "Monte Carlo")
+        if study_type == "sensitivity" and analysis_enabled:
+            execution = dict(analysis.get("execution", {}) or {})
+            sensitivity = dict(analysis.get("sensitivity", {}) or {})
+            params = list(sensitivity.get("parameters", []) or [])
+            self.mc_iterations_spin.setValue(max(sum(len(list(dict(p or {}).get("values", []) or [])) for p in params), 1))
+            self.mc_parallel_check.setChecked(bool(execution.get("parallel_enabled", False)))
+            self.mc_workers_spin.setValue(int(execution.get("parallel_workers", 0)))
+            self.mc_base_seed_spin.setValue(int(dict(analysis.get("monte_carlo", {}) or {}).get("base_seed", mc.get("base_seed", 0)) or 0))
+            self.mc_variations = [
+                {
+                    "parameter_path": str(dict(param or {}).get("parameter_path", dict(param or {}).get("path", "")) or ""),
+                    "mode": "choice",
+                    "options": list(dict(param or {}).get("values", []) or []),
+                }
+                for param in params
+            ]
+        else:
+            self.mc_iterations_spin.setValue(int(mc.get("iterations", 1)))
+            self.mc_parallel_check.setChecked(bool(mc.get("parallel_enabled", False)))
+            self.mc_workers_spin.setValue(int(mc.get("parallel_workers", 0)))
+            self.mc_base_seed_spin.setValue(int(mc.get("base_seed", 0)))
+            self.mc_variations = [dict(v or {}) for v in list(mc.get("variations", []) or [])]
         self._rebuild_mc_category_combo()
         self._refresh_mc_parameter_options()
         self._refresh_mc_variations_list()
@@ -2541,9 +2577,11 @@ class MainWindow(QMainWindow):
     def _collect_config_from_widgets(self) -> dict:
         cfg = dict(self.current_config)
         cfg["scenario_name"] = self.scenario_name_edit.text().strip()
+        cfg["scenario_description"] = self.scenario_description_edit.text().strip()
         sim = cfg.setdefault("simulator", {})
         outputs = cfg.setdefault("outputs", {})
         mc = cfg.setdefault("monte_carlo", {})
+        analysis = cfg.setdefault("analysis", {})
         target = cfg.setdefault("target", {})
         chaser = cfg.setdefault("chaser", {})
         rocket = cfg.setdefault("rocket", {})
@@ -2580,12 +2618,51 @@ class MainWindow(QMainWindow):
         outputs["output_dir"] = output_dir
         if self.output_dir_edit.text().strip() != output_dir:
             self.output_dir_edit.setText(output_dir)
-        mc["enabled"] = bool(self.mc_enabled_check.isChecked())
+        analysis_enabled = bool(self.mc_enabled_check.isChecked())
+        study_type = self._selected_analysis_study_type()
+        mc["enabled"] = bool(analysis_enabled and study_type == "monte_carlo")
         mc["iterations"] = int(self.mc_iterations_spin.value())
         mc["parallel_enabled"] = bool(self.mc_parallel_check.isChecked())
         mc["parallel_workers"] = int(self.mc_workers_spin.value())
         mc["base_seed"] = int(self.mc_base_seed_spin.value())
         mc["variations"] = copy.deepcopy(self.mc_variations)
+        analysis["enabled"] = analysis_enabled
+        analysis["study_type"] = study_type
+        analysis["execution"] = {
+            "parallel_enabled": bool(self.mc_parallel_check.isChecked()),
+            "parallel_workers": int(self.mc_workers_spin.value()),
+        }
+        analysis.setdefault("metrics", list(dict(self.current_config.get("analysis", {}) or {}).get("metrics", []) or []))
+        analysis.setdefault("baseline", dict(dict(self.current_config.get("analysis", {}) or {}).get("baseline", {}) or {}))
+        analysis["monte_carlo"] = {
+            "iterations": int(self.mc_iterations_spin.value()),
+            "base_seed": int(self.mc_base_seed_spin.value()),
+            "variations": copy.deepcopy(self.mc_variations),
+        }
+        if study_type == "sensitivity":
+            params = []
+            for variation in self.mc_variations:
+                values = list(dict(variation or {}).get("options", []) or [])
+                mode = str(dict(variation or {}).get("mode", "choice") or "choice").strip().lower()
+                if mode == "uniform":
+                    values = [dict(variation or {}).get("low"), dict(variation or {}).get("high")]
+                elif mode == "normal":
+                    mean = dict(variation or {}).get("mean")
+                    std = dict(variation or {}).get("std")
+                    if isinstance(mean, (int, float)) and isinstance(std, (int, float)):
+                        values = [float(mean) - float(std), float(mean), float(mean) + float(std)]
+                params.append(
+                    {
+                        "parameter_path": str(dict(variation or {}).get("parameter_path", "") or ""),
+                        "values": [v for v in values if v is not None],
+                    }
+                )
+            analysis["sensitivity"] = {
+                "method": "one_at_a_time",
+                "parameters": params,
+            }
+        else:
+            analysis["sensitivity"] = dict(dict(self.current_config.get("analysis", {}) or {}).get("sensitivity", {}) or {})
 
         target["enabled"] = bool(self.target_enabled.isChecked())
         target.setdefault("specs", {})["preset_satellite"] = self.target_preset.currentText().strip()
@@ -2817,6 +2894,7 @@ class MainWindow(QMainWindow):
     def _refresh_results_summary(self, output_dir: Path, files: list[Path], *, used_temp_dir: bool) -> None:
         summary_path = output_dir / "master_run_summary.json"
         mc_summary_path = output_dir / "master_monte_carlo_summary.json"
+        analysis_summary_path = output_dir / "master_analysis_sensitivity_summary.json"
         text = []
         if used_temp_dir:
             text.append(
@@ -2837,6 +2915,12 @@ class MainWindow(QMainWindow):
                 text.append(self._format_json_summary("Monte Carlo Summary", data))
             except Exception as exc:
                 text.append(f"Failed to read {mc_summary_path.name}: {exc}")
+        if analysis_summary_path.exists():
+            try:
+                data = json.loads(analysis_summary_path.read_text(encoding="utf-8"))
+                text.append(self._format_json_summary("Analysis Summary", data))
+            except Exception as exc:
+                text.append(f"Failed to read {analysis_summary_path.name}: {exc}")
         if not text:
             png_count = sum(1 for p in files if p.suffix.lower() in {".png", ".jpg", ".jpeg"})
             json_count = sum(1 for p in files if p.suffix.lower() == ".json")
@@ -3307,6 +3391,10 @@ class MainWindow(QMainWindow):
         self.validation_panel.show()
         self.validation_toggle.setText("Hide Details")
 
+    def _selected_analysis_study_type(self) -> str:
+        raw = self.analysis_study_type_combo.currentText().strip().lower()
+        return "sensitivity" if raw == "sensitivity" else "monte_carlo"
+
     def _toggle_validation_panel(self) -> None:
         if self.validation_panel.isVisible():
             self.validation_panel.hide()
@@ -3316,16 +3404,22 @@ class MainWindow(QMainWindow):
             self.validation_toggle.setText("Hide Details")
 
     def _refresh_outputs_mode_ui(self) -> None:
-        mc_enabled = bool(self.mc_enabled_check.isChecked())
-        if mc_enabled:
+        analysis_enabled = bool(self.mc_enabled_check.isChecked())
+        study_type = self._selected_analysis_study_type()
+        if analysis_enabled:
             self.outputs_stack.setCurrentIndex(1)
-            self.outputs_mode_label.setText(
-                "Monte Carlo is enabled. Configure campaign outputs, dashboards, and pass/fail gates here."
-            )
+            if study_type == "sensitivity":
+                self.outputs_mode_label.setText(
+                    "Sensitivity analysis is enabled. Configure campaign outputs here, and use Advanced YAML for tracked metrics or baseline settings."
+                )
+            else:
+                self.outputs_mode_label.setText(
+                    "Monte Carlo analysis is enabled. Configure campaign outputs, dashboards, and pass/fail gates here."
+                )
         else:
             self.outputs_stack.setCurrentIndex(0)
             self.outputs_mode_label.setText(
-                "Monte Carlo is disabled. Configure single-run plots, stats, and animations here."
+                "Analysis is disabled. Configure single-run plots, stats, and animations here."
             )
 
     def _refresh_substep_visibility(self) -> None:

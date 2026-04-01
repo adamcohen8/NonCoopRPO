@@ -87,14 +87,65 @@ class MonteCarloSection:
 
 
 @dataclass(frozen=True)
+class AnalysisExecutionSection:
+    parallel_enabled: bool = False
+    parallel_workers: int = 0
+
+
+@dataclass(frozen=True)
+class AnalysisBaselineSection:
+    enabled: bool = False
+    summary_json: str = ""
+
+
+@dataclass(frozen=True)
+class AnalysisMonteCarloSection:
+    iterations: int = 1
+    base_seed: int = 0
+    variations: list[MonteCarloVariation] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SensitivityParameter:
+    parameter_path: str
+    values: list[Any] = field(default_factory=list)
+    distribution: str = "uniform"
+    low: float | None = None
+    high: float | None = None
+    mean: float | None = None
+    std: float | None = None
+
+
+@dataclass(frozen=True)
+class SensitivitySection:
+    method: str = "one_at_a_time"
+    samples: int = 0
+    seed: int = 0
+    parameters: list[SensitivityParameter] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AnalysisSection:
+    enabled: bool = False
+    study_type: str = "monte_carlo"
+    execution: AnalysisExecutionSection = field(default_factory=AnalysisExecutionSection)
+    metrics: list[str] = field(default_factory=list)
+    baseline: AnalysisBaselineSection = field(default_factory=AnalysisBaselineSection)
+    monte_carlo: AnalysisMonteCarloSection = field(default_factory=AnalysisMonteCarloSection)
+    sensitivity: SensitivitySection = field(default_factory=SensitivitySection)
+
+
+@dataclass(frozen=True)
 class SimulationScenarioConfig:
     scenario_name: str = "unnamed_scenario"
+    scenario_description: str = ""
     rocket: AgentSection = field(default_factory=lambda: AgentSection(enabled=False, role="rocket"))
     chaser: AgentSection = field(default_factory=lambda: AgentSection(enabled=False, role="chaser"))
     target: AgentSection = field(default_factory=lambda: AgentSection(enabled=True, role="target"))
     simulator: SimulatorSection = field(default_factory=SimulatorSection)
     outputs: OutputsSection = field(default_factory=OutputsSection)
     monte_carlo: MonteCarloSection = field(default_factory=MonteCarloSection)
+    analysis: AnalysisSection = field(default_factory=AnalysisSection)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -241,6 +292,152 @@ def _parse_monte_carlo_section(value: Any) -> MonteCarloSection:
     return out
 
 
+def _parse_analysis_execution_section(value: Any, *, fallback: MonteCarloSection | None = None) -> AnalysisExecutionSection:
+    d = _as_dict(value, "analysis.execution")
+    default_parallel_enabled = bool(fallback.parallel_enabled) if fallback is not None else False
+    default_parallel_workers = int(fallback.parallel_workers) if fallback is not None else 0
+    out = AnalysisExecutionSection(
+        parallel_enabled=bool(d.get("parallel_enabled", default_parallel_enabled)),
+        parallel_workers=int(d.get("parallel_workers", default_parallel_workers)),
+    )
+    if out.parallel_workers < 0:
+        raise ValueError("analysis.execution.parallel_workers must be >= 0.")
+    return out
+
+
+def _parse_analysis_baseline_section(value: Any) -> AnalysisBaselineSection:
+    d = _as_dict(value, "analysis.baseline")
+    return AnalysisBaselineSection(
+        enabled=bool(d.get("enabled", False)),
+        summary_json=str(d.get("summary_json", "") or ""),
+    )
+
+
+def _parse_analysis_monte_carlo_section(value: Any, *, fallback: MonteCarloSection | None = None) -> AnalysisMonteCarloSection:
+    d = _as_dict(value, "analysis.monte_carlo")
+    vars_raw = d.get("variations")
+    if vars_raw is None:
+        variations = list(fallback.variations) if fallback is not None else []
+    else:
+        if not isinstance(vars_raw, list):
+            raise ValueError("analysis.monte_carlo.variations must be a list.")
+        variations = [_parse_mc_variation(v) for v in vars_raw]
+    default_iterations = int(fallback.iterations) if fallback is not None else 1
+    default_base_seed = int(fallback.base_seed) if fallback is not None else 0
+    out = AnalysisMonteCarloSection(
+        iterations=int(d.get("iterations", default_iterations)),
+        base_seed=int(d.get("base_seed", default_base_seed)),
+        variations=variations,
+    )
+    if out.iterations <= 0:
+        raise ValueError("analysis.monte_carlo.iterations must be positive.")
+    return out
+
+
+def _parse_sensitivity_parameter(value: Any) -> SensitivityParameter:
+    d = _as_dict(value, "analysis.sensitivity.parameter")
+    path = d.get("parameter_path", d.get("path"))
+    if not isinstance(path, str) or not path:
+        raise ValueError("analysis.sensitivity.parameters[*].parameter_path must be a non-empty string.")
+    values = d.get("values", [])
+    if not isinstance(values, list):
+        raise ValueError("analysis.sensitivity.parameters[*].values must be a list.")
+    distribution = str(d.get("distribution", "uniform")).strip().lower()
+    if distribution not in {"uniform", "normal"}:
+        raise ValueError("analysis.sensitivity.parameters[*].distribution must be one of: uniform, normal.")
+    return SensitivityParameter(
+        parameter_path=path,
+        values=list(values),
+        distribution=distribution,
+        low=float(d["low"]) if d.get("low") is not None else None,
+        high=float(d["high"]) if d.get("high") is not None else None,
+        mean=float(d["mean"]) if d.get("mean") is not None else None,
+        std=float(d["std"]) if d.get("std") is not None else None,
+    )
+
+
+def _parse_sensitivity_section(value: Any) -> SensitivitySection:
+    d = _as_dict(value, "analysis.sensitivity")
+    params_raw = d.get("parameters", []) or []
+    if not isinstance(params_raw, list):
+        raise ValueError("analysis.sensitivity.parameters must be a list.")
+    out = SensitivitySection(
+        method=str(d.get("method", "one_at_a_time")),
+        samples=int(d.get("samples", 0)),
+        seed=int(d.get("seed", 0)),
+        parameters=[_parse_sensitivity_parameter(v) for v in params_raw],
+    )
+    if out.method not in {"one_at_a_time", "lhs"}:
+        raise ValueError("analysis.sensitivity.method must be one of: one_at_a_time, lhs.")
+    if out.samples < 0:
+        raise ValueError("analysis.sensitivity.samples must be >= 0.")
+    return out
+
+
+def _parse_analysis_section(value: Any, *, legacy_mc: MonteCarloSection) -> AnalysisSection:
+    d = _as_dict(value, "analysis")
+    metrics = d.get("metrics", []) or []
+    if not isinstance(metrics, list):
+        raise ValueError("analysis.metrics must be a list.")
+    out = AnalysisSection(
+        enabled=bool(d.get("enabled", False)),
+        study_type=str(d.get("study_type", "monte_carlo")).strip().lower(),
+        execution=_parse_analysis_execution_section(d.get("execution"), fallback=legacy_mc),
+        metrics=[str(x) for x in metrics],
+        baseline=_parse_analysis_baseline_section(d.get("baseline")),
+        monte_carlo=_parse_analysis_monte_carlo_section(d.get("monte_carlo"), fallback=legacy_mc),
+        sensitivity=_parse_sensitivity_section(d.get("sensitivity")),
+    )
+    if out.study_type not in {"monte_carlo", "sensitivity"}:
+        raise ValueError("analysis.study_type must be one of: monte_carlo, sensitivity.")
+    return out
+
+
+def _analysis_from_legacy_monte_carlo(mc: MonteCarloSection) -> AnalysisSection:
+    return AnalysisSection(
+        enabled=bool(mc.enabled),
+        study_type="monte_carlo",
+        execution=AnalysisExecutionSection(
+            parallel_enabled=bool(mc.parallel_enabled),
+            parallel_workers=int(mc.parallel_workers),
+        ),
+        monte_carlo=AnalysisMonteCarloSection(
+            iterations=int(mc.iterations),
+            base_seed=int(mc.base_seed),
+            variations=list(mc.variations),
+        ),
+    )
+
+
+def _normalize_analysis_and_monte_carlo(
+    legacy_mc: MonteCarloSection,
+    analysis: AnalysisSection,
+) -> tuple[MonteCarloSection, AnalysisSection]:
+    if analysis.enabled and analysis.study_type == "monte_carlo":
+        normalized_mc = MonteCarloSection(
+            enabled=True,
+            iterations=int(analysis.monte_carlo.iterations),
+            base_seed=int(analysis.monte_carlo.base_seed),
+            parallel_enabled=bool(analysis.execution.parallel_enabled),
+            parallel_workers=int(analysis.execution.parallel_workers),
+            variations=list(analysis.monte_carlo.variations),
+        )
+        return normalized_mc, analysis
+    if analysis.enabled and analysis.study_type == "sensitivity":
+        normalized_mc = MonteCarloSection(
+            enabled=False,
+            iterations=max(int(legacy_mc.iterations), 1),
+            base_seed=int(legacy_mc.base_seed),
+            parallel_enabled=False,
+            parallel_workers=0,
+            variations=[],
+        )
+        return normalized_mc, analysis
+    if legacy_mc.enabled:
+        return legacy_mc, _analysis_from_legacy_monte_carlo(legacy_mc)
+    return legacy_mc, analysis
+
+
 def _parse_outputs_section(value: Any) -> OutputsSection:
     d = _as_dict(value, "outputs")
     out = OutputsSection(
@@ -260,14 +457,19 @@ def _parse_outputs_section(value: Any) -> OutputsSection:
 
 def scenario_config_from_dict(data: dict[str, Any]) -> SimulationScenarioConfig:
     root = _as_dict(data, "root")
+    legacy_mc = _parse_monte_carlo_section(root.get("monte_carlo"))
+    analysis = _parse_analysis_section(root.get("analysis"), legacy_mc=legacy_mc)
+    normalized_mc, normalized_analysis = _normalize_analysis_and_monte_carlo(legacy_mc, analysis)
     return SimulationScenarioConfig(
         scenario_name=str(root.get("scenario_name", "unnamed_scenario")),
+        scenario_description=str(root.get("scenario_description", "") or ""),
         rocket=_parse_agent_section(root.get("rocket"), role="rocket"),
         chaser=_parse_agent_section(root.get("chaser"), role="chaser"),
         target=_parse_agent_section(root.get("target"), role="target"),
         simulator=_parse_simulator_section(root.get("simulator")),
         outputs=_parse_outputs_section(root.get("outputs")),
-        monte_carlo=_parse_monte_carlo_section(root.get("monte_carlo")),
+        monte_carlo=normalized_mc,
+        analysis=normalized_analysis,
         metadata=dict(root.get("metadata", {}) or {}),
     )
 

@@ -45,6 +45,28 @@ def _pointer_label(ptr) -> str:
     return "custom"
 
 
+def _active_study_type(cfg) -> str:
+    if bool(getattr(getattr(cfg, "analysis", None), "enabled", False)):
+        return str(getattr(cfg.analysis, "study_type", "monte_carlo") or "monte_carlo").strip().lower()
+    if bool(cfg.monte_carlo.enabled):
+        return "monte_carlo"
+    return "single_run"
+
+
+def _batch_total_runs(cfg, study_type: str) -> int:
+    if study_type == "monte_carlo":
+        return int(max(cfg.monte_carlo.iterations, 0))
+    if study_type == "sensitivity":
+        return int(sum(len(list(param.values or [])) for param in list(cfg.analysis.sensitivity.parameters or [])))
+    return 0
+
+
+def _batch_parallel_settings(cfg, study_type: str) -> tuple[bool, int]:
+    if study_type == "sensitivity":
+        return bool(cfg.analysis.execution.parallel_enabled), int(cfg.analysis.execution.parallel_workers or 0)
+    return bool(cfg.monte_carlo.parallel_enabled), int(cfg.monte_carlo.parallel_workers or 0)
+
+
 def _print_run_header(config_path: str, cfg) -> None:
     objects = []
     for oid, sec in (("target", cfg.target), ("rocket", cfg.rocket), ("chaser", cfg.chaser)):
@@ -81,26 +103,37 @@ def _print_run_header(config_path: str, cfg) -> None:
             perturbations.append("Spherical Harmonics")
     orbital_txt = "2 Body" + (" + " + " + ".join(perturbations) if perturbations else "")
     attitude_txt = "Enabled" if att_enabled else "Disabled"
+    study_type = _active_study_type(cfg)
+    mode_label = {
+        "single_run": "Single Run",
+        "monte_carlo": "Monte Carlo",
+        "sensitivity": "Sensitivity",
+    }.get(study_type, study_type.title())
     print("")
     print("=" * 102)
     print("MASTER SIMULATION RUN")
     print("=" * 102)
     print(f"Config     : {Path(config_path).resolve()}")
     print(f"Scenario   : {cfg.scenario_name}")
-    print(f"Mode       : {'Monte Carlo' if bool(cfg.monte_carlo.enabled) else 'Single Run'}")
+    scenario_description = str(getattr(cfg, "scenario_description", "") or "").strip()
+    if scenario_description:
+        print(f"Desc       : {scenario_description}")
+    print(f"Mode       : {mode_label}")
     print(
         f"Timing     : duration={_fmt_float(float(cfg.simulator.duration_s), 1)} s, "
         f"dt={_fmt_float(float(cfg.simulator.dt_s), 3)} s, "
         f"steps={n_steps}"
     )
-    if bool(cfg.monte_carlo.enabled):
-        if bool(cfg.monte_carlo.parallel_enabled):
-            req_workers = int(cfg.monte_carlo.parallel_workers or 0)
+    if study_type in {"monte_carlo", "sensitivity"}:
+        total_runs = _batch_total_runs(cfg, study_type)
+        parallel_enabled, requested_workers = _batch_parallel_settings(cfg, study_type)
+        if parallel_enabled:
+            req_workers = int(requested_workers or 0)
             auto_workers = int(max(1, (os.cpu_count() or 1) - 1))
             workers_txt = req_workers if req_workers > 0 else f"auto({auto_workers})"
-            print(f"MC         : iterations={int(cfg.monte_carlo.iterations)}, parallel=on, workers={workers_txt}")
+            print(f"Analysis   : runs={total_runs}, parallel=on, workers={workers_txt}")
         else:
-            print(f"MC         : iterations={int(cfg.monte_carlo.iterations)}, parallel=off")
+            print(f"Analysis   : runs={total_runs}, parallel=off")
     print(f"Dynamics   : Orbital - {orbital_txt}, Attitude - {attitude_txt}")
     print(f"Objects    : {', '.join(objects) if objects else 'none'}")
     print("=" * 102)
@@ -110,12 +143,15 @@ def _print_single_run_summary(out: dict) -> None:
     run = dict(out.get("run", {}) or {})
     thrust = dict(run.get("thrust_stats", {}) or {})
     guardrails = dict(run.get("attitude_guardrail_stats", {}) or {})
+    scenario_description = str(out.get("scenario_description", run.get("scenario_description", "")) or "").strip()
     print("")
     print("=" * 102)
     print("MASTER SIMULATION COMPLETED")
     print("=" * 102)
     print(f"Config     : {out.get('config_path', '')}")
     print(f"Scenario   : {out.get('scenario_name', run.get('scenario_name', 'unknown'))}")
+    if scenario_description:
+        print(f"Desc       : {scenario_description}")
     print(f"Objects    : {', '.join(run.get('objects', []))}")
     print(
         f"Timing     : samples={run.get('samples', 0)}, "
@@ -159,16 +195,58 @@ def _print_monte_carlo_summary(out: dict) -> None:
     runs = list(out.get("runs", []) or [])
     agg_stats = dict(out.get("aggregate_stats", {}) or {})
     brief = dict(out.get("commander_brief", {}) or {})
+    scenario_description = str(out.get("scenario_description", "") or "").strip()
     guardrail_event_totals = [
         int(sum(int(v) for v in dict(dict(r.get("summary", {}) or {}).get("attitude_guardrail_stats", {})).values()))
         for r in runs
     ]
     print("")
     print("=" * 102)
+
+
+def _print_sensitivity_summary(out: dict) -> None:
+    analysis = dict(out.get("analysis", {}) or {})
+    baseline = dict(out.get("baseline", {}) or {})
+    rankings = list(out.get("parameter_rankings", []) or [])
+    scenario_description = str(out.get("scenario_description", "") or "").strip()
+    print("")
+    print("=" * 102)
+    print("MASTER ANALYSIS COMPLETED")
+    print("=" * 102)
+    _print_field("Config", str(out.get("config_path", "")))
+    _print_field("Scenario", str(out.get("scenario_name", "unknown")))
+    if scenario_description:
+        _print_field("Desc", scenario_description)
+    _print_field("Study", "Sensitivity")
+    _print_field("Method", str(analysis.get("method", "one_at_a_time")))
+    _print_field("Runs", str(int(analysis.get("run_count", len(out.get("runs", []) or [])))))
+    _print_field("Parameters", str(int(analysis.get("parameter_count", len(out.get("parameter_summaries", []) or [])))))
+    if baseline:
+        _print_field("Baseline", str(baseline.get("source", "available")))
+    if rankings:
+        top = rankings[0]
+        driver_score = None
+        if top.get("max_abs_delta_from_baseline") is not None:
+            try:
+                driver_score = f"|delta|={float(top.get('max_abs_delta_from_baseline', 0.0)):.3g}"
+            except (TypeError, ValueError):
+                driver_score = None
+        if driver_score is None and top.get("max_abs_correlation") is not None:
+            try:
+                driver_score = f"|corr|={float(top.get('max_abs_correlation', 0.0)):.3g}"
+            except (TypeError, ValueError):
+                driver_score = None
+        _print_field(
+            "Top Driver",
+            f"{top.get('parameter_path', 'unknown')}" + (f" ({driver_score})" if driver_score else ""),
+        )
+    print("=" * 102)
     print("MASTER MONTE CARLO COMPLETED")
     print("=" * 102)
     _print_field("Config", str(out.get("config_path", "")))
     _print_field("Scenario", str(out.get("scenario_name", "unknown")))
+    if scenario_description:
+        _print_field("Desc", scenario_description)
     _print_field("Iterations", str(len(runs)))
     if agg_stats:
         d_min = float(agg_stats.get("duration_s_min", 0.0))
@@ -522,9 +600,12 @@ def main() -> None:
     use_tqdm = _should_use_tqdm()
 
     # Show progress only for the integration loop; config parsing and plotting are excluded.
-    if cfg.monte_carlo.enabled:
-        mc_total = int(max(cfg.monte_carlo.iterations, 0))
-        if bool(cfg.monte_carlo.parallel_enabled):
+    study_type = _active_study_type(cfg)
+    if study_type in {"monte_carlo", "sensitivity"}:
+        batch_label = "Monte Carlo" if study_type == "monte_carlo" else "Sensitivity"
+        mc_total = _batch_total_runs(cfg, study_type)
+        parallel_enabled, configured_workers = _batch_parallel_settings(cfg, study_type)
+        if parallel_enabled:
             mc_bar = None
             worker_bars = []
             pid_to_slot: dict[int, int] = {}
@@ -534,9 +615,9 @@ def main() -> None:
                     from tqdm.auto import tqdm  # type: ignore
 
                     if mc_total > 0:
-                        mc_bar = tqdm(total=mc_total, desc="Monte Carlo", unit="run", position=0)
+                        mc_bar = tqdm(total=mc_total, desc=batch_label, unit="run", position=0)
                     last_done = 0
-                    max_workers_cfg = int(cfg.monte_carlo.parallel_workers or 0)
+                    max_workers_cfg = int(configured_workers or 0)
                     default_workers = int(max(1, (os.cpu_count() or 1) - 1))
                     display_workers = int(max_workers_cfg if max_workers_cfg > 0 else default_workers)
                     display_workers = max(1, min(display_workers, mc_total))
@@ -615,7 +696,7 @@ def main() -> None:
                             mc_bar.update(mc_total - mc_bar.n)
                         mc_bar.close()
             else:
-                mc_report = _make_plain_progress_reporter("Monte Carlo")
+                mc_report = _make_plain_progress_reporter(batch_label)
                 worker_last: dict[int, int] = {}
 
                 def _on_mc_done(done: int, total: int) -> None:
@@ -654,7 +735,7 @@ def main() -> None:
                     from tqdm.auto import tqdm  # type: ignore
 
                     if mc_total > 0:
-                        mc_bar = tqdm(total=mc_total, desc="Monte Carlo", unit="run")
+                        mc_bar = tqdm(total=mc_total, desc=batch_label, unit="run")
 
                     def _on_mc_step(step: int, total: int) -> None:
                         nonlocal sim_bar, started_runs, last_step, run_done, mc_bar
@@ -706,7 +787,7 @@ def main() -> None:
                             mc_bar.update(mc_total - mc_bar.n)
                         mc_bar.close()
             else:
-                overall_report = _make_plain_progress_reporter("Monte Carlo")
+                overall_report = _make_plain_progress_reporter(batch_label)
                 run_report = None
 
                 def _on_mc_step(step: int, total: int) -> None:
@@ -754,7 +835,9 @@ def main() -> None:
         finally:
             if pbar is not None:
                 pbar.close()
-    if bool(out.get("monte_carlo", {}).get("enabled", False)):
+    if str(dict(out.get("analysis", {}) or {}).get("study_type", "")) == "sensitivity":
+        _print_sensitivity_summary(out)
+    elif bool(out.get("monte_carlo", {}).get("enabled", False)):
         _print_monte_carlo_summary(out)
     else:
         _print_single_run_summary(out)

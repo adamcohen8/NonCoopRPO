@@ -9,6 +9,7 @@ class TestScenarioYamlConfig(unittest.TestCase):
         cfg = scenario_config_from_dict(
             {
                 "scenario_name": "unit_test",
+                "scenario_description": "Unit test scenario",
                 "rocket": {
                     "enabled": True,
                     "base_guidance": {"module": "sim.rocket.guidance", "class_name": "OpenLoopPitchProgramGuidance"},
@@ -28,6 +29,7 @@ class TestScenarioYamlConfig(unittest.TestCase):
             }
         )
         self.assertEqual(cfg.scenario_name, "unit_test")
+        self.assertEqual(cfg.scenario_description, "Unit test scenario")
         self.assertTrue(cfg.rocket.enabled)
         self.assertIsNotNone(cfg.rocket.base_guidance)
         self.assertEqual(len(cfg.rocket.guidance_modifiers), 1)
@@ -48,6 +50,81 @@ class TestScenarioYamlConfig(unittest.TestCase):
                     "outputs": {"mode": "bad_mode"},
                 }
             )
+
+    def test_analysis_section_normalizes_monte_carlo_and_sensitivity(self):
+        mc_cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "analysis_mc",
+                "simulator": {"duration_s": 20.0, "dt_s": 1.0},
+                "analysis": {
+                    "enabled": True,
+                    "study_type": "monte_carlo",
+                    "execution": {"parallel_enabled": True, "parallel_workers": 4},
+                    "monte_carlo": {
+                        "iterations": 12,
+                        "base_seed": 9,
+                        "variations": [{"parameter_path": "simulator.dt_s", "options": [0.5, 1.0]}],
+                    },
+                },
+            }
+        )
+        self.assertTrue(mc_cfg.analysis.enabled)
+        self.assertEqual(mc_cfg.analysis.study_type, "monte_carlo")
+        self.assertTrue(mc_cfg.monte_carlo.enabled)
+        self.assertEqual(mc_cfg.monte_carlo.iterations, 12)
+        self.assertTrue(mc_cfg.monte_carlo.parallel_enabled)
+        self.assertEqual(mc_cfg.monte_carlo.parallel_workers, 4)
+
+        sens_cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "analysis_sensitivity",
+                "simulator": {"duration_s": 20.0, "dt_s": 1.0},
+                "analysis": {
+                    "enabled": True,
+                    "study_type": "sensitivity",
+                    "execution": {"parallel_enabled": False, "parallel_workers": 0},
+                    "metrics": ["summary.duration_s", "derived.closest_approach_km"],
+                    "sensitivity": {
+                        "method": "one_at_a_time",
+                        "parameters": [{"parameter_path": "simulator.dt_s", "values": [0.5, 1.0]}],
+                    },
+                },
+            }
+        )
+        self.assertTrue(sens_cfg.analysis.enabled)
+        self.assertEqual(sens_cfg.analysis.study_type, "sensitivity")
+        self.assertFalse(sens_cfg.monte_carlo.enabled)
+        self.assertEqual(len(sens_cfg.analysis.sensitivity.parameters), 1)
+        self.assertEqual(sens_cfg.analysis.metrics, ["summary.duration_s", "derived.closest_approach_km"])
+
+        lhs_cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "analysis_lhs",
+                "simulator": {"duration_s": 20.0, "dt_s": 1.0},
+                "analysis": {
+                    "enabled": True,
+                    "study_type": "sensitivity",
+                    "sensitivity": {
+                        "method": "lhs",
+                        "samples": 8,
+                        "seed": 13,
+                        "parameters": [
+                            {
+                                "parameter_path": "simulator.dt_s",
+                                "distribution": "uniform",
+                                "low": 0.5,
+                                "high": 1.5,
+                            }
+                        ],
+                    },
+                },
+            }
+        )
+        self.assertEqual(lhs_cfg.analysis.sensitivity.method, "lhs")
+        self.assertEqual(lhs_cfg.analysis.sensitivity.samples, 8)
+        self.assertEqual(lhs_cfg.analysis.sensitivity.seed, 13)
+        self.assertEqual(lhs_cfg.analysis.sensitivity.parameters[0].distribution, "uniform")
+        self.assertAlmostEqual(float(lhs_cfg.analysis.sensitivity.parameters[0].low), 0.5)
 
     def test_template_yaml_loads(self):
         try:

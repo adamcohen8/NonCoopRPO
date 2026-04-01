@@ -14,6 +14,7 @@ __pycache__/
 outputs/
 examples/outputs/
 **/lightning_logs/
+configs/inactive/
 
 # OS/editor noise
 .DS_Store

@@ -70,6 +70,8 @@ def summarize_config(cfg: SimulationScenarioConfig) -> ConfigSummary:
         for object_id, section in (("rocket", cfg.rocket), ("chaser", cfg.chaser), ("target", cfg.target))
         if bool(section.enabled)
     ]
+    analysis_enabled = bool(cfg.analysis.enabled)
+    analysis_study_type = str(cfg.analysis.study_type if analysis_enabled else "single_run")
     return ConfigSummary(
         scenario_name=cfg.scenario_name,
         scenario_type=cfg.simulator.scenario_type,
@@ -78,6 +80,8 @@ def summarize_config(cfg: SimulationScenarioConfig) -> ConfigSummary:
         objects=objects,
         output_dir=cfg.outputs.output_dir,
         output_mode=cfg.outputs.mode,
+        analysis_enabled=analysis_enabled,
+        analysis_study_type=analysis_study_type,
         monte_carlo_enabled=bool(cfg.monte_carlo.enabled),
         mc_iterations=int(cfg.monte_carlo.iterations),
     )

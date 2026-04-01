@@ -119,6 +119,23 @@ class SimulationResult:
     payload: dict[str, Any]
 
     @property
+    def analysis(self) -> dict[str, Any]:
+        return dict(self.payload.get("analysis", {}) or {})
+
+    @property
+    def analysis_study_type(self) -> str:
+        analysis = self.analysis
+        if bool(analysis.get("enabled", False)):
+            return str(analysis.get("study_type", "unknown"))
+        if self.is_monte_carlo:
+            return "monte_carlo"
+        return "single_run"
+
+    @property
+    def is_batch_analysis(self) -> bool:
+        return self.analysis_study_type in {"monte_carlo", "sensitivity"}
+
+    @property
     def is_monte_carlo(self) -> bool:
         return bool(dict(self.payload.get("monte_carlo", {}) or {}).get("enabled", False))
 
@@ -156,7 +173,7 @@ class SimulationResult:
 
     @property
     def artifacts(self) -> dict[str, Any]:
-        if self.is_monte_carlo:
+        if self.is_batch_analysis:
             return dict(self.payload.get("artifacts", {}) or {})
         summary = self.summary
         return {
@@ -168,6 +185,12 @@ class SimulationResult:
     def metrics(self) -> dict[str, Any]:
         if self.is_monte_carlo:
             return dict(self.payload.get("aggregate_stats", {}) or {})
+        if self.analysis_study_type == "sensitivity":
+            return {
+                "parameter_count": int(self.analysis.get("parameter_count", 0)),
+                "run_count": int(self.analysis.get("run_count", 0)),
+                "metrics": list(self.analysis.get("metrics", []) or []),
+            }
         out = dict(self.summary)
         closest_approach_km = _closest_approach_metric(self.payload)
         if np.isfinite(closest_approach_km):
@@ -179,7 +202,7 @@ class SimulationResult:
         return int(self.time_s.size)
 
     def snapshot(self, step_index: int) -> SimulationSnapshot:
-        if self.is_monte_carlo:
+        if self.is_batch_analysis:
             raise RuntimeError("Snapshots are only available for single-run results.")
         if step_index < 0 or step_index >= self.num_steps:
             raise IndexError(f"step_index {step_index} is out of range for {self.num_steps} samples.")
@@ -253,7 +276,7 @@ class SimulationSession:
         self._step_index = 0
         self._done = False
         self._engine = None
-        if self._active_config.scenario.monte_carlo.enabled:
+        if self._is_batch_analysis(self._active_config.scenario):
             return None
         self._ensure_engine()
         assert self._engine is not None
@@ -268,8 +291,8 @@ class SimulationSession:
         )
 
     def run(self, *, step_callback: Any | None = None) -> SimulationResult:
-        if self._active_config.scenario.monte_carlo.enabled:
-            payload = self._run_monte_carlo(self._active_config)
+        if self._is_batch_analysis(self._active_config.scenario):
+            payload = self._run_batch_analysis(self._active_config)
             self._result = SimulationResult(config=self._active_config, payload=payload)
             self._done = True
             return self._result
@@ -283,7 +306,7 @@ class SimulationSession:
         return self._result
 
     def step(self) -> SimulationSnapshot:
-        if self._active_config.scenario.monte_carlo.enabled:
+        if self._is_batch_analysis(self._active_config.scenario):
             raise RuntimeError("SimulationSession.step() is only available for single-run scenarios.")
         self._ensure_engine()
         assert self._engine is not None
@@ -305,7 +328,11 @@ class SimulationSession:
         self._engine = _create_single_run_engine(self._active_config.to_scenario_config(), step_callback=step_callback)
 
     @staticmethod
-    def _run_monte_carlo(config: SimulationConfig) -> dict[str, Any]:
+    def _is_batch_analysis(config: SimulationScenarioConfig) -> bool:
+        return bool(config.monte_carlo.enabled or config.analysis.enabled)
+
+    @staticmethod
+    def _run_batch_analysis(config: SimulationConfig) -> dict[str, Any]:
         with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False, encoding="utf-8") as tmp:
             yaml.safe_dump(config.to_dict(), tmp, sort_keys=False)
             tmp_path = Path(tmp.name)

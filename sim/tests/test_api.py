@@ -14,6 +14,7 @@ from sim.master_simulator import run_master_simulation
 def _api_config(output_dir: Path, *, monte_carlo: bool = False) -> dict:
     return {
         "scenario_name": "api_smoke",
+        "scenario_description": "API smoke test scenario",
         "rocket": {"enabled": False},
         "target": {
             "enabled": True,
@@ -57,6 +58,65 @@ def _api_config(output_dir: Path, *, monte_carlo: bool = False) -> dict:
         },
         "metadata": {"seed": 123},
     }
+
+
+def _sensitivity_api_config(output_dir: Path) -> dict:
+    cfg = _api_config(output_dir, monte_carlo=False)
+    cfg["analysis"] = {
+        "enabled": True,
+        "study_type": "sensitivity",
+        "execution": {
+            "parallel_enabled": False,
+            "parallel_workers": 0,
+        },
+        "metrics": [
+            "summary.duration_s",
+            "derived.closest_approach_km",
+        ],
+        "baseline": {
+            "enabled": True,
+        },
+        "sensitivity": {
+            "method": "one_at_a_time",
+            "parameters": [
+                {
+                    "parameter_path": "simulator.dt_s",
+                    "values": [0.5, 1.0],
+                }
+            ],
+        },
+    }
+    return cfg
+
+
+def _lhs_sensitivity_api_config(output_dir: Path) -> dict:
+    cfg = _api_config(output_dir, monte_carlo=False)
+    cfg["analysis"] = {
+        "enabled": True,
+        "study_type": "sensitivity",
+        "execution": {
+            "parallel_enabled": False,
+            "parallel_workers": 0,
+        },
+        "metrics": [
+            "summary.duration_s",
+            "derived.closest_approach_km",
+        ],
+        "sensitivity": {
+            "method": "lhs",
+            "samples": 5,
+            "seed": 19,
+            "parameters": [
+                {
+                    "parameter_path": "simulator.dt_s",
+                    "distribution": "uniform",
+                    "low": 0.5,
+                    "high": 1.5,
+                }
+            ],
+        },
+    }
+    return cfg
 
 
 class TestSimulationApi:
@@ -106,6 +166,7 @@ class TestSimulationApi:
             assert result.num_steps == 3
             assert result.summary["samples"] == 3
             assert result.metrics["scenario_name"] == "api_smoke"
+            assert result.summary["scenario_description"] == "API smoke test scenario"
             assert np.isfinite(result.truth["target"]).all()
 
     def test_session_step_uses_live_engine_not_full_run_replay(self):
@@ -134,3 +195,34 @@ class TestSimulationApi:
             assert result.payload["monte_carlo"]["enabled"] is True
             assert result.payload["monte_carlo"]["iterations"] == 2
             assert "pass_rate" in result.metrics
+
+    def test_session_run_sensitivity_analysis(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SimulationConfig.from_dict(_sensitivity_api_config(Path(tmpdir)))
+            session = SimulationSession.from_config(cfg)
+
+            assert session.reset() is None
+
+            result = session.run()
+
+            assert result.is_batch_analysis is True
+            assert result.analysis_study_type == "sensitivity"
+            assert result.payload["analysis"]["run_count"] == 2
+            assert len(result.payload["parameter_summaries"]) == 1
+            assert result.metrics["run_count"] == 2
+
+    def test_session_run_sensitivity_lhs_analysis(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SimulationConfig.from_dict(_lhs_sensitivity_api_config(Path(tmpdir)))
+            session = SimulationSession.from_config(cfg)
+
+            assert session.reset() is None
+
+            result = session.run()
+
+            assert result.analysis_study_type == "sensitivity"
+            assert result.payload["analysis"]["method"] == "lhs"
+            assert result.payload["analysis"]["run_count"] == 5
+            assert result.payload["analysis"]["samples"] == 5
+            assert len(result.payload["runs"]) == 5
+            assert len(result.payload["parameter_rankings"]) == 1
