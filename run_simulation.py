@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 
+from sim.controller_lab import run_controller_bench
 from sim.config import load_simulation_yaml
 from sim.master_simulator import run_master_simulation
 
@@ -572,6 +573,40 @@ def _print_serial_benchmark(config_path: str, benchmark_runs: int) -> None:
     print("=" * 72)
 
 
+def _print_controller_bench_summary(out: dict) -> None:
+    print("")
+    print("=" * 102)
+    print("CONTROLLER BENCH COMPLETED")
+    print("=" * 102)
+    _print_field("Suite", str(out.get("suite_name", "controller_bench")))
+    desc = str(out.get("description", "") or "").strip()
+    if desc:
+        _print_field("Desc", desc)
+    target = dict(out.get("controller_target", {}) or {})
+    _print_field("Target", f"{target.get('object_id', 'target')}.{target.get('slot', 'attitude_control')}")
+    _print_field("Cases", str(len(list(out.get("cases", []) or []))))
+    _print_field("Variants", str(len(list(out.get("variants", []) or []))))
+    print("-" * 102)
+    print("Variant Summary")
+    for summary in list(out.get("variant_summaries", []) or []):
+        metric_means = dict(summary.get("metric_means", {}) or {})
+        metric_txt = ", ".join(f"{k}={metric_means[k]:.3g}" for k in sorted(metric_means.keys())[:3])
+        if metric_txt:
+            metric_txt = f"  {metric_txt}"
+        print(
+            f"{str(summary.get('variant_name', 'unknown')):<20}"
+            f"pass_rate={100.0 * float(summary.get('pass_rate', 0.0)):>6.1f}%  "
+            f"runs={int(summary.get('run_count', 0)):>3d}{metric_txt}"
+        )
+    artifacts = dict(out.get("artifacts", {}) or {})
+    if artifacts:
+        print("-" * 102)
+        _print_field("Summary JSON", str(artifacts.get("summary_json", "")))
+        _print_field("Summary MD", str(artifacts.get("summary_md", "")))
+        _print_field("Comparison CSV", str(artifacts.get("comparison_csv", "")))
+    print("=" * 102)
+
+
 def main() -> None:
     repo_root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="Master simulation runner: one YAML config, no other inputs required.")
@@ -591,7 +626,22 @@ def main() -> None:
         default=10,
         help="Number of Monte Carlo iterations to run for serial benchmark mode.",
     )
+    parser.add_argument(
+        "--controller-bench",
+        default="",
+        help="Path to a controller benchmark suite YAML.",
+    )
+    parser.add_argument(
+        "--compare",
+        nargs="*",
+        default=None,
+        help="Optional controller variant names to run from the benchmark suite.",
+    )
     args = parser.parse_args()
+    if args.controller_bench:
+        out = run_controller_bench(args.controller_bench, compare_names=list(args.compare or []))
+        _print_controller_bench_summary(out)
+        return
     if args.benchmark_serial:
         _print_serial_benchmark(config_path=args.config, benchmark_runs=int(max(args.benchmark_runs, 1)))
         return

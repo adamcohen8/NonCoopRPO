@@ -333,11 +333,25 @@ class SimulationSession:
 
     @staticmethod
     def _run_batch_analysis(config: SimulationConfig) -> dict[str, Any]:
-        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False, encoding="utf-8") as tmp:
+        temp_dir = None
+        if config.source_path is not None:
+            temp_dir = str(config.source_path.parent)
+        else:
+            temp_dir = str(Path.cwd())
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml",
+            mode="w",
+            delete=False,
+            encoding="utf-8",
+            dir=temp_dir,
+        ) as tmp:
             yaml.safe_dump(config.to_dict(), tmp, sort_keys=False)
             tmp_path = Path(tmp.name)
         try:
-            return _run_legacy_master(tmp_path)
+            payload = _run_legacy_master(tmp_path)
+            if config.source_path is not None and isinstance(payload, dict):
+                payload["config_path"] = str(config.source_path)
+            return payload
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)

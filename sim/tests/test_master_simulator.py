@@ -4,13 +4,15 @@ import json
 import unittest
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
 from sim.app.io import DEFAULT_CONFIG_PATH, load_config_dict
 from sim.config import scenario_config_from_dict
-from sim.master_simulator import _run_single_config, run_master_simulation
+from sim.core.models import StateTruth
+from sim.master_simulator import _run_mission_strategy, _run_single_config, run_master_simulation
 
 
 class ConstantIntegratedThrustMission:
@@ -51,6 +53,22 @@ class TimeSplitThrustMission:
             "mission_use_integrated_command": True,
             "thrust_eci_km_s2": np.array([accel_x, 0.0, 0.0], dtype=float),
         }
+
+
+class LegacyTruthTimeStrategy:
+    def update(self, truth, t_s):
+        return {"legacy_time_s": float(t_s), "x_km": float(truth.position_eci_km[0])}
+
+
+class InternalTypeErrorStrategy:
+    def __init__(self):
+        self.calls = 0
+
+    def update(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise TypeError("internal plugin bug")
+        return {"calls": self.calls}
 
 
 class TestMasterSimulator(unittest.TestCase):
@@ -807,6 +825,57 @@ class TestMasterSimulator(unittest.TestCase):
         self.assertEqual(int(thrust_stats["burn_samples"]), 1)
         self.assertAlmostEqual(float(thrust_stats["max_accel_km_s2"]), 3.0, places=9)
         self.assertAlmostEqual(float(thrust_hist[-1, 0]), 2.0, places=9)
+
+    def test_mission_strategy_supports_legacy_truth_time_signature(self):
+        strategy = LegacyTruthTimeStrategy()
+        agent = SimpleNamespace(
+            mission_strategy=strategy,
+            knowledge_base=None,
+            object_id="target",
+            belief=None,
+            rocket_state=None,
+            rocket_sim=None,
+            dry_mass_kg=None,
+            fuel_capacity_kg=None,
+        )
+        truth = StateTruth(
+            position_eci_km=np.array([7000.0, 0.0, 0.0]),
+            velocity_eci_km_s=np.array([0.0, 7.5, 0.0]),
+            attitude_quat_bn=np.array([1.0, 0.0, 0.0, 0.0]),
+            angular_rate_body_rad_s=np.array([0.0, 0.0, 0.0]),
+            mass_kg=100.0,
+            t_s=0.0,
+        )
+
+        ret = _run_mission_strategy(agent=agent, world_truth={"target": truth}, t_s=1.0, dt_s=1.0, env={})
+
+        self.assertEqual(ret["legacy_time_s"], 1.0)
+        self.assertEqual(ret["x_km"], 7000.0)
+
+    def test_mission_strategy_does_not_swallow_internal_type_error(self):
+        strategy = InternalTypeErrorStrategy()
+        agent = SimpleNamespace(
+            mission_strategy=strategy,
+            knowledge_base=None,
+            object_id="target",
+            belief=None,
+            rocket_state=None,
+            rocket_sim=None,
+            dry_mass_kg=None,
+            fuel_capacity_kg=None,
+        )
+        truth = StateTruth(
+            position_eci_km=np.array([7000.0, 0.0, 0.0]),
+            velocity_eci_km_s=np.array([0.0, 7.5, 0.0]),
+            attitude_quat_bn=np.array([1.0, 0.0, 0.0, 0.0]),
+            angular_rate_body_rad_s=np.array([0.0, 0.0, 0.0]),
+            mass_kg=100.0,
+            t_s=0.0,
+        )
+
+        with self.assertRaises(TypeError):
+            _run_mission_strategy(agent=agent, world_truth={"target": truth}, t_s=1.0, dt_s=1.0, env={})
+        self.assertEqual(strategy.calls, 1)
 
     def test_master_runner_executes_rocket_ascent_from_yaml(self):
         try:

@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import importlib
+import inspect
 import json
 import logging
 import multiprocessing as mp
@@ -15,6 +16,7 @@ import queue as queue_mod
 from statistics import NormalDist
 import subprocess
 import time
+from time import perf_counter
 from typing import Any, Callable
 
 import numpy as np
@@ -43,6 +45,7 @@ from sim.dynamics.orbit.propagator import (
     third_body_sun_plugin,
 )
 from sim.estimation.orbit_ekf import OrbitEKFEstimator
+from sim.estimation.joint_state import JointStateEstimator
 from sim.knowledge.object_tracking import (
     KnowledgeConditionConfig,
     KnowledgeEKFConfig,
@@ -55,6 +58,7 @@ from sim.master_outputs import plot_outputs as _plot_outputs_impl
 from sim.rocket import OpenLoopPitchProgramGuidance, RocketAscentSimulator, RocketSimConfig, RocketState, RocketVehicleConfig, TVCSteeringGuidance
 from sim.rocket.aero import RocketAeroConfig
 from sim.rocket.guidance import MaxQThrottleLimiterGuidance, OrbitInsertionCutoffGuidance
+from sim.sensors.joint_state import JointStateSensor
 from sim.sensors.noisy_own_state import NoisyOwnStateSensor
 from sim.utils.io import write_json
 from sim.utils.ground_track import ground_track_from_eci_history
@@ -254,6 +258,70 @@ def _module_obj(pointer, *, extra_kwargs: dict[str, Any] | None = None) -> Any |
     except (ImportError, AttributeError, TypeError, ValueError) as exc:
         logger.warning("Failed to construct plugin pointer %r: %s", pointer, exc)
         return None
+
+
+def _compatible_keyword_args(method: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return None
+
+    accepts_var_kwargs = False
+    filtered: dict[str, Any] = {}
+    for name, param in signature.parameters.items():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            accepts_var_kwargs = True
+            continue
+        if param.kind == inspect.Parameter.POSITIONAL_ONLY:
+            return None
+        if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY) and name in kwargs:
+            filtered[name] = kwargs[name]
+
+    for name, param in signature.parameters.items():
+        if param.kind not in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            continue
+        if param.default is inspect.Signature.empty and name not in filtered:
+            return None
+
+    if accepts_var_kwargs:
+        return dict(kwargs)
+    return filtered
+
+
+def _call_with_compat_kwargs(
+    method: Callable[..., Any],
+    *,
+    primary_kwargs: dict[str, Any],
+    fallback_kwargs: dict[str, Any] | None = None,
+) -> Any:
+    compatible = _compatible_keyword_args(method, primary_kwargs)
+    if compatible is not None:
+        return method(**compatible)
+    if fallback_kwargs is not None:
+        compatible = _compatible_keyword_args(method, fallback_kwargs)
+        if compatible is not None:
+            return method(**compatible)
+    return method(**primary_kwargs)
+
+
+def _to_jsonable_value(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable_value(v) for v in value]
+    return value
+
+
+def _command_to_dict(cmd: Command) -> dict[str, Any]:
+    return {
+        "thrust_eci_km_s2": np.array(cmd.thrust_eci_km_s2, dtype=float).tolist(),
+        "torque_body_nm": np.array(cmd.torque_body_nm, dtype=float).tolist(),
+        "mode_flags": _to_jsonable_value(dict(cmd.mode_flags or {})),
+    }
 
 
 def _deep_set(root: dict[str, Any], path: str, value: Any) -> None:
@@ -1080,12 +1148,10 @@ def _create_satellite_runtime(
     truth = _default_truth_from_agent(agent_cfg, t_s=0.0)
     specs = dict(agent_cfg.specs or {})
     inertia_kg_m2 = _resolve_satellite_inertia_kg_m2(specs)
-    belief = StateBelief(state=np.hstack((truth.position_eci_km, truth.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=0.0)
     noise = dict((agent_cfg.knowledge or {}).get("sensor_error", {}) or {})
     pos_sigma = float(np.array(noise.get("pos_sigma_km", [0.001])).reshape(-1)[0])
     vel_sigma = float(np.array(noise.get("vel_sigma_km_s", [1e-5])).reshape(-1)[0])
-    sensor = NoisyOwnStateSensor(pos_sigma_km=pos_sigma, vel_sigma_km_s=vel_sigma, rng=rng)
-    estimator = OrbitEKFEstimator(
+    orbit_estimator = OrbitEKFEstimator(
         mu_km3_s2=EARTH_MU_KM3_S2,
         dt_s=float(cfg.simulator.dt_s),
         process_noise_diag=np.array([1e-8, 1e-8, 1e-8, 1e-10, 1e-10, 1e-10]),
@@ -1096,6 +1162,41 @@ def _create_satellite_runtime(
     orbit_cfg = dict(cfg.simulator.dynamics.get("orbit", {}) or {})
     att_cfg = dict(cfg.simulator.dynamics.get("attitude", {}) or {})
     attitude_enabled = bool(att_cfg.get("enabled", True))
+    if attitude_enabled:
+        belief = StateBelief(
+            state=np.hstack(
+                (
+                    truth.position_eci_km,
+                    truth.velocity_eci_km_s,
+                    truth.attitude_quat_bn,
+                    truth.angular_rate_body_rad_s,
+                )
+            ),
+            covariance=np.eye(13) * 1e-4,
+            last_update_t_s=0.0,
+        )
+        quat_sigma = float(np.array(noise.get("quat_sigma", [1e-3])).reshape(-1)[0])
+        omega_sigma = float(np.array(noise.get("omega_sigma_rad_s", [1e-4])).reshape(-1)[0])
+        sensor = JointStateSensor(
+            pos_sigma_km=pos_sigma,
+            vel_sigma_km_s=vel_sigma,
+            quat_sigma=quat_sigma,
+            omega_sigma_rad_s=omega_sigma,
+            update_cadence_s=float(cfg.simulator.dt_s),
+            rng=rng,
+        )
+        estimator = JointStateEstimator(
+            orbit_estimator=orbit_estimator,
+            dt_s=float(cfg.simulator.dt_s),
+        )
+    else:
+        belief = StateBelief(
+            state=np.hstack((truth.position_eci_km, truth.velocity_eci_km_s)),
+            covariance=np.eye(6) * 1e-4,
+            last_update_t_s=0.0,
+        )
+        sensor = NoisyOwnStateSensor(pos_sigma_km=pos_sigma, vel_sigma_km_s=vel_sigma, rng=rng)
+        estimator = orbit_estimator
     dist_cfg = dict(att_cfg.get("disturbance_torques", {}) or {})
     orbit_ctrl_period_s = float(max(float(orbit_cfg.get("orbit_substep_s", cfg.simulator.dt_s) or cfg.simulator.dt_s), 1e-9))
     att_ctrl_period_s = float(max(float(att_cfg.get("attitude_substep_s", cfg.simulator.dt_s) or cfg.simulator.dt_s), 1e-9))
@@ -1385,7 +1486,25 @@ def _deploy_from_rocket(agent: AgentRuntime, rocket: AgentRuntime, t_next: float
         mass_kg=m,
         t_s=t_next,
     )
-    agent.belief = StateBelief(state=np.hstack((agent.truth.position_eci_km, agent.truth.velocity_eci_km_s)), covariance=np.eye(6) * 1e-4, last_update_t_s=t_next)
+    if agent.belief is not None and agent.belief.state.size >= 13:
+        agent.belief = StateBelief(
+            state=np.hstack(
+                (
+                    agent.truth.position_eci_km,
+                    agent.truth.velocity_eci_km_s,
+                    agent.truth.attitude_quat_bn,
+                    agent.truth.angular_rate_body_rad_s,
+                )
+            ),
+            covariance=np.eye(13) * 1e-4,
+            last_update_t_s=t_next,
+        )
+    else:
+        agent.belief = StateBelief(
+            state=np.hstack((agent.truth.position_eci_km, agent.truth.velocity_eci_km_s)),
+            covariance=np.eye(6) * 1e-4,
+            last_update_t_s=t_next,
+        )
     agent.active = True
 
 
@@ -1411,25 +1530,26 @@ def _run_mission_modules(
     for m in agent.mission_modules:
         if not hasattr(m, "update"):
             continue
-        try:
-            ret = m.update(
-                object_id=agent.object_id,
-                truth=truth,
-                belief=agent.belief,
-                own_knowledge=own_knowledge,
-                world_truth=world_truth,
-                env=env,
-                t_s=t_s,
-                dt_s=dt_s,
-                orbit_controller=orbit_controller,
-                attitude_controller=attitude_controller,
-                orb_belief=orb_belief,
-                att_belief=att_belief,
-                rocket_state=agent.rocket_state,
-                rocket_vehicle_cfg=(agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
-            )
-        except TypeError:
-            ret = m.update(truth=truth, t_s=t_s)
+        ret = _call_with_compat_kwargs(
+            m.update,
+            primary_kwargs={
+                "object_id": agent.object_id,
+                "truth": truth,
+                "belief": agent.belief,
+                "own_knowledge": own_knowledge,
+                "world_truth": world_truth,
+                "env": env,
+                "t_s": t_s,
+                "dt_s": dt_s,
+                "orbit_controller": orbit_controller,
+                "attitude_controller": attitude_controller,
+                "orb_belief": orb_belief,
+                "att_belief": att_belief,
+                "rocket_state": agent.rocket_state,
+                "rocket_vehicle_cfg": (agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
+            },
+            fallback_kwargs={"truth": truth, "t_s": t_s},
+        )
         if isinstance(ret, dict):
             out.update(ret)
     return out
@@ -1458,27 +1578,28 @@ def _run_mission_strategy(
         if not hasattr(strategy, method_name):
             continue
         method = getattr(strategy, method_name)
-        try:
-            ret = method(
-                object_id=agent.object_id,
-                truth=truth,
-                belief=agent.belief,
-                own_knowledge=own_knowledge,
-                world_truth=world_truth,
-                env=env,
-                t_s=t_s,
-                dt_s=dt_s,
-                orbit_controller=orbit_controller,
-                attitude_controller=attitude_controller,
-                orb_belief=orb_belief,
-                att_belief=att_belief,
-                rocket_state=agent.rocket_state,
-                rocket_vehicle_cfg=(agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
-                dry_mass_kg=agent.dry_mass_kg,
-                fuel_capacity_kg=agent.fuel_capacity_kg,
-            )
-        except TypeError:
-            ret = method(truth=truth, t_s=t_s)
+        ret = _call_with_compat_kwargs(
+            method,
+            primary_kwargs={
+                "object_id": agent.object_id,
+                "truth": truth,
+                "belief": agent.belief,
+                "own_knowledge": own_knowledge,
+                "world_truth": world_truth,
+                "env": env,
+                "t_s": t_s,
+                "dt_s": dt_s,
+                "orbit_controller": orbit_controller,
+                "attitude_controller": attitude_controller,
+                "orb_belief": orb_belief,
+                "att_belief": att_belief,
+                "rocket_state": agent.rocket_state,
+                "rocket_vehicle_cfg": (agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
+                "dry_mass_kg": agent.dry_mass_kg,
+                "fuel_capacity_kg": agent.fuel_capacity_kg,
+            },
+            fallback_kwargs={"truth": truth, "t_s": t_s},
+        )
         if isinstance(ret, dict):
             return ret
         return {}
@@ -1509,26 +1630,27 @@ def _run_mission_execution(
         if not hasattr(execution, method_name):
             continue
         method = getattr(execution, method_name)
-        try:
-            ret = method(
-                intent=dict(intent or {}),
-                object_id=agent.object_id,
-                truth=truth,
-                belief=agent.belief,
-                own_knowledge=own_knowledge,
-                world_truth=world_truth,
-                env=env,
-                t_s=t_s,
-                dt_s=dt_s,
-                orbit_controller=orbit_controller,
-                attitude_controller=attitude_controller,
-                orb_belief=orb_belief,
-                att_belief=att_belief,
-                rocket_state=agent.rocket_state,
-                rocket_vehicle_cfg=(agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
-            )
-        except TypeError:
-            ret = method(intent=dict(intent or {}), truth=truth, t_s=t_s)
+        ret = _call_with_compat_kwargs(
+            method,
+            primary_kwargs={
+                "intent": dict(intent or {}),
+                "object_id": agent.object_id,
+                "truth": truth,
+                "belief": agent.belief,
+                "own_knowledge": own_knowledge,
+                "world_truth": world_truth,
+                "env": env,
+                "t_s": t_s,
+                "dt_s": dt_s,
+                "orbit_controller": orbit_controller,
+                "attitude_controller": attitude_controller,
+                "orb_belief": orb_belief,
+                "att_belief": att_belief,
+                "rocket_state": agent.rocket_state,
+                "rocket_vehicle_cfg": (agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
+            },
+            fallback_kwargs={"intent": dict(intent or {}), "truth": truth, "t_s": t_s},
+        )
         if isinstance(ret, dict):
             return ret
         return {}
@@ -2047,10 +2169,14 @@ class _SingleRunEngine:
             )
 
         self.truth_hist = {aid: np.full((self.n, 14), np.nan) for aid in self.agents.keys()}
-        self.belief_hist = {aid: np.full((self.n, 6), np.nan) for aid in self.agents.keys()}
+        self.belief_hist = {
+            aid: np.full((self.n, int(agent.belief.state.size) if agent.belief is not None else 0), np.nan)
+            for aid, agent in self.agents.items()
+        }
         self.thrust_hist = {aid: np.full((self.n, 3), np.nan) for aid in self.agents.keys()}
         self.torque_hist = {aid: np.full((self.n, 3), np.nan) for aid in self.agents.keys()}
         self.desired_attitude_hist = {aid: np.full((self.n, 4), np.nan) for aid in self.agents.keys()}
+        self.controller_debug_hist: dict[str, list[dict[str, Any]]] = {aid: [] for aid in self.agents.keys()}
         self.throttle_hist = {"rocket": np.full(self.n, np.nan)} if self.rocket is not None else {}
         self.rocket_stage_hist = np.full(self.n, np.nan) if self.rocket is not None else None
         self.rocket_q_dyn_hist = np.full(self.n, np.nan) if self.rocket is not None else None
@@ -2081,7 +2207,8 @@ class _SingleRunEngine:
             truth = agent.truth if agent.kind == "satellite" else _rocket_state_to_truth(agent.rocket_state)
             self.truth_hist[aid][0, :] = _state_truth_to_array(truth)
             if agent.belief is not None:
-                self.belief_hist[aid][0, :] = agent.belief.state[:6]
+                self._ensure_belief_hist_width(aid, agent.belief.state.size)
+                self.belief_hist[aid][0, : agent.belief.state.size] = agent.belief.state
             if aid == "rocket" and agent.rocket_state is not None and self.rocket_stage_hist is not None:
                 self.rocket_stage_hist[0] = float(agent.rocket_state.active_stage_index)
                 if self.rocket_q_dyn_hist is not None:
@@ -2107,6 +2234,15 @@ class _SingleRunEngine:
         except (TypeError, ValueError) as exc:
             logger.warning("Disabling step callback after runtime error: %s", exc)
             self.active_step_callback = None
+
+    def _ensure_belief_hist_width(self, aid: str, width: int) -> None:
+        hist = self.belief_hist[aid]
+        if hist.shape[1] >= int(width):
+            return
+        expanded = np.full((self.n, int(width)), np.nan)
+        if hist.shape[1] > 0:
+            expanded[:, : hist.shape[1]] = hist
+        self.belief_hist[aid] = expanded
 
     def snapshot(self, step_index: int | None = None) -> dict[str, Any]:
         idx = self.current_index if step_index is None else int(step_index)
@@ -2346,16 +2482,18 @@ class _SingleRunEngine:
                             except (TypeError, ValueError, AttributeError) as exc:
                                 logger.warning("Failed to set desired_ric_euler_rad on %s controller: %s", aid, exc)
                     use_integrated_cmd = bool(mission_out.get("mission_use_integrated_command", False))
-                    c_orb = (
-                        agent.orbit_controller.act(orb_belief, t_eval, 2.0)
-                        if (not use_integrated_cmd) and agent.orbit_controller is not None and orb_belief is not None
-                        else Command.zero()
-                    )
-                    c_att = (
-                        agent.attitude_controller.act(att_belief, t_eval, 2.0)
-                        if self.attitude_enabled and (not use_integrated_cmd) and agent.attitude_controller is not None and att_belief is not None
-                        else Command.zero()
-                    )
+                    orbit_runtime_ms = 0.0
+                    attitude_runtime_ms = 0.0
+                    c_orb = Command.zero()
+                    if (not use_integrated_cmd) and agent.orbit_controller is not None and orb_belief is not None:
+                        orbit_t0 = perf_counter()
+                        c_orb = agent.orbit_controller.act(orb_belief, t_eval, 2.0)
+                        orbit_runtime_ms = (perf_counter() - orbit_t0) * 1000.0
+                    c_att = Command.zero()
+                    if self.attitude_enabled and (not use_integrated_cmd) and agent.attitude_controller is not None and att_belief is not None:
+                        attitude_t0 = perf_counter()
+                        c_att = agent.attitude_controller.act(att_belief, t_eval, 2.0)
+                        attitude_runtime_ms = (perf_counter() - attitude_t0) * 1000.0
                     if use_integrated_cmd:
                         cmd = Command.zero()
                         if "thrust_eci_km_s2" in mission_out:
@@ -2397,6 +2535,38 @@ class _SingleRunEngine:
                         delta_mass_kg = float(max(mdot_kg_s, 0.0) * h)
                         available_propellant_kg = float(max(tr_inner.mass_kg - min_mass_kg, 0.0))
                         cmd_step.mode_flags["delta_mass_kg"] = float(min(delta_mass_kg, available_propellant_kg))
+                    debug_channels = cmd_step.mode_flags.get("debug", {})
+                    self.controller_debug_hist[aid].append(
+                        {
+                            "t_s": float(t_eval),
+                            "dt_s": float(h),
+                            "belief": (
+                                np.array(agent.belief.state, dtype=float).tolist()
+                                if agent.belief is not None
+                                else None
+                            ),
+                            "orbit_belief": (
+                                np.array(orb_belief.state, dtype=float).tolist()
+                                if orb_belief is not None
+                                else None
+                            ),
+                            "attitude_belief": (
+                                np.array(att_belief.state, dtype=float).tolist()
+                                if att_belief is not None
+                                else None
+                            ),
+                            "orbit_controller_runtime_ms": float(orbit_runtime_ms),
+                            "attitude_controller_runtime_ms": float(attitude_runtime_ms),
+                            "controller_runtime_ms": float(orbit_runtime_ms + attitude_runtime_ms),
+                            "command_orbit": _command_to_dict(c_orb),
+                            "command_attitude": _command_to_dict(c_att),
+                            "command_raw": _command_to_dict(cmd),
+                            "command_applied": _command_to_dict(cmd_step),
+                            "use_integrated_command": bool(use_integrated_cmd),
+                            "mode_flags": _to_jsonable_value(dict(cmd_step.mode_flags or {})),
+                            "debug_channels": _to_jsonable_value(debug_channels),
+                        }
+                    )
                     tr_inner = agent.dynamics.step(state=tr_inner, command=cmd_step, env=env_inner, dt_s=h)
                     applied_thrust = np.array(cmd_step.thrust_eci_km_s2, dtype=float)
                     applied_torque = np.array(cmd_step.torque_body_nm, dtype=float)
@@ -2450,7 +2620,8 @@ class _SingleRunEngine:
             truth = agent.truth if agent.kind == "satellite" else _rocket_state_to_truth(agent.rocket_state)
             self.truth_hist[aid][k + 1, :] = _state_truth_to_array(truth)
             if agent.belief is not None:
-                self.belief_hist[aid][k + 1, :] = agent.belief.state[:6]
+                self._ensure_belief_hist_width(aid, agent.belief.state.size)
+                self.belief_hist[aid][k + 1, : agent.belief.state.size] = agent.belief.state
 
         self.current_index = k + 1
         self._emit_step_callback(self.current_index)
@@ -2599,10 +2770,12 @@ class _SingleRunEngine:
             "belief_by_object": {k: v.tolist() for k, v in belief_out.items()},
             "applied_thrust_by_object": {k: v.tolist() for k, v in thrust_out.items()},
             "applied_torque_by_object": {k: v.tolist() for k, v in torque_out.items()},
+            "desired_attitude_by_object": {k: v.tolist() for k, v in desired_attitude_out.items()},
             "knowledge_by_observer": {o: {t: a.tolist() for t, a in bt.items()} for o, bt in knowledge_out.items()},
             "knowledge_detection_by_observer": dict(summary.get("knowledge_detection_by_observer", {}) or {}),
             "knowledge_consistency_by_observer": dict(summary.get("knowledge_consistency_by_observer", {}) or {}),
             "bridge_events_by_object": self.bridge_hist,
+            "controller_debug_by_object": self.controller_debug_hist,
             "rocket_throttle_cmd": self.throttle_hist.get("rocket", np.array([])).tolist() if self.throttle_hist else [],
             "rocket_metrics": {k: v.tolist() for k, v in rocket_metrics_out.items()},
         }

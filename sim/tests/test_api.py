@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import tempfile
+import json
 from unittest.mock import patch
 
 import numpy as np
@@ -119,6 +120,19 @@ def _lhs_sensitivity_api_config(output_dir: Path) -> dict:
     return cfg
 
 
+def _attitude_api_config(output_dir: Path) -> dict:
+    cfg = _api_config(output_dir, monte_carlo=False)
+    cfg["target"]["initial_state"].update(
+        {
+            "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+            "angular_rate_body_rad_s": [0.01, 0.02, -0.01],
+        }
+    )
+    cfg["target"]["specs"]["inertia_kg_m2"] = [[10.0, 0.0, 0.0], [0.0, 12.0, 0.0], [0.0, 0.0, 8.0]]
+    cfg["simulator"]["dynamics"]["attitude"] = {"enabled": True}
+    return cfg
+
+
 class TestSimulationApi:
     def test_session_from_yaml_and_legacy_single_run_callback_still_work(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -226,3 +240,38 @@ class TestSimulationApi:
             assert result.payload["analysis"]["samples"] == 5
             assert len(result.payload["runs"]) == 5
             assert len(result.payload["parameter_rankings"]) == 1
+
+    def test_session_preserves_relative_baseline_paths_for_batch_analysis(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            baseline_path = root / "baseline.json"
+            baseline_path.write_text(
+                json.dumps(
+                    {
+                        "aggregate_stats": {"closest_approach_km_min": 123.0},
+                        "summary": {"scenario_name": "baseline"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg_dict = _sensitivity_api_config(root)
+            cfg_dict["analysis"]["baseline"] = {
+                "enabled": False,
+                "summary_json": "baseline.json",
+            }
+            cfg_path = root / "api_baseline.yaml"
+            cfg_path.write_text(yaml.safe_dump(cfg_dict, sort_keys=False), encoding="utf-8")
+
+            result = SimulationSession.from_yaml(cfg_path).run()
+
+            assert result.payload["baseline"]["source"] == "file"
+            assert Path(result.payload["baseline"]["path"]).resolve() == baseline_path.resolve()
+            assert result.payload["config_path"] == str(cfg_path.resolve())
+
+    def test_session_preserves_full_belief_state_when_attitude_is_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SimulationConfig.from_dict(_attitude_api_config(Path(tmpdir)))
+            result = SimulationSession.from_config(cfg).run()
+
+            assert result.truth["target"].shape[1] == 14
+            assert result.belief["target"].shape[1] == 13
