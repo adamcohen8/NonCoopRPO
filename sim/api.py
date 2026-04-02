@@ -9,6 +9,7 @@ import numpy as np
 import yaml
 
 from sim.config import SimulationScenarioConfig, load_simulation_yaml, scenario_config_from_dict
+from sim.single_run import _SingleRunEngine, _run_single_config
 
 
 def _closest_approach_metric(payload: dict[str, Any]) -> float:
@@ -22,8 +23,6 @@ def _run_single_payload(
     *,
     step_callback: Any | None = None,
 ) -> dict[str, Any]:
-    from sim.master_simulator import _run_single_config
-
     return _run_single_config(cfg, step_callback=step_callback)
 
 
@@ -38,8 +37,6 @@ def _create_single_run_engine(
     *,
     step_callback: Any | None = None,
 ) -> Any:
-    from sim.master_simulator import _SingleRunEngine
-
     return _SingleRunEngine(cfg, step_callback=step_callback)
 
 
@@ -324,6 +321,11 @@ class SimulationSession:
 
     def _ensure_engine(self, *, step_callback: Any | None = None) -> None:
         if self._engine is not None:
+            if step_callback is not None:
+                self._engine.active_step_callback = step_callback
+                emit = getattr(self._engine, "_emit_step_callback", None)
+                if callable(emit):
+                    emit(getattr(self._engine, "current_index", 0))
             return
         self._engine = _create_single_run_engine(self._active_config.to_scenario_config(), step_callback=step_callback)
 

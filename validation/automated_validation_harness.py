@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import json
 import os
 from pathlib import Path
 import tempfile
@@ -20,9 +19,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from sim.config import load_simulation_yaml, validate_scenario_plugins
-from sim.master_simulator import _closest_approach_from_run_payload
-from sim.master_simulator import _coerce_noninteractive_for_automation, _run_single_config, run_master_simulation
+from sim.master_simulator import _closest_approach_from_run_payload, run_master_simulation
+from sim.single_run import _coerce_noninteractive_for_automation, _run_single_config
 from sim.utils.io import write_json
+from validation.benchmarking import (
+    coerce_scalar as _coerce_scalar,
+    evaluate_baseline_checks as _evaluate_baseline_checks,
+    evaluate_checks as _evaluate_checks,
+    evaluate_rule as _evaluate_rule,
+    extract_metric as _extract_metric,
+    load_metric_payload,
+)
 
 
 DEFAULT_TOLERANCE_TABLES: dict[str, dict[str, dict[str, Any]]] = {
@@ -63,11 +70,14 @@ class BenchmarkSpec:
     kind: str
     description: str = ""
     enabled: bool = True
+    tags: tuple[str, ...] = ()
     config_path: str | None = None
     hpop_root: str | None = None
+    baseline_path: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
     envelope: str | None = None
     checks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    baseline_checks: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -114,11 +124,14 @@ def load_harness_spec(path: str | Path) -> HarnessSpec:
                 kind=str(item.get("kind", "")).strip().lower(),
                 description=str(item.get("description", "")),
                 enabled=bool(item.get("enabled", True)),
+                tags=tuple(str(tag).strip() for tag in list(item.get("tags", []) or []) if str(tag).strip()),
                 config_path=item.get("config_path"),
                 hpop_root=item.get("hpop_root"),
+                baseline_path=item.get("baseline_path"),
                 params=dict(item.get("params", {}) or {}),
                 envelope=str(item.get("envelope")).strip() if item.get("envelope") is not None else None,
                 checks=dict(item.get("checks", {}) or {}),
+                baseline_checks=dict(item.get("baseline_checks", {}) or {}),
             )
         )
     tolerance_tables = dict(DEFAULT_TOLERANCE_TABLES)
@@ -140,64 +153,6 @@ def load_harness_spec(path: str | Path) -> HarnessSpec:
         tolerance_tables=tolerance_tables,
         benchmarks=benchmarks,
     )
-
-
-def _coerce_scalar(value: Any) -> Any:
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return ""
-        if s.lower() in ("true", "false"):
-            return s.lower() == "true"
-        try:
-            if any(ch in s for ch in (".", "e", "E")):
-                return float(s)
-            return int(s)
-        except ValueError:
-            return value
-    return value
-
-
-def _extract_metric(payload: Any, path: str) -> Any:
-    cur = payload
-    for token in str(path).split("."):
-        if "[" in token and token.endswith("]"):
-            key, idx_txt = token[:-1].split("[", 1)
-            if key:
-                if not isinstance(cur, dict):
-                    raise KeyError(path)
-                cur = cur[key]
-            idx = int(idx_txt)
-            if not isinstance(cur, list):
-                raise KeyError(path)
-            cur = cur[idx]
-            continue
-        if not isinstance(cur, dict):
-            raise KeyError(path)
-        cur = cur[token]
-    return _coerce_scalar(cur)
-
-
-def _evaluate_rule(actual: Any, rule: dict[str, Any]) -> tuple[bool, str]:
-    checks: list[tuple[bool, str]] = []
-    if "equals" in rule:
-        expected = _coerce_scalar(rule["equals"])
-        checks.append((actual == expected, f"equals {expected!r}"))
-    if "min" in rule:
-        expected = float(rule["min"])
-        checks.append((float(actual) >= expected, f">= {expected}"))
-    if "max" in rule:
-        expected = float(rule["max"])
-        checks.append((float(actual) <= expected, f"<= {expected}"))
-    if "truthy" in rule:
-        expected = bool(rule["truthy"])
-        checks.append((bool(actual) is expected, f"truthy is {expected}"))
-    if "contains" in rule:
-        target = rule["contains"]
-        checks.append((target in actual, f"contains {target!r}"))
-    ok = all(item[0] for item in checks) if checks else True
-    summary = ", ".join(item[1] for item in checks) if checks else "no-op"
-    return ok, summary
 
 
 def _merge_checks(spec: BenchmarkSpec, tables: dict[str, dict[str, dict[str, Any]]]) -> dict[str, dict[str, Any]]:
@@ -313,34 +268,46 @@ def _run_hpop_benchmark(spec: BenchmarkSpec, benchmark_output_dir: Path, base_di
     )
     return {k: _coerce_scalar(v) for k, v in result.items()}
 
+def filter_harness_spec(
+    spec: HarnessSpec,
+    *,
+    benchmark_names: set[str] | None = None,
+    kinds: set[str] | None = None,
+    tags: set[str] | None = None,
+) -> HarnessSpec:
+    selected: list[BenchmarkSpec] = []
+    for bench in spec.benchmarks:
+        if benchmark_names and bench.name not in benchmark_names:
+            continue
+        if kinds and bench.kind not in kinds:
+            continue
+        if tags and not set(bench.tags).intersection(tags):
+            continue
+        selected.append(bench)
+    return HarnessSpec(
+        suite_name=spec.suite_name,
+        output_dir=spec.output_dir,
+        tolerance_tables=dict(spec.tolerance_tables),
+        benchmarks=selected,
+    )
 
-def _evaluate_checks(payload: dict[str, Any], checks: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    evaluations: list[dict[str, Any]] = []
-    for metric_path, rule in sorted(checks.items()):
-        try:
-            actual = _extract_metric(payload, metric_path)
-            passed, expectation = _evaluate_rule(actual, rule)
-            evaluations.append(
-                {
-                    "metric": metric_path,
-                    "passed": bool(passed),
-                    "actual": actual,
-                    "rule": dict(rule),
-                    "expectation": expectation,
-                }
-            )
-        except Exception as exc:
-            evaluations.append(
-                {
-                    "metric": metric_path,
-                    "passed": False,
-                    "actual": None,
-                    "rule": dict(rule),
-                    "expectation": "metric available",
-                    "error": str(exc),
-                }
-            )
-    return evaluations
+
+def _bundled_suite_paths() -> dict[str, Path]:
+    config_dir = REPO_ROOT / "configs"
+    return {
+        "smoke": config_dir / "validation_harness_smoke.yaml",
+        "default": config_dir / "validation_harness_default.yaml",
+    }
+
+
+def _load_bundled_harness_spec(name: str) -> tuple[HarnessSpec, Path]:
+    suite_name = str(name).strip().lower()
+    suite_paths = _bundled_suite_paths()
+    if suite_name not in suite_paths:
+        available = ", ".join(sorted(suite_paths))
+        raise ValueError(f"Unknown bundled suite {name!r}. Available: {available}")
+    spec_path = suite_paths[suite_name].resolve()
+    return load_harness_spec(spec_path), spec_path.parent
 
 
 def run_harness(spec: HarnessSpec, *, base_dir: Path) -> dict[str, Any]:
@@ -368,9 +335,11 @@ def run_harness(spec: HarnessSpec, *, base_dir: Path) -> dict[str, Any]:
             "kind": spec_item.kind,
             "description": spec_item.description,
             "enabled": True,
+            "tags": list(spec_item.tags),
             "envelope": spec_item.envelope,
             "output_dir": str(bench_out),
             "checks": merged_checks,
+            "baseline_checks": dict(spec_item.baseline_checks),
         }
         try:
             if spec_item.kind == "plugin_validation":
@@ -388,9 +357,19 @@ def run_harness(spec: HarnessSpec, *, base_dir: Path) -> dict[str, Any]:
             else:
                 raise ValueError(f"Unsupported benchmark kind: {spec_item.kind}")
             evaluations = _evaluate_checks(payload, merged_checks)
+            baseline_evaluations: list[dict[str, Any]] = []
+            if spec_item.baseline_path:
+                baseline_path = _resolve_path(spec_item.baseline_path, base_dir=base_dir)
+                if baseline_path is None:
+                    raise ValueError("baseline_path could not be resolved.")
+                baseline_payload = load_metric_payload(baseline_path)
+                baseline_evaluations = _evaluate_baseline_checks(payload, baseline_payload, spec_item.baseline_checks)
+                report["baseline_path"] = str(baseline_path)
             report["evaluations"] = evaluations
+            report["baseline_evaluations"] = baseline_evaluations
             report["metrics"] = payload
-            report["passed"] = all(bool(e.get("passed", False)) for e in evaluations) if evaluations else True
+            combined_evaluations = list(evaluations) + list(baseline_evaluations)
+            report["passed"] = all(bool(e.get("passed", False)) for e in combined_evaluations) if combined_evaluations else True
         except Exception as exc:
             report["passed"] = False
             report["error"] = str(exc)
@@ -440,6 +419,10 @@ def _build_markdown_report(report: dict[str, Any]) -> str:
             lines.append(f"- Description: {bench.get('description')}")
         if bench.get("output_dir"):
             lines.append(f"- Output Dir: {bench.get('output_dir')}")
+        if bench.get("tags"):
+            lines.append(f"- Tags: {', '.join(list(bench.get('tags', []) or []))}")
+        if bench.get("baseline_path"):
+            lines.append(f"- Baseline: {bench.get('baseline_path')}")
         if bench.get("error"):
             lines.append(f"- Error: {bench.get('error')}")
             lines.append("")
@@ -454,60 +437,68 @@ def _build_markdown_report(report: dict[str, Any]) -> str:
                     f"| {row.get('metric', '')} | {row.get('actual', '')} | {row.get('expectation', '')} | "
                     f"{'YES' if bool(row.get('passed', False)) else 'NO'} |"
                 )
+        baseline_evals = list(bench.get("baseline_evaluations", []) or [])
+        if baseline_evals:
+            lines.append("")
+            lines.append("| Baseline Metric | Actual | Baseline | Delta | Rule | Pass |")
+            lines.append("| --- | ---: | ---: | ---: | --- | --- |")
+            for row in baseline_evals:
+                delta = row.get("abs_delta")
+                delta_text = "" if delta is None else str(delta)
+                lines.append(
+                    f"| {row.get('metric', '')} | {row.get('actual', '')} | {row.get('baseline', '')} | "
+                    f"{delta_text} | {row.get('expectation', '')} | "
+                    f"{'YES' if bool(row.get('passed', False)) else 'NO'} |"
+                )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
 def _default_harness_spec() -> HarnessSpec:
-    return HarnessSpec(
-        suite_name="validation_smoke",
-        output_dir="outputs/validation_smoke",
-        tolerance_tables=dict(DEFAULT_TOLERANCE_TABLES),
-        benchmarks=[
-            BenchmarkSpec(
-                name="plugin_validation_smoke",
-                kind="plugin_validation",
-                config_path="configs/automation_smoke.yaml",
-                checks={"valid": {"equals": True}, "error_count": {"equals": 0}},
-            ),
-            BenchmarkSpec(
-                name="simulation_smoke",
-                kind="simulation",
-                config_path="configs/automation_smoke.yaml",
-                checks={
-                    "monte_carlo.enabled": {"equals": False},
-                    "run.terminated_early": {"equals": False},
-                    "run.duration_s": {"max": 120.0},
-                },
-            ),
-            BenchmarkSpec(
-                name="hpop_two_body_leo",
-                kind="hpop",
-                envelope="leo",
-                hpop_root=str(_default_hpop_root_dir()),
-                params={"model": "two_body", "plot_mode": "save", "duration_s": 600.0, "dt_s": 1.0},
-            ),
-        ],
-    )
+    spec, _ = _load_bundled_harness_spec("smoke")
+    return spec
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Automated validation harness for benchmark suites and tolerance gates.")
     parser.add_argument(
+        "--suite",
+        type=str,
+        default="smoke",
+        help="Bundled suite name to load when --spec is not provided. Options: smoke, default.",
+    )
+    parser.add_argument(
         "--spec",
         type=str,
         default="",
-        help="Path to harness YAML spec. If omitted, runs the built-in smoke suite.",
+        help="Path to harness YAML spec. If omitted, loads the bundled suite from --suite.",
     )
+    parser.add_argument("--benchmark", action="append", default=[], help="Run only the named benchmark. Repeatable.")
+    parser.add_argument("--kind", action="append", default=[], help="Run only benchmarks of this kind. Repeatable.")
+    parser.add_argument("--tag", action="append", default=[], help="Run only benchmarks carrying this tag. Repeatable.")
+    parser.add_argument("--list-suites", action="store_true", help="List bundled suite names and exit.")
     args = parser.parse_args()
 
+    if args.list_suites:
+        for name, path in sorted(_bundled_suite_paths().items()):
+            print(f"{name}: {path}")
+        return 0
+
     if str(args.spec).strip():
+        if str(args.suite).strip():
+            suite_name = str(args.suite).strip().lower()
+            if suite_name != "smoke":
+                raise ValueError("Use either --spec or a non-default --suite selection, not both.")
         spec_path = Path(args.spec).expanduser().resolve()
         spec = load_harness_spec(spec_path)
         base_dir = spec_path.parent
     else:
-        spec = _default_harness_spec()
-        base_dir = REPO_ROOT
+        spec, base_dir = _load_bundled_harness_spec(args.suite)
+    selected_names = {str(name).strip() for name in list(args.benchmark or []) if str(name).strip()}
+    selected_kinds = {str(kind).strip().lower() for kind in list(args.kind or []) if str(kind).strip()}
+    selected_tags = {str(tag).strip() for tag in list(args.tag or []) if str(tag).strip()}
+    if selected_names or selected_kinds or selected_tags:
+        spec = filter_harness_spec(spec, benchmark_names=selected_names or None, kinds=selected_kinds or None, tags=selected_tags or None)
     report = run_harness(spec, base_dir=base_dir)
     print(f"Suite          : {report['suite_name']}")
     print(f"Overall pass   : {report['passed']}")

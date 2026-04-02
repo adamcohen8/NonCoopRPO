@@ -90,6 +90,12 @@ class OrbitalAttitudeDynamics(DynamicsModel):
             )
             t_local += h
 
+        midpoint_truth = self._midpoint_translational_truth(
+            state=state,
+            x_orbit_next=x_orbit_next,
+            dt_s=dt_s,
+        )
+
         q_next = state.attitude_quat_bn.copy()
         w_next = state.angular_rate_body_rad_s.copy()
         if self.propagate_attitude:
@@ -98,19 +104,19 @@ class OrbitalAttitudeDynamics(DynamicsModel):
                 if "density_kg_m3" not in env_local:
                     env_local["density_kg_m3"] = density_from_model(
                         str(env_local.get("atmosphere_model", "exponential")).lower(),
-                        state.position_eci_km,
-                        state.t_s,
+                        midpoint_truth.position_eci_km,
+                        midpoint_truth.t_s,
                         env=env_local,
                     )
                 v_atm_eci_km_s = np.array(
                     [
-                        -EARTH_ROT_RATE_RAD_S * float(state.position_eci_km[1]),
-                        EARTH_ROT_RATE_RAD_S * float(state.position_eci_km[0]),
+                        -EARTH_ROT_RATE_RAD_S * float(midpoint_truth.position_eci_km[1]),
+                        EARTH_ROT_RATE_RAD_S * float(midpoint_truth.position_eci_km[0]),
                         0.0,
                     ],
                     dtype=float,
                 )
-                v_rel_eci_m_s = (state.velocity_eci_km_s - v_atm_eci_km_s) * 1e3
+                v_rel_eci_m_s = (midpoint_truth.velocity_eci_km_s - v_atm_eci_km_s) * 1e3
                 env_local["drag_v_rel_eci_m_s"] = v_rel_eci_m_s
                 env_local["drag_v_rel_norm_m_s"] = float(np.linalg.norm(v_rel_eci_m_s))
 
@@ -122,20 +128,20 @@ class OrbitalAttitudeDynamics(DynamicsModel):
                     if sun_norm > 0.0:
                         env_local["sun_dir_eci_unit"] = sun_dir_eci / sun_norm
                 env_local["srp_shadow_factor"] = srp_shadow_factor(
-                    r_sc_eci_km=state.position_eci_km,
-                    t_s=state.t_s,
+                    r_sc_eci_km=midpoint_truth.position_eci_km,
+                    t_s=midpoint_truth.t_s,
                     env=env_local,
                 )
             att_dt = self._effective_substep(self.attitude_substep_s, dt_s)
             t_att = state.t_s
             for h in self._substep_sequence(dt_s, att_dt):
                 att_state = StateTruth(
-                    position_eci_km=np.array(state.position_eci_km, dtype=float),
-                    velocity_eci_km_s=np.array(state.velocity_eci_km_s, dtype=float),
+                    position_eci_km=np.array(midpoint_truth.position_eci_km, dtype=float),
+                    velocity_eci_km_s=np.array(midpoint_truth.velocity_eci_km_s, dtype=float),
                     attitude_quat_bn=np.array(q_next, dtype=float),
                     angular_rate_body_rad_s=np.array(w_next, dtype=float),
                     mass_kg=float(state.mass_kg),
-                    t_s=float(t_att),
+                    t_s=float(midpoint_truth.t_s),
                 )
                 disturbance_torque = (
                     np.zeros(3) if self.disturbance_model is None else self.disturbance_model.total_torque_body_nm(att_state, env_local)
@@ -198,3 +204,16 @@ class OrbitalAttitudeDynamics(DynamicsModel):
         if rem > 1e-12:
             steps.append(rem)
         return steps
+
+    @staticmethod
+    def _midpoint_translational_truth(state: StateTruth, x_orbit_next: np.ndarray, dt_s: float) -> StateTruth:
+        x_orbit_now = np.hstack((state.position_eci_km, state.velocity_eci_km_s))
+        x_mid = 0.5 * (np.array(x_orbit_now, dtype=float) + np.array(x_orbit_next, dtype=float).reshape(6))
+        return StateTruth(
+            position_eci_km=np.array(x_mid[:3], dtype=float),
+            velocity_eci_km_s=np.array(x_mid[3:], dtype=float),
+            attitude_quat_bn=np.array(state.attitude_quat_bn, dtype=float),
+            angular_rate_body_rad_s=np.array(state.angular_rate_body_rad_s, dtype=float),
+            mass_kg=float(state.mass_kg),
+            t_s=float(state.t_s + 0.5 * dt_s),
+        )

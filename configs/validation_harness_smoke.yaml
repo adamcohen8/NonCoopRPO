@@ -5,6 +5,7 @@ benchmarks:
   - name: "plugin_validation_smoke"
     kind: "plugin_validation"
     description: "Validate plugin pointers on the automation smoke scenario."
+    tags: ["smoke", "fast", "plugins"]
     config_path: "automation_smoke.yaml"
     checks:
       valid:
@@ -15,6 +16,7 @@ benchmarks:
   - name: "simulation_smoke"
     kind: "simulation"
     description: "Run the automation smoke scenario and assert a clean nominal completion."
+    tags: ["smoke", "fast", "single_run"]
     config_path: "automation_smoke.yaml"
     checks:
       monte_carlo.enabled:
@@ -27,6 +29,7 @@ benchmarks:
   - name: "hpop_two_body_leo"
     kind: "hpop"
     description: "Cross-check the two-body orbit propagator against the bundled HPOP reference."
+    tags: ["smoke", "orbit", "hpop"]
     envelope: "leo"
     hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
     params:

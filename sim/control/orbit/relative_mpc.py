@@ -8,7 +8,7 @@ import numpy as np
 from sim.core.interfaces import Controller
 from sim.core.models import Command, StateBelief
 from sim.dynamics.orbit.two_body import propagate_two_body_rk4
-from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_state_to_eci
+from sim.utils.frames import eci_relative_to_ric_rect, ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_state_to_eci
 
 
 @dataclass
@@ -339,14 +339,7 @@ class RelativeOrbitMPCController(Controller):
 
     @staticmethod
     def _relative_rect_ric(*, x_chaser: np.ndarray, x_target: np.ndarray) -> np.ndarray:
-        r_t = x_target[:3]
-        v_t = x_target[3:]
-        r_c = x_chaser[:3]
-        v_c = x_chaser[3:]
-        c_ir = ric_dcm_ir_from_rv(r_t, v_t)
-        dr = c_ir.T @ (r_c - r_t)
-        dv = c_ir.T @ (v_c - v_t)
-        return np.hstack((dr, dv))
+        return eci_relative_to_ric_rect(x_dep_eci=x_chaser, x_chief_eci=x_target)
 
     def _project_accel(self, u_eci: np.ndarray) -> np.ndarray:
         u = np.array(u_eci, dtype=float).reshape(3)

@@ -201,6 +201,8 @@ def build_sim_object_from_presets(
             min_impulse_bit_km_s=thruster.min_impulse_bit_n_s / max(satellite.wet_mass_kg, 1e-9) / 1e3,
             max_throttle_rate_km_s2_s=1e-4,
             isp_s=thruster.isp_s,
+            thruster_direction_body=np.array(thruster.mount.thrust_direction_body, dtype=float),
+            thruster_position_body_m=np.array(thruster.mount.position_body_m, dtype=float),
         )
     }
 

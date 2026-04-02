@@ -13,6 +13,45 @@ from sim.utils.frames import ric_dcm_ir_from_rv
 from sim.utils.ground_track import ground_track_from_eci_history
 from sim.utils.quaternion import quaternion_to_dcm_bn
 
+AVAILABLE_FIGURE_IDS = [
+    "orbit_eci",
+    "trajectory_ecef",
+    "trajectory_ric_rect",
+    "trajectory_ric_curv",
+    "trajectory_ric_rect_2d",
+    "trajectory_ric_curv_2d",
+    "trajectory_eci_multi",
+    "trajectory_ecef_multi",
+    "trajectory_ric_rect_multi",
+    "trajectory_ric_curv_multi",
+    "trajectory_ric_rect_2d_multi",
+    "trajectory_ric_curv_2d_multi",
+    "attitude",
+    "quaternion_eci",
+    "quaternion_ric",
+    "rates_eci",
+    "rates_ric",
+    "relative_range",
+    "knowledge_timeline",
+    "control_thrust",
+    "control_thrust_multi",
+    "control_thrust_ric",
+    "control_thrust_ric_multi",
+    "quaternion_error",
+    "rocket_ascent_diagnostics",
+    "rocket_orbital_elements",
+    "rocket_fuel_remaining",
+    "satellite_delta_v_remaining",
+    "thrust_alignment_error",
+]
+
+AVAILABLE_ANIMATION_TYPES = [
+    "ground_track",
+    "ground_track_multi",
+    "ric_curv_prism_multi",
+    "ric_prism_side_by_side",
+]
+
 
 def _load_plotting_functions() -> dict[str, Any]:
     from sim.utils.plotting import plot_attitude_tumble, plot_orbit_eci

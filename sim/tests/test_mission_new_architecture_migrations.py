@@ -3,7 +3,8 @@ import unittest
 import numpy as np
 
 from sim.core.models import Command, StateBelief, StateTruth
-from sim.mission.modules import BudgetedEndStateExecution, DesiredStateMissionStrategy, IntegratedCommandExecution, PredictiveBurnExecution
+from sim.mission.modules import BudgetedEndStateExecution, ControllerPointingExecution, DesiredStateMissionStrategy, IntegratedCommandExecution, PredictiveBurnExecution
+from sim.utils.quaternion import quaternion_to_dcm_bn
 
 
 def _truth() -> StateTruth:
@@ -104,6 +105,32 @@ class MissionArchitectureMigrationTests(unittest.TestCase):
             env={"attitude_disabled": True},
         )
         self.assertGreater(float(np.linalg.norm(np.array(out["thrust_eci_km_s2"], dtype=float))), 0.0)
+
+    def test_controller_pointing_execution_targets_thruster_opposite_commanded_delta_v(self) -> None:
+        e = ControllerPointingExecution(
+            alignment_tolerance_deg=180.0,
+            thruster_direction_body=np.array([0.0, 0.0, 1.0], dtype=float),
+        )
+        controller = _ConstantOrbitController([1.0e-5, 0.0, 0.0])
+        att = _ZeroAttitudeController()
+        truth = _truth()
+        orb_belief = StateBelief(state=np.hstack((truth.position_eci_km, truth.velocity_eci_km_s)), covariance=np.eye(6), last_update_t_s=0.0)
+        att_belief = StateBelief(state=np.hstack((truth.attitude_quat_bn, truth.angular_rate_body_rad_s)), covariance=np.eye(7), last_update_t_s=0.0)
+
+        out = e.update(
+            intent={},
+            truth=truth,
+            t_s=0.0,
+            orbit_controller=controller,
+            attitude_controller=att,
+            orb_belief=orb_belief,
+            att_belief=att_belief,
+        )
+
+        self.assertGreater(float(np.linalg.norm(np.array(out["thrust_eci_km_s2"], dtype=float))), 0.0)
+        c_bn = quaternion_to_dcm_bn(np.array(att.target, dtype=float))
+        plume_axis_eci = c_bn.T @ np.array([0.0, 0.0, 1.0], dtype=float)
+        self.assertTrue(np.allclose(plume_axis_eci, np.array([-1.0, 0.0, 0.0], dtype=float), atol=1e-8))
 
 
 if __name__ == "__main__":

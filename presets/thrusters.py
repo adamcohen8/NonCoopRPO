@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -32,3 +33,32 @@ BASIC_CHEMICAL_BOTTOM_Z = ChemicalPropulsionPreset(
         thrust_direction_body=np.array([0.0, 0.0, 1.0]),
     ),
 )
+
+
+def resolve_thruster_mount_from_specs(specs: dict[str, Any] | None) -> ThrusterMountPreset | None:
+    raw = dict(specs or {})
+    preset_name = str(raw.get("thruster", "") or "").strip().upper()
+    preset_mount: ThrusterMountPreset | None = None
+    if preset_name in ("BASIC_CHEMICAL_BOTTOM_Z", "BASIC_CHEMICAL_Z_BOTTOM"):
+        preset_mount = BASIC_CHEMICAL_BOTTOM_Z.mount
+
+    explicit_direction = raw.get("thruster_direction_body")
+    explicit_position = raw.get("thruster_position_body_m")
+    if explicit_direction is None and explicit_position is None:
+        return preset_mount
+
+    direction_body = (
+        np.array(explicit_direction, dtype=float)
+        if explicit_direction is not None
+        else np.array(preset_mount.thrust_direction_body if preset_mount is not None else [1.0, 0.0, 0.0], dtype=float)
+    )
+    position_body_m = (
+        np.array(explicit_position, dtype=float)
+        if explicit_position is not None
+        else np.array(preset_mount.position_body_m if preset_mount is not None else [0.0, 0.0, 0.0], dtype=float)
+    )
+    return ThrusterMountPreset(
+        name=str(raw.get("thruster_mount_name", getattr(preset_mount, "name", "Configured Thruster Mount"))),
+        position_body_m=position_body_m,
+        thrust_direction_body=direction_body,
+    )

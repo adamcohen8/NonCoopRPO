@@ -22,7 +22,8 @@ from typing import Any, Callable
 import numpy as np
 
 from presets.rockets import BASIC_1ST_STAGE, BASIC_SSTO_ROCKET, BASIC_TWO_STAGE_STACK, RocketStackPreset
-from presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z
+from presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, resolve_thruster_mount_from_specs
+from sim.actuators.orbital import attitude_coupled_thrust_eci, thruster_disturbance_torque_body_nm
 from sim.config import SimulationScenarioConfig, load_simulation_yaml, scenario_config_from_dict, validate_scenario_plugins
 from sim.control.attitude.zero_torque import ZeroTorqueController
 from sim.control.orbit.zero_controller import ZeroController
@@ -1011,6 +1012,26 @@ def _resolve_satellite_inertia_kg_m2(specs: dict[str, Any]) -> np.ndarray:
     return np.diag([120.0, 100.0, 80.0])
 
 
+def _apply_thruster_mount_defaults(module_obj: Any | None, pointer: Any | None, specs: dict[str, Any]) -> Any | None:
+    if module_obj is None:
+        return None
+    mount = resolve_thruster_mount_from_specs(specs)
+    if mount is None:
+        return module_obj
+    params = dict(getattr(pointer, "params", {}) or {}) if pointer is not None else {}
+    if hasattr(module_obj, "thruster_direction_body") and "thruster_direction_body" not in params:
+        try:
+            module_obj.thruster_direction_body = np.array(mount.thrust_direction_body, dtype=float)
+        except (TypeError, ValueError, AttributeError):
+            pass
+    if hasattr(module_obj, "thruster_position_body_m") and "thruster_position_body_m" not in params:
+        try:
+            module_obj.thruster_position_body_m = np.array(mount.position_body_m, dtype=float)
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return module_obj
+
+
 def _resolve_chaser_relative_ric_init(initial_state: dict[str, Any]) -> tuple[np.ndarray, str] | None:
     s0 = dict(initial_state or {})
     rel_block = s0.get("relative_to_target_ric")
@@ -1117,6 +1138,8 @@ class AgentRuntime:
     orbital_isp_s: float | None = None
     dry_mass_kg: float | None = None
     fuel_capacity_kg: float | None = None
+    thruster_direction_body: np.ndarray | None = None
+    thruster_position_body_m: np.ndarray | None = None
 
 
 @dataclass
@@ -1222,11 +1245,14 @@ def _create_satellite_runtime(
         orbit_propagator=_build_orbit_propagator(cfg),
     )
     bridge = _module_obj(agent_cfg.bridge) if (agent_cfg.bridge is not None and agent_cfg.bridge.enabled) else None
-    mission_strategy = _module_obj(getattr(agent_cfg, "mission_strategy", None))
-    mission_execution = _module_obj(getattr(agent_cfg, "mission_execution", None))
+    mission_strategy_pointer = getattr(agent_cfg, "mission_strategy", None)
+    mission_execution_pointer = getattr(agent_cfg, "mission_execution", None)
+    mission_strategy = _module_obj(mission_strategy_pointer)
+    mission_execution = _apply_thruster_mount_defaults(_module_obj(mission_execution_pointer), mission_execution_pointer, specs)
     missions = [_module_obj(p) for p in list(agent_cfg.mission_objectives or [])]
     missions = [m for m in missions if m is not None]
     sat_isp_s = _resolve_satellite_isp_s(specs)
+    thruster_mount = resolve_thruster_mount_from_specs(specs)
     sat_dry_mass_kg: float | None = None
     sat_fuel_capacity_kg: float | None = None
     if "dry_mass_kg" in specs:
@@ -1270,6 +1296,8 @@ def _create_satellite_runtime(
         orbital_isp_s=(None if sat_isp_s <= 0.0 else float(sat_isp_s)),
         dry_mass_kg=sat_dry_mass_kg,
         fuel_capacity_kg=sat_fuel_capacity_kg,
+        thruster_direction_body=(None if thruster_mount is None else np.array(thruster_mount.thrust_direction_body, dtype=float)),
+        thruster_position_body_m=(None if thruster_mount is None else np.array(thruster_mount.position_body_m, dtype=float)),
     )
 
 
@@ -1412,6 +1440,8 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         orbital_isp_s=None,
         dry_mass_kg=None,
         fuel_capacity_kg=None,
+        thruster_direction_body=None,
+        thruster_position_body_m=None,
     )
 
 
@@ -2125,6 +2155,7 @@ class _SingleRunEngine:
         self.attitude_enabled = bool(att_cfg.get("enabled", True))
         orbit_substep_s = float(max(float(orbit_cfg.get("orbit_substep_s", self.dt) or self.dt), 1e-9))
         attitude_substep_s = float(max(float(att_cfg.get("attitude_substep_s", self.dt) or self.dt), 1e-9))
+        self.orbit_command_period_s = orbit_substep_s
         self.sim_substep_s = float(min(orbit_substep_s, attitude_substep_s)) if self.attitude_enabled else orbit_substep_s
         self.eye6 = np.eye(6) * 1e-4
         self.eye12 = np.eye(12) * 1e-4
@@ -2177,6 +2208,10 @@ class _SingleRunEngine:
         self.torque_hist = {aid: np.full((self.n, 3), np.nan) for aid in self.agents.keys()}
         self.desired_attitude_hist = {aid: np.full((self.n, 4), np.nan) for aid in self.agents.keys()}
         self.controller_debug_hist: dict[str, list[dict[str, Any]]] = {aid: [] for aid in self.agents.keys()}
+        self._last_orbital_command_eval_t_s: dict[str, float | None] = {aid: None for aid in self.agents.keys()}
+        self._latched_orbital_thrust_cmd_by_object: dict[str, np.ndarray] = {
+            aid: self.zero3.copy() for aid in self.agents.keys()
+        }
         self.throttle_hist = {"rocket": np.full(self.n, np.nan)} if self.rocket is not None else {}
         self.rocket_stage_hist = np.full(self.n, np.nan) if self.rocket is not None else None
         self.rocket_q_dyn_hist = np.full(self.n, np.nan) if self.rocket is not None else None
@@ -2511,13 +2546,36 @@ class _SingleRunEngine:
                             cmd.thrust_eci_km_s2 = np.array(mission_out["thrust_eci_km_s2"], dtype=float).reshape(3)
                         if "torque_body_nm" in mission_out:
                             cmd.torque_body_nm = np.array(mission_out["torque_body_nm"], dtype=float).reshape(3)
+                    orbital_command_due = (
+                        self._last_orbital_command_eval_t_s[aid] is None
+                        or float(t_eval) - float(self._last_orbital_command_eval_t_s[aid]) >= self.orbit_command_period_s - 1e-12
+                    )
+                    if orbital_command_due:
+                        self._last_orbital_command_eval_t_s[aid] = float(t_eval)
+                        self._latched_orbital_thrust_cmd_by_object[aid] = np.array(cmd.thrust_eci_km_s2, dtype=float).reshape(3)
+                    latched_thrust_cmd = np.array(self._latched_orbital_thrust_cmd_by_object[aid], dtype=float).reshape(3)
                     if not self.attitude_enabled:
                         cmd.torque_body_nm = self.zero3
                     cmd_step = Command(
-                        thrust_eci_km_s2=np.array(cmd.thrust_eci_km_s2, dtype=float),
+                        thrust_eci_km_s2=latched_thrust_cmd,
                         torque_body_nm=(self.zero3.copy() if not self.attitude_enabled else np.array(cmd.torque_body_nm, dtype=float)),
                         mode_flags=dict(cmd.mode_flags or {}),
                     )
+                    cmd_step.mode_flags["orbital_command_updated"] = bool(orbital_command_due)
+                    if self._last_orbital_command_eval_t_s[aid] is not None:
+                        cmd_step.mode_flags["orbital_command_sample_t_s"] = float(self._last_orbital_command_eval_t_s[aid])
+                    cmd_step.mode_flags["current_attitude_quat_bn"] = np.array(tr_inner.attitude_quat_bn, dtype=float)
+                    if agent.thruster_direction_body is not None:
+                        cmd_step.mode_flags["thruster_direction_body"] = np.array(agent.thruster_direction_body, dtype=float)
+                    if agent.thruster_position_body_m is not None:
+                        cmd_step.mode_flags["thruster_position_body_m"] = np.array(agent.thruster_position_body_m, dtype=float)
+                    if agent.thruster_direction_body is not None:
+                        cmd_step.mode_flags["commanded_thrust_eci_km_s2"] = np.array(cmd_step.thrust_eci_km_s2, dtype=float)
+                        cmd_step.thrust_eci_km_s2 = attitude_coupled_thrust_eci(
+                            cmd_step.thrust_eci_km_s2,
+                            attitude_quat_bn=np.array(tr_inner.attitude_quat_bn, dtype=float),
+                            thruster_direction_body=np.array(agent.thruster_direction_body, dtype=float),
+                        )
                     min_mass_kg = 0.0
                     if agent.dry_mass_kg is not None and np.isfinite(float(agent.dry_mass_kg)):
                         min_mass_kg = float(max(float(agent.dry_mass_kg), 0.0))
@@ -2526,6 +2584,20 @@ class _SingleRunEngine:
                         cmd_step.thrust_eci_km_s2 = np.zeros(3, dtype=float)
                         cmd_step.mode_flags["fuel_depleted"] = True
                     cmd_step.mode_flags["min_mass_kg"] = float(min_mass_kg)
+                    thruster_torque_body_nm = np.zeros(3, dtype=float)
+                    if (
+                        self.attitude_enabled
+                        and agent.thruster_direction_body is not None
+                        and agent.thruster_position_body_m is not None
+                    ):
+                        thruster_torque_body_nm = thruster_disturbance_torque_body_nm(
+                            cmd_step.thrust_eci_km_s2,
+                            current_mass_kg=float(max(tr_inner.mass_kg, 0.0)),
+                            thruster_direction_body=np.array(agent.thruster_direction_body, dtype=float),
+                            thruster_position_body_m=np.array(agent.thruster_position_body_m, dtype=float),
+                        )
+                        cmd_step.torque_body_nm = np.array(cmd_step.torque_body_nm, dtype=float) + thruster_torque_body_nm
+                    cmd_step.mode_flags["thruster_torque_body_nm"] = thruster_torque_body_nm.tolist()
                     isp_s = agent.orbital_isp_s
                     if isp_s is not None and float(isp_s) > 0.0 and "delta_mass_kg" not in cmd_step.mode_flags:
                         g0_m_s2 = 9.80665
@@ -2792,7 +2864,11 @@ def _run_single_config(
     cfg: SimulationScenarioConfig,
     step_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
-    return _SingleRunEngine(cfg, step_callback=step_callback).run()
+    import sim.runtime_support as _runtime_support
+    from sim.single_run import _run_single_config as _single_run_impl
+
+    _runtime_support.EARTH_MU_KM3_S2 = EARTH_MU_KM3_S2
+    return _single_run_impl(cfg, step_callback=step_callback)
 
 
 def _is_truthy_env(name: str) -> bool:
@@ -2800,14 +2876,9 @@ def _is_truthy_env(name: str) -> bool:
 
 
 def _coerce_noninteractive_for_automation(cfg: SimulationScenarioConfig) -> SimulationScenarioConfig:
-    if not (_is_truthy_env("SIM_AUTOMATION") or _is_truthy_env("CI")):
-        return cfg
-    root = cfg.to_dict()
-    outputs = root.setdefault("outputs", {})
-    mode = str(outputs.get("mode", "interactive")).strip().lower()
-    if mode == "interactive":
-        outputs["mode"] = "save"
-    return scenario_config_from_dict(root)
+    from sim.single_run import _coerce_noninteractive_for_automation as _coerce_impl
+
+    return _coerce_impl(cfg)
 
 
 def _run_sensitivity_analysis(

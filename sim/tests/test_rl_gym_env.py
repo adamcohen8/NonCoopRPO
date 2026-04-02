@@ -124,6 +124,37 @@ class TestGymSimulationEnv(unittest.TestCase):
         sampled = dict(info["sampled_parameters"])
         self.assertEqual(sampled["chaser.initial_state.relative_to_target_ric.state[0]"], 0.5)
 
+    def test_knowledge_observation_fields_use_schema_defaults_before_track_exists(self):
+        scenario = _base_scenario()
+        scenario["chaser"]["knowledge"] = {"targets": ["target"]}
+        env = GymSimulationEnv(
+            GymEnvConfig(
+                scenario=scenario,
+                controlled_agent_id="chaser",
+                observation_fields=(ObservationField("knowledge.chaser.target.state"),),
+                action_fields=(),
+            )
+        )
+
+        obs, _ = env.reset(seed=6)
+
+        self.assertEqual(obs.shape, (6,))
+        self.assertTrue(np.allclose(obs, np.zeros(6, dtype=np.float32)))
+
+    def test_invalid_observation_path_for_disabled_agent_fails_fast(self):
+        scenario = _base_scenario()
+        scenario["target"]["enabled"] = False
+
+        with self.assertRaisesRegex(ValueError, "truth.target.position_eci_km"):
+            GymSimulationEnv(
+                GymEnvConfig(
+                    scenario=scenario,
+                    controlled_agent_id="chaser",
+                    observation_fields=(ObservationField("truth.target.position_eci_km"),),
+                    action_fields=(),
+                )
+            )
+
     def test_thrust_vector_adapter_supports_hybrid_pointing(self):
         env = GymSimulationEnv(
             GymEnvConfig(

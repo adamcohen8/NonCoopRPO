@@ -1,124 +1,165 @@
-Verification and Validation (V&V) Plan
+Verification and Validation (V&V) Status and Plan
 Project: Orbital Engagement Lab
-Use Case: ASAT missile + interceptor with proprietary guidance
-Date: 2026-03-12
+Review Date: 2026-04-02
+Basis: repository review plus focused execution spot-checks on 2026-04-02
+
+Project Scope Covered
+- This project is broader than the earlier ASAT-only framing.
+- The current repository supports orbit dynamics, attitude dynamics and control, estimation and object knowledge, rendezvous and engagement scenarios, rocket/ascent components, Monte Carlo and sensitivity analysis, validation tooling, API/GUI workflows, and external integration stubs.
 
 Objective
-- Quantify how closely simulation outcomes represent reality for ASAT engagement analysis.
-- Move from qualitative insight to bounded, decision-support confidence.
+- Track what has already been verified or partially validated in the codebase.
+- Separate implemented V&V infrastructure from still-missing decision-grade evidence.
+- Keep a practical roadmap for moving from internal engineering confidence to stronger external validation claims.
 
 Confidence Framework
-- Level 0 (Exploratory): trend-only confidence; no formal error bounds.
-- Level 1 (Subsystem Validated): each major subsystem has benchmark error bounds.
-- Level 2 (Integrated Validated): coupled end-to-end scenarios validated in envelope.
-- Level 3 (Decision Grade): statistically defensible uncertainty bounds vs trusted truth data.
+- Level 0 (Exploratory): trend-only confidence; qualitative insight only.
+- Level 1 (Verified Core): core software behavior is regression tested and major numerical/logic paths are exercised.
+- Level 2 (Partially Integrated Validated): selected integrated scenarios have benchmark configs, tolerance gates, and repeatable reports.
+- Level 3 (Decision Grade): externally anchored truth data, calibrated uncertainty models, and release-quality confidence statements exist for a defined envelope.
 
-Success Metric
-- Produce confidence statements in the form:
-  "For envelope E, with confidence C, simulation miss-distance/time/fuel errors are within bounds B."
+Current Assessed Confidence Level
+- Current repository evidence supports Level 1 for core software verification.
+- There is partial Level 2 evidence for selected rendezvous/orbit validation cases.
+- Level 3 is not achieved in the current repo state.
+
+Evidence Reviewed
+- `sim/tests/` currently contains 58 test files and 271 test definitions.
+- The repository includes an automated validation harness with YAML specs and JSON/Markdown reports.
+- The repository includes HPOP cross-validation tooling for orbit model parity checks.
+- The repository includes integrated single-run and Monte Carlo validation scenarios for rendezvous/orbit cases.
+- The repository includes sensitivity, Latin hypercube sampling, controller benchmarking, plugin validation, API tests, and GUI/config round-trip tests.
+- Focused execution run on 2026-04-02:
+  - 31 selected validation-related tests passed.
+  - `validation_harness_smoke` produced 2/3 passing benchmarks.
+  - The failing smoke benchmark was the HPOP leg, blocked by a local NumPy 2 / Matplotlib binary-compatibility issue (`numpy.core.multiarray failed to import`), not by a simulation tolerance failure.
+
+Recommended Current Confidence Statement
+- Orbital Engagement Lab is suitable for internal engineering exploration, comparative controller evaluation, and repeatable closed-loop simulation studies.
+- The repository has meaningful internal verification and partial integrated validation support, but it is not yet decision-grade for real-world engagement claims without broader external truth comparison, environment-stable benchmark execution, and formal uncertainty calibration.
+
+Status Against the Earlier Plan
 
 Phase A: Verification (Build Correctness)
-1. Deterministic unit tests (continuous integration)
-- Orbit propagation: 2-body, J2/J3/J4, harmonics, drag, SRP, third-body.
-- Attitude propagation: quaternion/exponential-map stability, torque sign checks.
-- Rocket/ascent: staging, mass flow, thrust logic, max-Q limiter, termination conditions.
-- Knowledge/EKF: update cadence, dropout behavior, consistency checks (NIS/NEES math).
-- Pass criteria: >95% branch coverage on critical dynamics/control paths; zero failing regression tests.
+1. Deterministic unit tests (Implemented)
+- Present across orbit propagation, attitude/control, actuators, rocket stack assembly, mission logic, Monte Carlo reporting, config parsing, API behavior, app I/O, and validation harness helpers.
+- Representative coverage exists for J2/J3/J4 and spherical harmonics plugins, atmosphere models, disturbance torques, reaction wheel behavior, orbital actuator mass depletion, mission transitions, and controller bench reporting.
+- Gap: no checked-in branch-coverage gate or published critical-path coverage metric was found.
 
-2. Numerical verification
-- Integrator convergence studies: dt sweep and tolerance sweep.
-- Event timing verification: staging/deployment/cutoff events hit within tolerance.
-- Pass criteria: state error decreases with timestep as expected; event timing error < configured threshold.
+2. Numerical verification (Partial)
+- Adaptive orbit integrator selection and RKF78 step behavior are tested.
+- Atmosphere, SRP, drag, eclipse, and perturbation helper logic have regression tests.
+- HPOP comparison tooling exists and can report RMS/max orbit error metrics for multiple force-model configurations.
+- Gap: no systematic dt/tolerance sweep report was found across the full dynamics stack, and event-timing verification is not yet organized as a formal benchmark suite.
 
-3. Interface verification
-- Validate units/contracts for all interfaces (km vs m, body vs ECI vs RIC).
-- Pass criteria: automated dimensional/shape/unit checks in scenario setup and logs.
+3. Interface verification (Partial)
+- Scenario YAML parsing, defaults, plugin pointer validation, public API sessions, app config load/save, and app service capabilities are tested.
+- Ground-track, frame, and config-section normalization logic are covered by tests.
+- cFS SIL bridge files and interface definitions exist under `integrations/cfs_sil/`.
+- Gap: no general automated dimensional-consistency checker was found for all interfaces/log outputs.
 
 Phase B: Subsystem Validation (Physics Fidelity)
-4. Orbital truth-model validation
-- Compare against trusted reference (HPOP/STK/GMAT/MATLAB truth runs) for matched initial conditions.
-- Validate one perturbation at a time, then stacked models.
-- Metrics: RMS/max position and velocity error over duration windows.
-- Pass criteria: documented tolerance by regime (LEO/MEO/cislunar), with known integrator contribution.
+4. Orbital truth-model validation (Partial)
+- `validation/hpop_compare.py` supports model-by-model parity checks for `two_body`, `drag`, `srp`, `j2`, `j3`, `j4`, `j2j3`, `j2j3j4`, and `sh8x8`.
+- The automated validation harness includes tolerance tables and HPOP-driven benchmarks.
+- Gap: broad regime-by-regime truth matrices are not yet documented, and the HPOP path is currently blocked in this local environment by a NumPy/Matplotlib ABI mismatch.
 
-5. Attitude and disturbance validation
-- Validate gravity-gradient, SRP torque, drag torque magnitudes and directions against analytic/independent models.
-- Reaction wheel/actuator behavior vs expected torque and momentum limits.
-- Pass criteria: torque and rate response within predefined envelopes.
+5. Attitude and disturbance validation (Partial)
+- Disturbance torque modeling, substep behavior, cached environment use, and attitude controller variants are regression tested.
+- Reaction wheel and integrated actuator behavior are exercised.
+- Guardrail statistics are captured and used in Monte Carlo gating.
+- Gap: no external hardware or independent truth-model benchmark package was found for attitude/disturbance fidelity.
 
-6. Rocket/ascent validation
-- Validate ascent profile against known trajectory references for similar vehicle class.
-- Include atmosphere/wind sensitivity, max-Q timing/magnitude, burnout conditions.
-- Metrics: altitude/velocity/mach/max-Q/staging-time deviations.
-- Pass criteria: bounded errors across nominal and dispersed cases.
+6. Rocket/ascent validation (Partial)
+- Rocket engine, aero, guidance stack composition, mission split behavior, termination conditions, and representative demos/tests are present.
+- Gap: no external trajectory-reference comparison set or ascent-specific tolerance table was found in the validation harness.
 
-7. Sensor/knowledge/estimation validation
-- Validate measurement noise, bias, dropout distributions vs specified stats.
-- EKF consistency (NIS/NEES) over Monte Carlo.
-- Pass criteria: innovation statistics inside confidence bounds over target percentage of runs.
+7. Sensor/knowledge/estimation validation (Partial, with strong internal checks)
+- Object knowledge tracking, line-of-sight/range/solid-angle gating, EKF updates, detection summaries, and consistency summaries are tested.
+- Integrated validation configs and harness tolerances already include `nis_mean`, `nees_mean`, update-rate, and position-error checks.
+- Gap: no formal Monte Carlo consistency study report was found showing required NIS/NEES bounds across a published envelope.
 
-Phase C: Integrated ASAT Scenario Validation
-8. Engagement chain validation
-- Scenario sequence: launch -> mutual knowledge onset -> maneuver policies -> chaser deployment -> terminal phase.
-- Validate timing, state handoff, and frame consistency at each phase boundary.
-- Pass criteria: phase transitions occur at commanded conditions with zero contract violations.
+Phase C: Integrated Scenario Validation
+8. Engagement chain validation (Partial)
+- Integrated rendezvous configs exist for single-run and Monte Carlo cases.
+- Mission executive transitions, integrated burn/attitude sequencing, and controller-to-actuator handoff logic are tested.
+- ASAT-style and rendezvous scenario scripts/examples exist.
+- Gap: phase-boundary acceptance tables are not yet captured as a formal validation artifact.
 
-9. Adversary behavior validation
-- Create standardized target behavior library (coast/evasive/deceptive/pulsed thrust).
-- Confirm reproducibility with fixed seeds and expected diversity with varied seeds.
-- Pass criteria: scenario behavior matches scripted policy definitions and uncertainty model.
+9. Adversary behavior validation (Limited)
+- The repository includes ASAT phased-engagement scenarios and target-evasion examples.
+- Gap: no standardized adversary-behavior library with reproducibility/diversity acceptance criteria was found as part of the V&V workflow.
 
-10. End-to-end benchmark campaigns
-- Run matched campaigns against trusted high-fidelity baseline for representative threat envelopes.
-- Metrics: miss distance, closest approach time, fuel use, state-estimation error, intercept/survival outcomes.
-- Pass criteria: error distributions within agreed bounds for each envelope.
+10. End-to-end benchmark campaigns (Partial)
+- Monte Carlo reporting, commander briefs, pass/fail gates, baseline comparison helpers, and confidence-band summaries are implemented.
+- The automated validation harness includes integrated rendezvous and high-fidelity orbit Monte Carlo cases.
+- Gap: no trusted external integrated baseline campaign appears to be checked in for full end-to-end comparison.
 
 Phase D: Uncertainty Quantification and Confidence Statements
-11. Calibration and uncertainty model
-- Calibrate uncertain parameters (aero coeffs, thrust dispersion, sensor bias, timing jitter, etc.) using available data.
-- Use Bayesian or likelihood-based calibration where feasible.
+11. Calibration and uncertainty model (Not yet formalized)
+- Monte Carlo dispersions and sensitivity parameterization exist.
+- Gap: no formal parameter calibration workflow against measured or trusted truth data was found.
 
-12. Monte Carlo confidence characterization
-- Large campaign matrix over initial conditions, environment, and hardware dispersions.
-- Compute confidence intervals for mission outcomes and key errors.
-- Deliver ROC-style curves for attacker/defender advantage under each scenario family.
+12. Monte Carlo confidence characterization (Partial)
+- Aggregate pass rates, catastrophic outcome rates, guardrail rates, seed counts, and confidence-style commander-brief summaries are implemented.
+- Gap: these outputs are not yet turned into release-quality envelope confidence statements.
 
-13. Global sensitivity analysis
-- Identify dominant contributors to outcome uncertainty.
-- Prioritize model-improvement investments by impact.
+13. Global sensitivity analysis (Partial)
+- One-at-a-time sensitivity and Latin hypercube sampling are supported through config/API flows.
+- Sensitivity rankings are produced from run sets.
+- Gap: no standing sensitivity report or model-improvement prioritization process was found.
 
 Phase E: Acceptance and Governance
-14. Validation report package (per release)
-- Configuration snapshot (commit hash, environment, dependency versions).
-- Model assumptions and known limitations.
-- Benchmark comparisons and pass/fail matrix.
-- Confidence statements and restricted envelope of validity.
+14. Validation report package (Partial)
+- The validation harness writes JSON and Markdown reports.
+- Controller benchmarking writes JSON, Markdown, and CSV comparison artifacts.
+- Gap: no release report template was found that consistently captures commit hash, environment, dependency versions, assumptions, limitations, and approved envelope statements.
 
-15. Change-control gate
-- Any change to dynamics/control/estimation requires:
-  - full regression pass,
-  - targeted re-validation,
-  - updated confidence statement if affected.
+15. Change-control gate (Partial)
+- The repo already has regression tests and validation specs that could support a gate.
+- Gap: no enforced CI/release gate was found in this review that requires targeted re-validation after dynamics/control/estimation changes.
 
-Suggested Initial Quantitative Gates (Draft)
-- Orbit-only (validated envelope): position max error <= threshold per regime and duration.
-- Attitude-only: quaternion/rate tracking errors within controller-specific thresholds.
-- Rocket ascent: max-Q timing/value and burnout state within specified deltas.
-- Engagement outcomes: miss-distance distribution shift relative to baseline within confidence interval.
+What Has Already Been Done Since the Older Draft
+- Automated V&V harness implemented.
+- Smoke and default harness specs implemented.
+- Envelope-specific tolerance tables implemented.
+- HPOP parity tooling implemented for multiple orbit models.
+- Integrated single-run and Monte Carlo validation configs implemented.
+- NIS/NEES-related knowledge consistency metrics wired into benchmark checks.
+- Monte Carlo baseline-comparison helpers and commander-brief summaries implemented.
+- One-at-a-time and LHS sensitivity analysis implemented.
+- Controller benchmarking and report generation implemented.
+- Plugin/config/API/app validation coverage implemented.
 
-Data Requirements (Minimum)
-- Vehicle truth data or high-fidelity truth-model outputs for the specific ASAT/interceptor class.
-- Sensor performance characterization (noise, bias, dropout, latency).
-- Propulsion and actuator performance maps with uncertainty bounds.
-- Environmental datasets for representative operational windows.
+What Is Still Missing for Stronger Validation Claims
+- Stable external-truth execution environment for the HPOP comparison path.
+- Broader truth-model matrices across regimes, durations, and perturbation combinations.
+- Formal rocket/ascent reference comparisons.
+- Formal calibration of uncertain parameters against trusted data.
+- Release-grade confidence statements tied to a clearly bounded envelope.
+- Documented change-control criteria that make validation reruns mandatory.
 
-Current Project Status vs This Plan (Practical View)
-- Strong foundation in modular dynamics/control/knowledge architecture.
-- Partial subsystem validation completed (not full decision-grade yet).
-- Missing for high confidence: full calibration, integrated benchmark campaigns, and formal uncertainty/confidence reporting.
+Priority Next Steps
+1. Fix the local validation environment so the HPOP benchmark path runs cleanly again.
+- Current blocker: Matplotlib binary compatibility with NumPy 2 in the active environment.
 
-Immediate Next 4 Tasks (Recommended)
-1. Build an automated V&V harness script that runs the benchmark suite and outputs pass/fail + metrics JSON.
-2. Define envelope-specific tolerance tables (LEO, high-LEO, cislunar) and wire them into the harness.
-3. Add EKF consistency tests (NIS/NEES) and include them in CI.
-4. Stand up first integrated ASAT benchmark campaign and produce a baseline validation report template.
+2. Expand orbit truth-model validation beyond the current smoke/default matrix.
+- Add documented regime tables for LEO, high-LEO, and cislunar cases.
+- Add broader force-model combinations and duration sweeps.
+
+3. Add formal numerical verification campaigns.
+- Create automated dt/tolerance convergence sweeps and event-timing checks with stored reports.
+
+4. Promote estimation validation from internal metrics to explicit benchmark evidence.
+- Save Monte Carlo NIS/NEES summaries as first-class validation artifacts with pass/fail thresholds by scenario family.
+
+5. Add rocket/ascent external-reference validation.
+- Compare altitude, velocity, max-Q timing/value, and burnout conditions against trusted references for at least one representative vehicle profile.
+
+6. Produce a release-grade validation package.
+- Include commit hash, Python/package versions, assumptions, known limitations, benchmark matrix, and explicit envelope-of-validity statements.
+
+Decision-Oriented Bottom Line
+- The current repo is no longer at the "just build a harness" stage. That work is already substantially done.
+- The main gap has shifted from internal verification infrastructure to external truth anchoring, broader benchmark coverage, and formal governance.
+- If this project remains focused on engagement analysis, the next V&V investment should be external benchmark depth and uncertainty calibration rather than more generic internal plumbing.

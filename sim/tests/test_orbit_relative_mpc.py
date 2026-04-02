@@ -16,6 +16,15 @@ class TestRelativeOrbitMPCController(unittest.TestCase):
         x_rel_back = eci_relative_to_ric_rect(x_chaser, x_target)
         self.assertTrue(np.allclose(x_rel_back, x_rel_rect, atol=1e-12))
 
+    def test_internal_relative_state_matches_shared_ric_transform(self):
+        x_target = np.array([7000.0, 10.0, -5.0, -0.01, 7.546049108166282, 0.02], dtype=float)
+        x_rel_rect = np.array([1.2, -0.8, 0.2, -0.002, 0.0015, 0.0007], dtype=float)
+        x_chaser = ric_rect_state_to_eci(x_rel_rect, x_target[:3], x_target[3:])
+
+        x_rel_internal = RelativeOrbitMPCController._relative_rect_ric(x_chaser=x_chaser, x_target=x_target)
+
+        self.assertTrue(np.allclose(x_rel_internal, x_rel_rect, atol=1e-12))
+
     def test_zero_relative_state_commands_near_zero(self):
         ctrl = RelativeOrbitMPCController(
             max_accel_km_s2=2e-5,

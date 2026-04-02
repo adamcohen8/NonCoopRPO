@@ -21,7 +21,8 @@ from sim.controller_lab.models import (
     ControllerVariant,
 )
 from sim.controller_lab.reporting import write_controller_bench_reports
-from sim.master_simulator import _analysis_study_type, _restore_env_vars, _run_single_config, _set_parallel_worker_thread_limits
+from sim.master_simulator import _analysis_study_type, _restore_env_vars, _set_parallel_worker_thread_limits
+from sim.single_run import _run_single_config
 
 
 def _is_truthy_env(name: str) -> bool:

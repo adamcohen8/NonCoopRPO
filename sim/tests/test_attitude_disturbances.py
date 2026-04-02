@@ -18,6 +18,21 @@ class _AttitudeCoupledDisturbance:
         return np.array([0.0, 0.0, 50.0 * q[2]], dtype=float)
 
 
+class _MidpointRecordingDisturbance:
+    def __init__(self) -> None:
+        self.samples: list[tuple[np.ndarray, np.ndarray, float]] = []
+
+    def total_torque_body_nm(self, state: StateTruth, env: dict | None = None) -> np.ndarray:
+        self.samples.append(
+            (
+                np.array(state.position_eci_km, dtype=float),
+                np.array(state.velocity_eci_km_s, dtype=float),
+                float(state.t_s),
+            )
+        )
+        return np.zeros(3, dtype=float)
+
+
 class TestAttitudeDisturbances(unittest.TestCase):
     def test_disturbance_torque_nonzero_for_representative_state(self):
         inertia = np.diag([120.0, 100.0, 80.0])
@@ -161,6 +176,37 @@ class TestAttitudeDisturbances(unittest.TestCase):
             )
 
         self.assertEqual(density_mock.call_count, 1)
+
+    def test_attitude_substeps_use_midpoint_translational_state(self):
+        inertia = np.diag([120.0, 100.0, 80.0])
+        state = StateTruth(
+            position_eci_km=np.array([6778.0, 0.0, 0.0]),
+            velocity_eci_km_s=np.array([0.0, 7.67, 0.0]),
+            attitude_quat_bn=np.array([1.0, 0.0, 0.0, 0.0]),
+            angular_rate_body_rad_s=np.array([0.0, 0.1, 0.0]),
+            mass_kg=300.0,
+            t_s=5.0,
+        )
+        disturbance = _MidpointRecordingDisturbance()
+        dyn = OrbitalAttitudeDynamics(
+            mu_km3_s2=398600.4418,
+            inertia_kg_m2=inertia,
+            disturbance_model=disturbance,
+            orbit_substep_s=10.0,
+            attitude_substep_s=2.0,
+        )
+
+        out = dyn.step(state.copy(), Command.zero(), env={}, dt_s=10.0)
+
+        expected_pos = 0.5 * (np.array(state.position_eci_km, dtype=float) + np.array(out.position_eci_km, dtype=float))
+        expected_vel = 0.5 * (np.array(state.velocity_eci_km_s, dtype=float) + np.array(out.velocity_eci_km_s, dtype=float))
+        expected_t = float(state.t_s + 5.0)
+
+        self.assertGreater(len(disturbance.samples), 1)
+        for pos, vel, t_s in disturbance.samples:
+            self.assertTrue(np.allclose(pos, expected_pos))
+            self.assertTrue(np.allclose(vel, expected_vel))
+            self.assertAlmostEqual(t_s, expected_t)
 
 
 if __name__ == "__main__":

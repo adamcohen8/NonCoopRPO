@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover
 from sim.config import AlgorithmPointer, MonteCarloVariation, SimulationScenarioConfig, scenario_config_from_dict
 from sim.core.models import Command, StateBelief, StateTruth
 from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
-from sim.master_simulator import (
+from sim.runtime_support import (
     _apply_chaser_relative_init_from_target,
     _attitude_state13_from_belief,
     _build_knowledge_base,
@@ -225,6 +225,82 @@ def _assign_path(root: dict[str, Any], path: str, value: Any) -> None:
         cur = cur[token]
 
 
+def _enabled_satellite_ids_from_scenario_dict(scenario_dict: dict[str, Any]) -> tuple[str, ...]:
+    enabled: list[str] = []
+    for agent_id in ("chaser", "target"):
+        agent_cfg = dict(scenario_dict.get(agent_id, {}) or {})
+        if bool(agent_cfg.get("enabled", False)):
+            enabled.append(agent_id)
+    return tuple(enabled)
+
+
+def _observation_probe_from_scenario_dict(scenario_dict: dict[str, Any]) -> dict[str, Any]:
+    enabled_ids = _enabled_satellite_ids_from_scenario_dict(scenario_dict)
+    truth = {
+        agent_id: {
+            "position_eci_km": np.zeros(3, dtype=float),
+            "velocity_eci_km_s": np.zeros(3, dtype=float),
+            "attitude_quat_bn": np.zeros(4, dtype=float),
+            "angular_rate_body_rad_s": np.zeros(3, dtype=float),
+            "mass_kg": 0.0,
+            "t_s": 0.0,
+        }
+        for agent_id in enabled_ids
+    }
+    belief = {
+        agent_id: {
+            "state": np.zeros(13, dtype=float),
+            "last_update_t_s": 0.0,
+        }
+        for agent_id in enabled_ids
+    }
+    knowledge: dict[str, dict[str, dict[str, Any]]] = {}
+    for observer_id in enabled_ids:
+        agent_cfg = dict(scenario_dict.get(observer_id, {}) or {})
+        knowledge_cfg = dict(agent_cfg.get("knowledge", {}) or {})
+        targets = []
+        for target_id in list(knowledge_cfg.get("targets", []) or []):
+            target = str(target_id)
+            if target != observer_id and target in enabled_ids:
+                targets.append(target)
+        if targets:
+            knowledge[observer_id] = {
+                target_id: {
+                    "state": np.zeros(6, dtype=float),
+                    "last_update_t_s": 0.0,
+                }
+                for target_id in sorted(set(targets))
+            }
+    return {
+        "truth": truth,
+        "belief": belief,
+        "knowledge": knowledge,
+        "metrics": {"range_km": 0.0, "closest_range_km": 0.0, "step": 0.0, "time_s": 0.0},
+        "sampled_parameters": {},
+    }
+
+
+def _lookup_observation_value(snapshot: dict[str, Any], path: str, probe: dict[str, Any]) -> np.ndarray:
+    try:
+        value = _lookup_path(snapshot, path)
+    except (AttributeError, IndexError, KeyError, TypeError):
+        value = _lookup_path(probe, path)
+    return np.array(value, dtype=float).reshape(-1)
+
+
+def _observation_dim_from_fields(fields: tuple[ObservationField, ...], probe: dict[str, Any]) -> int:
+    dim = 0
+    for field in fields:
+        try:
+            value = np.array(_lookup_path(probe, field.path), dtype=float).reshape(-1)
+        except (AttributeError, IndexError, KeyError, TypeError) as exc:
+            raise ValueError(
+                f"Observation field '{field.path}' is unavailable for the enabled agents or configured knowledge targets."
+            ) from exc
+        dim += int(value.size)
+    return dim
+
+
 def _snapshot_truth(truth: StateTruth) -> dict[str, Any]:
     return {
         "position_eci_km": np.array(truth.position_eci_km, dtype=float),
@@ -361,6 +437,7 @@ class GymSimulationEnv(gym.Env):
         self.current_time_s = 0.0
         self.closest_range_km = np.inf
         self.last_snapshot: dict[str, Any] | None = None
+        self._observation_probe = _observation_probe_from_scenario_dict(self.base_scenario_dict)
 
         obs_fields = tuple(cfg.observation_fields) or (
             ObservationField(path=f"truth.{self.controlled_agent_id}.position_eci_km[0]"),
@@ -378,46 +455,13 @@ class GymSimulationEnv(gym.Env):
             high = np.zeros(0, dtype=np.float32)
         self.action_fields = tuple(cfg.action_fields)
         self.action_space = spaces.Box(low=low, high=high, shape=(low.size,), dtype=np.float32)
-        obs_dim = self._observation_dim_from_fields()
+        obs_dim = _observation_dim_from_fields(self.observation_fields, self._observation_probe)
         self.observation_space = spaces.Box(
             low=np.full(obs_dim, -np.inf, dtype=np.float32),
             high=np.full(obs_dim, np.inf, dtype=np.float32),
             shape=(obs_dim,),
             dtype=np.float32,
         )
-
-    def _observation_dim_from_fields(self) -> int:
-        probe = {
-            "truth": {
-                self.controlled_agent_id: {
-                    "position_eci_km": np.zeros(3),
-                    "velocity_eci_km_s": np.zeros(3),
-                    "attitude_quat_bn": np.zeros(4),
-                    "angular_rate_body_rad_s": np.zeros(3),
-                    "mass_kg": 0.0,
-                    "t_s": 0.0,
-                },
-                "target": {
-                    "position_eci_km": np.zeros(3),
-                    "velocity_eci_km_s": np.zeros(3),
-                    "attitude_quat_bn": np.zeros(4),
-                    "angular_rate_body_rad_s": np.zeros(3),
-                    "mass_kg": 0.0,
-                    "t_s": 0.0,
-                },
-            },
-            "belief": {
-                self.controlled_agent_id: {"state": np.zeros(13), "last_update_t_s": 0.0},
-                "target": {"state": np.zeros(13), "last_update_t_s": 0.0},
-            },
-            "knowledge": {},
-            "metrics": {"range_km": 0.0, "closest_range_km": 0.0, "step": 0.0, "time_s": 0.0},
-        }
-        dim = 0
-        for field in self.observation_fields:
-            value = np.array(_lookup_path(probe, field.path), dtype=float).reshape(-1)
-            dim += int(value.size)
-        return dim
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[np.ndarray, dict[str, Any]]:
         if seed is not None:
@@ -429,6 +473,13 @@ class GymSimulationEnv(gym.Env):
             _deep_set(scenario_dict, path, value)
             self.sampled_parameters[path] = value
         self.scenario_cfg = scenario_config_from_dict(scenario_dict)
+        runtime_probe = _observation_probe_from_scenario_dict(scenario_dict)
+        obs_dim = _observation_dim_from_fields(self.observation_fields, runtime_probe)
+        if obs_dim != int(self.observation_space.shape[0]):
+            raise ValueError(
+                f"Observation fields resolved to dimension {obs_dim}, expected {self.observation_space.shape[0]}."
+            )
+        self._observation_probe = runtime_probe
         self._build_agents()
         dt = float(self.scenario_cfg.simulator.dt_s)
         duration_s = float(self.scenario_cfg.simulator.duration_s)
@@ -801,7 +852,7 @@ class GymSimulationEnv(gym.Env):
     def _observation_from_snapshot(self, snapshot: dict[str, Any]) -> np.ndarray:
         parts: list[np.ndarray] = []
         for field in self.observation_fields:
-            value = np.array(_lookup_path(snapshot, field.path), dtype=float).reshape(-1)
+            value = _lookup_observation_value(snapshot, field.path, self._observation_probe)
             parts.append(value * float(field.scale))
         if not parts:
             return np.zeros(0, dtype=np.float32)
@@ -852,6 +903,7 @@ class MultiAgentSimulationEnv:
         self.current_time_s = 0.0
         self.closest_range_km = np.inf
         self.last_snapshot: dict[str, Any] | None = None
+        self._observation_probe = _observation_probe_from_scenario_dict(self.base_scenario_dict)
         self.action_spaces = {}
         self.observation_spaces = {}
         for agent_id in self.controlled_agent_ids:
@@ -862,7 +914,7 @@ class MultiAgentSimulationEnv:
                 low = np.zeros(0, dtype=np.float32)
                 high = np.zeros(0, dtype=np.float32)
             self.action_spaces[agent_id] = spaces.Box(low=low, high=high, shape=(low.size,), dtype=np.float32)
-            obs_dim = self._observation_dim_from_fields(self._fields_for_agent(agent_id))
+            obs_dim = _observation_dim_from_fields(self._fields_for_agent(agent_id), self._observation_probe)
             self.observation_spaces[agent_id] = spaces.Box(
                 low=np.full(obs_dim, -np.inf, dtype=np.float32),
                 high=np.full(obs_dim, np.inf, dtype=np.float32),
@@ -880,6 +932,13 @@ class MultiAgentSimulationEnv:
             _deep_set(scenario_dict, path, value)
             self.sampled_parameters[path] = value
         self.scenario_cfg = scenario_config_from_dict(scenario_dict)
+        runtime_probe = _observation_probe_from_scenario_dict(scenario_dict)
+        for agent_id in self.controlled_agent_ids:
+            obs_dim = _observation_dim_from_fields(self._fields_for_agent(agent_id), runtime_probe)
+            expected = int(self.observation_spaces[agent_id].shape[0])
+            if obs_dim != expected:
+                raise ValueError(f"Observation fields for '{agent_id}' resolved to dimension {obs_dim}, expected {expected}.")
+        self._observation_probe = runtime_probe
         self._build_agents()
         dt = float(self.scenario_cfg.simulator.dt_s)
         duration_s = float(self.scenario_cfg.simulator.duration_s)
@@ -1328,44 +1387,11 @@ class MultiAgentSimulationEnv:
     def _observation_from_snapshot(self, snapshot: dict[str, Any], fields: tuple[ObservationField, ...]) -> np.ndarray:
         parts: list[np.ndarray] = []
         for field in fields:
-            value = np.array(_lookup_path(snapshot, field.path), dtype=float).reshape(-1)
+            value = _lookup_observation_value(snapshot, field.path, self._observation_probe)
             parts.append(value * float(field.scale))
         if not parts:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(parts).astype(np.float32)
-
-    def _observation_dim_from_fields(self, fields: tuple[ObservationField, ...]) -> int:
-        probe = {
-            "truth": {
-                "chaser": {
-                    "position_eci_km": np.zeros(3),
-                    "velocity_eci_km_s": np.zeros(3),
-                    "attitude_quat_bn": np.zeros(4),
-                    "angular_rate_body_rad_s": np.zeros(3),
-                    "mass_kg": 0.0,
-                    "t_s": 0.0,
-                },
-                "target": {
-                    "position_eci_km": np.zeros(3),
-                    "velocity_eci_km_s": np.zeros(3),
-                    "attitude_quat_bn": np.zeros(4),
-                    "angular_rate_body_rad_s": np.zeros(3),
-                    "mass_kg": 0.0,
-                    "t_s": 0.0,
-                },
-            },
-            "belief": {
-                "chaser": {"state": np.zeros(13), "last_update_t_s": 0.0},
-                "target": {"state": np.zeros(13), "last_update_t_s": 0.0},
-            },
-            "knowledge": {},
-            "metrics": {"range_km": 0.0, "closest_range_km": 0.0, "step": 0.0, "time_s": 0.0},
-        }
-        dim = 0
-        for field in fields:
-            value = np.array(_lookup_path(probe, field.path), dtype=float).reshape(-1)
-            dim += int(value.size)
-        return dim
 
     def _info_dict(self, snapshot: dict[str, Any], agent_id: str) -> dict[str, Any]:
         return {

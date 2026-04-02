@@ -61,6 +61,7 @@ benchmarks:
   - name: "plugin_validation_smoke"
     kind: "plugin_validation"
     description: "Validate plugin wiring on the headless smoke scenario."
+    tags: ["smoke", "fast", "plugins"]
     config_path: "automation_smoke.yaml"
     checks:
       valid:
@@ -71,6 +72,7 @@ benchmarks:
   - name: "simulation_smoke"
     kind: "simulation"
     description: "Run the smoke scenario and ensure the nominal single-run path completes."
+    tags: ["smoke", "fast", "single_run"]
     config_path: "automation_smoke.yaml"
     checks:
       monte_carlo.enabled:
@@ -83,6 +85,7 @@ benchmarks:
   - name: "integrated_lqr_single"
     kind: "simulation"
     description: "Single-run integrated rendezvous benchmark with EKF-fed HCW LQR control."
+    tags: ["rpo", "single_run", "guidance", "knowledge"]
     envelope: "integrated_rpo"
     config_path: "validation_integrated_lqr_single.yaml"
     checks:
@@ -94,6 +97,7 @@ benchmarks:
   - name: "integrated_lqr_mc"
     kind: "simulation"
     description: "Monte Carlo rendezvous benchmark for integrated guidance, control, and knowledge stack."
+    tags: ["rpo", "monte_carlo", "guidance", "knowledge"]
     envelope: "monte_carlo_rpo"
     config_path: "validation_integrated_lqr_mc.yaml"
     checks:
@@ -105,6 +109,7 @@ benchmarks:
   - name: "orbit_high_fidelity_mc"
     kind: "simulation"
     description: "Monte Carlo stability benchmark for high-fidelity orbit perturbation stack."
+    tags: ["orbit", "monte_carlo", "perturbations"]
     envelope: "monte_carlo_orbit"
     config_path: "validation_orbit_high_fidelity_mc.yaml"
     checks:
@@ -116,6 +121,7 @@ benchmarks:
   - name: "hpop_two_body_leo"
     kind: "hpop"
     description: "Two-body parity against bundled HPOP reference."
+    tags: ["orbit", "hpop", "leo"]
     envelope: "leo"
     hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
     params:
@@ -127,6 +133,7 @@ benchmarks:
   - name: "hpop_j2_leo"
     kind: "hpop"
     description: "J2 parity against bundled HPOP reference."
+    tags: ["orbit", "hpop", "leo"]
     envelope: "leo"
     hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
     params:
@@ -138,6 +145,7 @@ benchmarks:
   - name: "hpop_j3_leo"
     kind: "hpop"
     description: "J3 parity against bundled HPOP reference."
+    tags: ["orbit", "hpop", "leo"]
     envelope: "leo"
     hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
     params:
@@ -149,6 +157,7 @@ benchmarks:
   - name: "hpop_sh8x8_leo"
     kind: "hpop"
     description: "8x8 spherical harmonics parity against bundled HPOP reference."
+    tags: ["orbit", "hpop", "leo"]
     envelope: "leo"
     hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
     params:

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import copy
-import importlib
 import json
 from pathlib import Path
 import tempfile
 import yaml
 
-from PySide6.QtCore import QEvent, QProcess, QProcessEnvironment, Qt
+from PySide6.QtCore import QEvent, QObject, QThread, Qt, Signal
 from PySide6.QtGui import QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
@@ -41,523 +40,93 @@ from PySide6.QtWidgets import (
 )
 
 from sim.app.services import (
-    build_cli_run_command,
     dump_config_text,
     get_default_config_path,
+    get_gui_capabilities,
     get_output_files,
     get_repo_root,
     list_available_configs,
     load_config,
     parse_config_text,
+    run_config_via_api,
     save_config,
     validate_config,
 )
+from sim.app.models import AnalysisUiProfile
+from sim.app.gui_config_adapter import GUI_CONFIG_ADAPTER
+from sim.app.pointer_utils import (
+    default_params_for_pointer,
+    format_vector_text,
+    format_yaml_text,
+    normalize_form_value,
+    parse_vector_text,
+    parse_yaml_text,
+    pointer_display_name,
+    pointer_form_schema,
+)
+from sim_gui.sections import (
+    build_monte_carlo_tab,
+    build_objects_tab,
+    build_outputs_tab,
+    build_results_tab,
+    build_scenario_tab,
+    build_yaml_tab,
+)
 
 
-OUTPUT_MODES = ["interactive", "save", "both"]
-ORBIT_INTEGRATOR_OPTIONS = ["rk4", "rkf78", "dopri5"]
-ZERO_POINTER = {"kind": "python", "module": "sim.control.orbit.zero_controller", "class_name": "ZeroController", "params": {}}
-ZERO_TORQUE_POINTER = {"kind": "python", "module": "sim.control.attitude.zero_torque", "class_name": "ZeroTorqueController", "params": {}}
+GUI_CAPABILITIES = get_gui_capabilities()
+OUTPUT_MODES = GUI_CAPABILITIES.output_modes
+ORBIT_INTEGRATOR_OPTIONS = GUI_CAPABILITIES.orbit_integrators
+ANALYSIS_STUDY_TYPES = GUI_CAPABILITIES.analysis_study_types
+SENSITIVITY_METHODS = GUI_CAPABILITIES.sensitivity_methods
+MC_MODE_OPTIONS = GUI_CAPABILITIES.monte_carlo_modes
+MC_LHS_MODE_OPTIONS = GUI_CAPABILITIES.monte_carlo_lhs_modes
+CHASER_INIT_MODE_OPTIONS = GUI_CAPABILITIES.chaser_init_modes
+BASE_GUIDANCE_OPTIONS = GUI_CAPABILITIES.base_guidance_options
+GUIDANCE_MODIFIER_OPTIONS = GUI_CAPABILITIES.guidance_modifier_options
+ORBIT_CONTROL_OPTIONS = GUI_CAPABILITIES.orbit_control_options
+ATTITUDE_CONTROL_OPTIONS = GUI_CAPABILITIES.attitude_control_options
+MISSION_STRATEGY_OPTIONS = GUI_CAPABILITIES.mission_strategy_options
+MISSION_EXECUTION_OPTIONS = GUI_CAPABILITIES.mission_execution_options
+SATELLITE_PRESET_OPTIONS = GUI_CAPABILITIES.satellite_presets
+ROCKET_PRESET_OPTIONS = GUI_CAPABILITIES.rocket_preset_stacks
+FIGURE_ID_OPTIONS = GUI_CAPABILITIES.figure_ids
+ANIMATION_TYPE_OPTIONS = GUI_CAPABILITIES.animation_types
+MC_PARAMETER_CATEGORIES = GUI_CAPABILITIES.monte_carlo_parameter_categories
 
-BASE_GUIDANCE_OPTIONS = {
-    "rocket": [
-        ("Open Loop Pitch Program", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "OpenLoopPitchProgramGuidance", "params": {}}),
-        ("Closed Loop Insertion", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "ClosedLoopInsertionGuidance", "params": {}}),
-        ("Hold Attitude", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "HoldAttitudeGuidance", "params": {}}),
-    ],
-}
-GUIDANCE_MODIFIER_OPTIONS = [
-    ("TVC Steering", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "TVCSteeringGuidance", "params": {}}),
-    ("Max Q Throttle Limiter", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "MaxQThrottleLimiterGuidance", "params": {}}),
-    ("Orbit Insertion Cutoff", {"kind": "python", "module": "sim.rocket.guidance", "class_name": "OrbitInsertionCutoffGuidance", "params": {}}),
-]
+PARAMETER_FORM_SCHEMAS = GUI_CAPABILITIES.parameter_form_schemas
+ANALYSIS_UI_PROFILES = GUI_CAPABILITIES.analysis_ui_profiles
 
-ORBIT_CONTROL_OPTIONS = {
-    "rocket": [("Zero Controller", ZERO_POINTER)],
-    "chaser": [
-        ("Zero Controller", ZERO_POINTER),
-        ("HCW LQR", {"kind": "python", "module": "sim.control.orbit.lqr", "class_name": "HCWLQRController", "params": {}}),
-        ("Relative Orbit MPC", {"kind": "python", "module": "sim.control.orbit.relative_mpc", "class_name": "RelativeOrbitMPCController", "params": {}}),
-        ("HCW Relative MPC", {"kind": "python", "module": "sim.control.orbit.hcw_mpc", "class_name": "HCWRelativeOrbitMPCController", "params": {}}),
-        ("Stationkeeping", {"kind": "python", "module": "sim.control.orbit.baseline", "class_name": "StationkeepingController", "params": {}}),
-    ],
-    "target": [
-        ("Zero Controller", ZERO_POINTER),
-        ("Stationkeeping", {"kind": "python", "module": "sim.control.orbit.baseline", "class_name": "StationkeepingController", "params": {}}),
-    ],
-}
 
-ATTITUDE_CONTROL_OPTIONS = {
-    "rocket": [("Zero Torque", ZERO_TORQUE_POINTER)],
-    "chaser": [
-        ("Zero Torque", ZERO_TORQUE_POINTER),
-        ("Surrogate Snap ECI", {"kind": "python", "module": "sim.control.attitude.surrogate_snap", "class_name": "SurrogateSnapECIController", "params": {}}),
-        ("Surrogate Snap RIC", {"kind": "python", "module": "sim.control.attitude.surrogate_snap", "class_name": "SurrogateSnapRICController", "params": {}}),
-        ("RIC Detumble PD", {"kind": "python", "module": "sim.control.attitude.detumble_pd", "class_name": "RICDetumblePDController", "params": {}}),
-        ("Quaternion PD", {"kind": "python", "module": "sim.control.attitude.baseline", "class_name": "QuaternionPDController", "params": {}}),
-    ],
-    "target": [
-        ("Zero Torque", ZERO_TORQUE_POINTER),
-        ("Surrogate Snap ECI", {"kind": "python", "module": "sim.control.attitude.surrogate_snap", "class_name": "SurrogateSnapECIController", "params": {}}),
-        ("Quaternion PD", {"kind": "python", "module": "sim.control.attitude.baseline", "class_name": "QuaternionPDController", "params": {}}),
-    ],
-}
+class _ApiRunWorker(QObject):
+    progress = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
 
-MISSION_OPTIONS = {
-    "rocket": [
-        ("None", None),
-        ("Rocket Mission", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketMissionModule", "params": {}}),
-    ],
-    "chaser": [
-        ("None", None),
-        ("Satellite Mission", {"kind": "python", "module": "sim.mission.modules", "class_name": "SatelliteMissionModule", "params": {}}),
-        ("End State Maneuver", {"kind": "python", "module": "sim.mission.modules", "class_name": "EndStateManeuverMissionModule", "params": {}}),
-        ("Integrated Command", {"kind": "python", "module": "sim.mission.modules", "class_name": "IntegratedCommandMissionModule", "params": {}}),
-        ("Predictive Integrated Command", {"kind": "python", "module": "sim.mission.modules", "class_name": "PredictiveIntegratedCommandMissionModule", "params": {}}),
-        ("Attitude Detumble Gate", {"kind": "python", "module": "sim.mission.modules", "class_name": "AttitudeDetumbleGateMissionModule", "params": {}}),
-    ],
-    "target": [
-        ("None", None),
-        ("Satellite Mission", {"kind": "python", "module": "sim.mission.modules", "class_name": "SatelliteMissionModule", "params": {}}),
-        ("Attitude Detumble Gate", {"kind": "python", "module": "sim.mission.modules", "class_name": "AttitudeDetumbleGateMissionModule", "params": {}}),
-    ],
-}
-MISSION_STRATEGY_OPTIONS = {
-    "rocket": [
-        ("None", None),
-        ("Pursuit", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketPursuitMissionStrategy", "params": {}}),
-        ("Predefined Orbit", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketPredefinedOrbitMissionStrategy", "params": {}}),
-    ],
-    "chaser": [
-        ("None", None),
-        ("Pursuit", {"kind": "python", "module": "sim.mission.modules", "class_name": "PursuitMissionStrategy", "params": {}}),
-        ("Evade", {"kind": "python", "module": "sim.mission.modules", "class_name": "EvadeMissionStrategy", "params": {}}),
-        ("Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "HoldMissionStrategy", "params": {}}),
-        ("Desired State", {"kind": "python", "module": "sim.mission.modules", "class_name": "DesiredStateMissionStrategy", "params": {}}),
-        ("Mission Executive", {"kind": "python", "module": "sim.mission.modules", "class_name": "MissionExecutiveStrategy", "params": {}}),
-        ("Station Keep", {"kind": "python", "module": "sim.mission.modules", "class_name": "StationKeepMissionStrategy", "params": {}}),
-        ("Inspect", {"kind": "python", "module": "sim.mission.modules", "class_name": "InspectMissionStrategy", "params": {}}),
-        ("Defensive", {"kind": "python", "module": "sim.mission.modules", "class_name": "DefensiveMissionStrategy", "params": {}}),
-        ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldMissionStrategy", "params": {}}),
-    ],
-    "target": [
-        ("None", None),
-        ("Pursuit", {"kind": "python", "module": "sim.mission.modules", "class_name": "PursuitMissionStrategy", "params": {}}),
-        ("Evade", {"kind": "python", "module": "sim.mission.modules", "class_name": "EvadeMissionStrategy", "params": {}}),
-        ("Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "HoldMissionStrategy", "params": {}}),
-        ("Desired State", {"kind": "python", "module": "sim.mission.modules", "class_name": "DesiredStateMissionStrategy", "params": {}}),
-        ("Mission Executive", {"kind": "python", "module": "sim.mission.modules", "class_name": "MissionExecutiveStrategy", "params": {}}),
-        ("Station Keep", {"kind": "python", "module": "sim.mission.modules", "class_name": "StationKeepMissionStrategy", "params": {}}),
-        ("Inspect", {"kind": "python", "module": "sim.mission.modules", "class_name": "InspectMissionStrategy", "params": {}}),
-        ("Defensive", {"kind": "python", "module": "sim.mission.modules", "class_name": "DefensiveMissionStrategy", "params": {}}),
-        ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldMissionStrategy", "params": {}}),
-    ],
-}
-MISSION_EXECUTION_OPTIONS = {
-    "rocket": [
-        ("None", None),
-        ("Go Now", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketGoNowExecution", "params": {}}),
-        ("Go When Possible", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketGoWhenPossibleExecution", "params": {}}),
-        ("Wait For Optimal", {"kind": "python", "module": "sim.mission.modules", "class_name": "RocketWaitOptimalExecution", "params": {}}),
-    ],
-    "chaser": [
-        ("None", None),
-        ("Controller Pointing", {"kind": "python", "module": "sim.mission.modules", "class_name": "ControllerPointingExecution", "params": {}}),
-        ("Predictive Burn", {"kind": "python", "module": "sim.mission.modules", "class_name": "PredictiveBurnExecution", "params": {}}),
-        ("Integrated Command", {"kind": "python", "module": "sim.mission.modules", "class_name": "IntegratedCommandExecution", "params": {}}),
-        ("Budgeted End State", {"kind": "python", "module": "sim.mission.modules", "class_name": "BudgetedEndStateExecution", "params": {}}),
-        ("Direct Integrated", {"kind": "python", "module": "sim.mission.modules", "class_name": "DirectIntegratedExecution", "params": {}}),
-        ("Impulsive", {"kind": "python", "module": "sim.mission.modules", "class_name": "ImpulsiveExecution", "params": {}}),
-        ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldExecution", "params": {}}),
-    ],
-    "target": [
-        ("None", None),
-        ("Controller Pointing", {"kind": "python", "module": "sim.mission.modules", "class_name": "ControllerPointingExecution", "params": {}}),
-        ("Predictive Burn", {"kind": "python", "module": "sim.mission.modules", "class_name": "PredictiveBurnExecution", "params": {}}),
-        ("Integrated Command", {"kind": "python", "module": "sim.mission.modules", "class_name": "IntegratedCommandExecution", "params": {}}),
-        ("Budgeted End State", {"kind": "python", "module": "sim.mission.modules", "class_name": "BudgetedEndStateExecution", "params": {}}),
-        ("Direct Integrated", {"kind": "python", "module": "sim.mission.modules", "class_name": "DirectIntegratedExecution", "params": {}}),
-        ("Impulsive", {"kind": "python", "module": "sim.mission.modules", "class_name": "ImpulsiveExecution", "params": {}}),
-        ("Safe Hold", {"kind": "python", "module": "sim.mission.modules", "class_name": "SafeHoldExecution", "params": {}}),
-    ],
-}
-SATELLITE_PRESET_OPTIONS = ["BASIC_SATELLITE"]
-ROCKET_PRESET_OPTIONS = ["BASIC_TWO_STAGE_STACK"]
-FIGURE_ID_OPTIONS = [
-    "orbit_eci",
-    "trajectory_ecef",
-    "trajectory_ric_rect",
-    "trajectory_ric_curv",
-    "trajectory_ric_rect_2d",
-    "trajectory_ric_curv_2d",
-    "trajectory_eci_multi",
-    "trajectory_ecef_multi",
-    "trajectory_ric_rect_multi",
-    "trajectory_ric_curv_multi",
-    "trajectory_ric_rect_2d_multi",
-    "trajectory_ric_curv_2d_multi",
-    "attitude",
-    "quaternion_eci",
-    "quaternion_ric",
-    "rates_eci",
-    "rates_ric",
-    "relative_range",
-    "knowledge_timeline",
-    "control_thrust",
-    "control_thrust_multi",
-    "control_thrust_ric",
-    "control_thrust_ric_multi",
-    "quaternion_error",
-    "rocket_ascent_diagnostics",
-    "rocket_orbital_elements",
-    "satellite_delta_v_remaining",
-    "thrust_alignment_error",
-]
-ANIMATION_TYPE_OPTIONS = [
-    "ground_track",
-    "ground_track_multi",
-    "ric_curv_prism_multi",
-    "ric_prism_side_by_side",
-]
-MC_PARAMETER_CATEGORIES = {
-    "Launch": [
-        ("Launch Latitude", "rocket.initial_state.launch_lat_deg"),
-        ("Launch Longitude", "rocket.initial_state.launch_lon_deg"),
-        ("Launch Altitude", "rocket.initial_state.launch_alt_km"),
-        ("Launch Azimuth", "rocket.initial_state.launch_azimuth_deg"),
-    ],
-    "Chaser Init": [
-        ("Deploy Time", "chaser.initial_state.deploy_time_s"),
-        ("Deploy dV X", "chaser.initial_state.deploy_dv_body_m_s[0]"),
-        ("Deploy dV Y", "chaser.initial_state.deploy_dv_body_m_s[1]"),
-        ("Deploy dV Z", "chaser.initial_state.deploy_dv_body_m_s[2]"),
-        ("Relative State R", "chaser.initial_state.relative_to_target_ric.state[0]"),
-        ("Relative State I", "chaser.initial_state.relative_to_target_ric.state[1]"),
-        ("Relative State C", "chaser.initial_state.relative_to_target_ric.state[2]"),
-        ("Relative State dR", "chaser.initial_state.relative_to_target_ric.state[3]"),
-        ("Relative State dI", "chaser.initial_state.relative_to_target_ric.state[4]"),
-        ("Relative State dC", "chaser.initial_state.relative_to_target_ric.state[5]"),
-        ("RIC Rect R", "chaser.initial_state.relative_ric_rect[0]"),
-        ("RIC Rect I", "chaser.initial_state.relative_ric_rect[1]"),
-        ("RIC Rect C", "chaser.initial_state.relative_ric_rect[2]"),
-        ("RIC Rect dR", "chaser.initial_state.relative_ric_rect[3]"),
-        ("RIC Rect dI", "chaser.initial_state.relative_ric_rect[4]"),
-        ("RIC Rect dC", "chaser.initial_state.relative_ric_rect[5]"),
-        ("RIC Curv R", "chaser.initial_state.relative_ric_curv[0]"),
-        ("RIC Curv I", "chaser.initial_state.relative_ric_curv[1]"),
-        ("RIC Curv C", "chaser.initial_state.relative_ric_curv[2]"),
-        ("RIC Curv dR", "chaser.initial_state.relative_ric_curv[3]"),
-        ("RIC Curv dI", "chaser.initial_state.relative_ric_curv[4]"),
-        ("RIC Curv dC", "chaser.initial_state.relative_ric_curv[5]"),
-    ],
-    "Target Orbit": [
-        ("Semi-major Axis", "target.initial_state.coes.a_km"),
-        ("Eccentricity", "target.initial_state.coes.ecc"),
-        ("Inclination", "target.initial_state.coes.inc_deg"),
-        ("RAAN", "target.initial_state.coes.raan_deg"),
-        ("Arg Periapsis", "target.initial_state.coes.argp_deg"),
-        ("True Anomaly", "target.initial_state.coes.true_anomaly_deg"),
-    ],
-    "Environment": [
-        ("Solar Flux F10.7", "simulator.environment.atmosphere_env.solar_flux_f107"),
-        ("Geomagnetic Ap", "simulator.environment.atmosphere_env.geomagnetic_ap"),
-    ],
-}
+    def __init__(self, config_path: Path) -> None:
+        super().__init__()
+        self.config_path = Path(config_path)
 
-PARAMETER_FORM_SCHEMAS = {
-    "OpenLoopPitchProgramGuidance": [
-        {"key": "vertical_hold_s", "label": "Vertical Hold (s)", "kind": "float"},
-        {"key": "pitch_start_s", "label": "Pitch Start (s)", "kind": "float"},
-        {"key": "pitch_end_s", "label": "Pitch End (s)", "kind": "float"},
-        {"key": "pitch_final_deg", "label": "Pitch Final (deg)", "kind": "float"},
-        {"key": "max_throttle", "label": "Max Throttle", "kind": "float"},
-        {"key": "min_throttle", "label": "Min Throttle", "kind": "float"},
-    ],
-    "ClosedLoopInsertionGuidance": [
-        {"key": "target_altitude_km", "label": "Target Altitude (km)", "kind": "float"},
-        {"key": "target_eccentricity_max", "label": "Target Max Ecc", "kind": "float"},
-        {"key": "pitch_gain", "label": "Pitch Gain", "kind": "float"},
-        {"key": "throttle_gain", "label": "Throttle Gain", "kind": "float"},
-        {"key": "min_throttle", "label": "Min Throttle", "kind": "float"},
-        {"key": "max_throttle", "label": "Max Throttle", "kind": "float"},
-    ],
-    "HoldAttitudeGuidance": [
-        {"key": "throttle", "label": "Throttle", "kind": "float"},
-        {"key": "attitude_quat_bn_cmd", "label": "Attitude Quaternion BN", "kind": "vector", "length": 4},
-    ],
-    "TVCSteeringGuidance": [
-        {"key": "pass_through_attitude", "label": "Pass Through Attitude", "kind": "bool"},
-    ],
-    "MaxQThrottleLimiterGuidance": [
-        {"key": "max_q_pa", "label": "Max Q (Pa)", "kind": "float"},
-        {"key": "min_throttle", "label": "Min Throttle", "kind": "float"},
-    ],
-    "OrbitInsertionCutoffGuidance": [
-        {"key": "min_cutoff_alt_km", "label": "Min Cutoff Alt (km)", "kind": "float"},
-        {"key": "min_periapsis_alt_km", "label": "Min Periapsis Alt (km)", "kind": "float"},
-        {"key": "apoapsis_margin_km", "label": "Apoapsis Margin (km)", "kind": "float"},
-        {"key": "energy_margin_km2_s2", "label": "Energy Margin", "kind": "float"},
-        {"key": "ecc_relax_factor", "label": "Ecc Relax Factor", "kind": "float"},
-        {"key": "hard_escape_cutoff", "label": "Hard Escape Cutoff", "kind": "bool"},
-        {"key": "near_escape_speed_margin_frac", "label": "Near Escape Margin", "kind": "float"},
-    ],
-    "HCWLQRController": [
-        {"key": "mean_motion_rad_s", "label": "Mean Motion (rad/s)", "kind": "float"},
-        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
-        {"key": "design_dt_s", "label": "Design dt (s)", "kind": "float"},
-        {"key": "state_signs", "label": "State Signs", "kind": "vector", "length": 6},
-        {"key": "q_weights", "label": "Q Weights", "kind": "vector", "length": 6},
-        {"key": "r_weights", "label": "R Weights", "kind": "vector", "length": 3},
-        {"key": "riccati_max_iter", "label": "Riccati Max Iter", "kind": "int"},
-        {"key": "riccati_tol", "label": "Riccati Tolerance", "kind": "float"},
-    ],
-    "RelativeOrbitMPCController": [
-        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
-        {"key": "horizon_steps", "label": "Horizon Steps", "kind": "int"},
-        {"key": "step_dt_s", "label": "Step dt (s)", "kind": "float"},
-        {"key": "gradient_method", "label": "Gradient Method", "kind": "choice", "options": ["spsa", "finite_difference"]},
-        {"key": "max_iterations", "label": "Max Iterations", "kind": "int"},
-        {"key": "target_rel_ric_rect", "label": "Target Rel RIC Rect", "kind": "vector", "length": 6},
-        {"key": "q_weights", "label": "Q Weights", "kind": "vector", "length": 6},
-        {"key": "terminal_weights", "label": "Terminal Weights", "kind": "vector", "length": 6},
-        {"key": "r_weights", "label": "R Weights", "kind": "vector", "length": 3},
-        {"key": "rd_weights", "label": "Rd Weights", "kind": "vector", "length": 3},
-    ],
-    "HCWRelativeOrbitMPCController": [
-        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
-        {"key": "horizon_time_s", "label": "Horizon Time (s)", "kind": "float"},
-        {"key": "default_model_dt_s", "label": "Default Model dt (s)", "kind": "float"},
-        {"key": "model_dt_s", "label": "Model dt (s)", "kind": "optional_float"},
-        {"key": "gradient_method", "label": "Gradient Method", "kind": "choice", "options": ["spsa", "finite_difference"]},
-        {"key": "max_iterations", "label": "Max Iterations", "kind": "int"},
-        {"key": "target_rel_ric_rect", "label": "Target Rel RIC Rect", "kind": "vector", "length": 6},
-        {"key": "q_weights", "label": "Q Weights", "kind": "vector", "length": 6},
-        {"key": "terminal_weights", "label": "Terminal Weights", "kind": "vector", "length": 6},
-        {"key": "r_weights", "label": "R Weights", "kind": "vector", "length": 3},
-        {"key": "rd_weights", "label": "Rd Weights", "kind": "vector", "length": 3},
-    ],
-    "QuaternionPDController": [
-        {"key": "kp", "label": "Kp", "kind": "float"},
-        {"key": "kd", "label": "Kd", "kind": "float"},
-        {"key": "max_torque_nm", "label": "Max Torque (Nm)", "kind": "float"},
-    ],
-    "SurrogateSnapECIController": [
-        {"key": "desired_attitude_quat_bn", "label": "Desired Quaternion BN", "kind": "vector", "length": 4},
-        {"key": "cancel_rate_mag_rad_s2", "label": "Cancel Rate Mag (rad/s^2)", "kind": "float"},
-        {"key": "rate_tolerance_rad_s", "label": "Rate Tolerance (rad/s)", "kind": "float"},
-        {"key": "slew_time_180_s", "label": "180 deg Slew Time (s)", "kind": "float"},
-        {"key": "pointing_sigma_deg", "label": "Pointing Sigma (deg)", "kind": "float"},
-        {"key": "default_dt_s", "label": "Default dt (s)", "kind": "float"},
-        {"key": "rng_seed", "label": "RNG Seed", "kind": "int"},
-    ],
-    "SurrogateSnapRICController": [
-        {"key": "desired_attitude_quat_br", "label": "Desired Quaternion BR", "kind": "vector", "length": 4},
-        {"key": "cancel_rate_mag_rad_s2", "label": "Cancel Rate Mag (rad/s^2)", "kind": "float"},
-        {"key": "rate_tolerance_rad_s", "label": "Rate Tolerance (rad/s)", "kind": "float"},
-        {"key": "slew_time_180_s", "label": "180 deg Slew Time (s)", "kind": "float"},
-        {"key": "pointing_sigma_deg", "label": "Pointing Sigma (deg)", "kind": "float"},
-        {"key": "default_dt_s", "label": "Default dt (s)", "kind": "float"},
-        {"key": "rng_seed", "label": "RNG Seed", "kind": "int"},
-    ],
-    "RocketMissionModule": [
-        {"key": "launch_mode", "label": "Launch Mode", "kind": "choice", "options": ["go_now", "go_when_possible", "wait_optimal_window"]},
-        {"key": "orbital_goal", "label": "Orbital Goal", "kind": "choice", "options": ["pursuit", "predefined_orbit"]},
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "go_when_possible_margin_m_s", "label": "Go Margin (m/s)", "kind": "float"},
-        {"key": "window_period_s", "label": "Window Period (s)", "kind": "float"},
-        {"key": "window_open_duration_s", "label": "Window Open Duration (s)", "kind": "float"},
-        {"key": "predef_target_alt_km", "label": "Predef Target Alt (km)", "kind": "float"},
-        {"key": "predef_target_ecc", "label": "Predef Target Ecc", "kind": "float"},
-    ],
-    "SatelliteMissionModule": [
-        {"key": "orbital_mode", "label": "Orbital Mode", "kind": "choice", "options": ["coast", "pursuit_knowledge", "evade_knowledge", "pursuit_blind", "evade_blind"]},
-        {"key": "attitude_mode", "label": "Attitude Mode", "kind": "choice", "options": ["hold_eci", "hold_ric", "spotlight", "sun_track", "pursuit", "evade", "sensing"]},
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
-        {"key": "blind_direction_eci", "label": "Blind Direction ECI", "kind": "vector", "length": 3},
-        {"key": "hold_quat_bn", "label": "Hold Quaternion BN", "kind": "vector", "length": 4},
-        {"key": "hold_quat_br", "label": "Hold Quaternion BR", "kind": "vector", "length": 4},
-        {"key": "boresight_body", "label": "Boresight Body", "kind": "vector", "length": 3},
-        {"key": "spotlight_lat_deg", "label": "Spotlight Lat (deg)", "kind": "float"},
-        {"key": "spotlight_lon_deg", "label": "Spotlight Lon (deg)", "kind": "float"},
-        {"key": "spotlight_alt_km", "label": "Spotlight Alt (km)", "kind": "float"},
-        {"key": "spotlight_ric_direction", "label": "Spotlight RIC Direction", "kind": "vector", "length": 3},
-        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge For Targeting", "kind": "bool"},
-    ],
-    "PursuitMissionStrategy": [
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
-        {"key": "max_accel_km_s2", "label": "Fallback Max Accel (km/s^2)", "kind": "float"},
-        {"key": "blind_direction_eci", "label": "Blind Direction ECI", "kind": "vector", "length": 3},
-        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
-    ],
-    "EvadeMissionStrategy": [
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
-        {"key": "max_accel_km_s2", "label": "Fallback Max Accel (km/s^2)", "kind": "float"},
-        {"key": "blind_direction_eci", "label": "Blind Direction ECI", "kind": "vector", "length": 3},
-        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
-    ],
-    "HoldMissionStrategy": [
-        {"key": "attitude_mode", "label": "Attitude Mode", "kind": "choice", "options": ["hold_eci", "hold_ric", "sun_track", "spotlight", "sensing"]},
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
-        {"key": "hold_quat_bn", "label": "Hold Quaternion BN", "kind": "vector", "length": 4},
-        {"key": "hold_quat_br", "label": "Hold Quaternion BR", "kind": "vector", "length": 4},
-        {"key": "boresight_body", "label": "Boresight Body", "kind": "vector", "length": 3},
-        {"key": "spotlight_lat_deg", "label": "Spotlight Lat (deg)", "kind": "float"},
-        {"key": "spotlight_lon_deg", "label": "Spotlight Lon (deg)", "kind": "float"},
-        {"key": "spotlight_alt_km", "label": "Spotlight Alt (km)", "kind": "float"},
-        {"key": "spotlight_ric_direction", "label": "Spotlight RIC Direction", "kind": "vector", "length": 3},
-    ],
-    "MissionExecutiveStrategy": [
-        {"key": "initial_mode", "label": "Initial Mode", "kind": "string"},
-        {"key": "modes", "label": "Modes YAML", "kind": "yaml"},
-        {"key": "transitions", "label": "Transitions YAML", "kind": "yaml"},
-    ],
-    "DesiredStateMissionStrategy": [
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "desired_state_source", "label": "Desired State Source", "kind": "choice", "options": ["target", "explicit"]},
-        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
-        {"key": "desired_position_eci_km", "label": "Desired Position ECI", "kind": "vector", "length": 3},
-        {"key": "desired_velocity_eci_km_s", "label": "Desired Velocity ECI", "kind": "vector", "length": 3},
-        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
-    ],
-    "StationKeepMissionStrategy": [
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
-        {"key": "desired_relative_ric_rect", "label": "Desired RIC Rect State", "kind": "vector", "length": 6},
-        {"key": "kp_pos", "label": "Kp Pos", "kind": "float"},
-        {"key": "kd_vel", "label": "Kd Vel", "kind": "float"},
-        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
-        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
-    ],
-    "InspectMissionStrategy": [
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
-        {"key": "desired_relative_ric_rect", "label": "Desired RIC Rect State", "kind": "vector", "length": 6},
-        {"key": "boresight_body", "label": "Boresight Body", "kind": "vector", "length": 3},
-        {"key": "kp_pos", "label": "Kp Pos", "kind": "float"},
-        {"key": "kd_vel", "label": "Kd Vel", "kind": "float"},
-        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
-        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
-    ],
-    "DefensiveMissionStrategy": [
-        {"key": "chaser_id", "label": "Chaser ID", "kind": "string"},
-        {"key": "defense_mode", "label": "Defense Mode", "kind": "choice", "options": ["fixed_ric_axis", "away_from_chaser"]},
-        {"key": "axis_mode", "label": "Axis Mode", "kind": "choice", "options": ["+R", "-R", "+I", "-I", "+C", "-C"]},
-        {"key": "burn_accel_km_s2", "label": "Burn Accel (km/s^2)", "kind": "float"},
-        {"key": "require_finite_knowledge", "label": "Require Finite Knowledge", "kind": "bool"},
-        {"key": "allow_truth_fallback", "label": "Allow Truth Fallback", "kind": "bool"},
-        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
-    ],
-    "SafeHoldMissionStrategy": [
-        {"key": "attitude_mode", "label": "Attitude Mode", "kind": "choice", "options": ["hold_current", "hold_eci", "sun_track"]},
-        {"key": "hold_quat_bn", "label": "Hold Quaternion BN", "kind": "vector", "length": 4},
-        {"key": "boresight_body", "label": "Boresight Body", "kind": "vector", "length": 3},
-    ],
-    "RocketMissionStrategy": [
-        {"key": "launch_mode", "label": "Launch Mode", "kind": "choice", "options": ["go_now", "go_when_possible", "wait_optimal_window"]},
-        {"key": "orbital_goal", "label": "Orbital Goal", "kind": "choice", "options": ["pursuit", "predefined_orbit"]},
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "go_when_possible_margin_m_s", "label": "Go Margin (m/s)", "kind": "float"},
-        {"key": "window_period_s", "label": "Window Period (s)", "kind": "float"},
-        {"key": "window_open_duration_s", "label": "Window Open Duration (s)", "kind": "float"},
-        {"key": "predef_target_alt_km", "label": "Target Alt (km)", "kind": "float"},
-        {"key": "predef_target_ecc", "label": "Target Ecc", "kind": "float"},
-    ],
-    "RocketPursuitMissionStrategy": [
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
-    ],
-    "RocketPredefinedOrbitMissionStrategy": [
-        {"key": "predef_target_alt_km", "label": "Target Alt (km)", "kind": "float"},
-        {"key": "predef_target_ecc", "label": "Target Ecc", "kind": "float"},
-        {"key": "align_to_thrust", "label": "Align To Thrust", "kind": "bool"},
-    ],
-    "ControllerPointingExecution": [
-        {"key": "align_thruster_to_thrust", "label": "Align Thruster To Thrust", "kind": "bool"},
-        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
-        {"key": "require_attitude_alignment", "label": "Require Alignment", "kind": "bool"},
-        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
-        {"key": "use_strategy_fallback_thrust", "label": "Use Strategy Fallback", "kind": "bool"},
-        {"key": "detumble_enter_rate_rad_s", "label": "Detumble Enter Rate", "kind": "optional_float"},
-        {"key": "detumble_exit_rate_rad_s", "label": "Detumble Exit Rate", "kind": "optional_float"},
-        {"key": "detumble_mode_name", "label": "Detumble Mode", "kind": "string"},
-        {"key": "nominal_mode_name", "label": "Nominal Mode", "kind": "string"},
-    ],
-    "PredictiveBurnExecution": [
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "use_knowledge_for_targeting", "label": "Use Knowledge", "kind": "bool"},
-        {"key": "lead_time_s", "label": "Lead Time (s)", "kind": "float"},
-        {"key": "predict_dt_s", "label": "Predict dt (s)", "kind": "float"},
-        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
-        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
-        {"key": "min_burn_accel_km_s2", "label": "Min Burn Accel", "kind": "float"},
-        {"key": "mu_km3_s2", "label": "Mu (km^3/s^2)", "kind": "float"},
-        {"key": "orbit_controller_budget_ms", "label": "Orbit Budget (ms)", "kind": "float"},
-        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
-        {"key": "planning_period_s", "label": "Planning Period (s)", "kind": "optional_float"},
-        {"key": "skip_orbit_planning_in_detumble_mode", "label": "Skip In Detumble", "kind": "bool"},
-        {"key": "detumble_enter_rate_rad_s", "label": "Detumble Enter Rate", "kind": "optional_float"},
-        {"key": "detumble_exit_rate_rad_s", "label": "Detumble Exit Rate", "kind": "optional_float"},
-        {"key": "detumble_mode_name", "label": "Detumble Mode", "kind": "string"},
-        {"key": "nominal_mode_name", "label": "Nominal Mode", "kind": "string"},
-    ],
-    "IntegratedCommandExecution": [
-        {"key": "require_attitude_alignment", "label": "Require Alignment", "kind": "bool"},
-        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
-        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
-        {"key": "min_burn_accel_km_s2", "label": "Min Burn Accel", "kind": "float"},
-        {"key": "orbit_controller_budget_ms", "label": "Orbit Budget (ms)", "kind": "float"},
-        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
-    ],
-    "BudgetedEndStateExecution": [
-        {"key": "strategy", "label": "Maneuver Strategy", "kind": "choice", "options": ["thrust_limited", "burn_all", "attitude_only"]},
-        {"key": "max_thrust_n", "label": "Max Thrust (N)", "kind": "float"},
-        {"key": "min_thrust_n", "label": "Min Thrust (N)", "kind": "float"},
-        {"key": "burn_dt_s", "label": "Burn dt (s)", "kind": "float"},
-        {"key": "available_delta_v_km_s", "label": "Available dV (km/s)", "kind": "float"},
-        {"key": "require_attitude_alignment", "label": "Require Alignment", "kind": "bool"},
-        {"key": "thruster_position_body_m", "label": "Thruster Position Body", "kind": "vector", "length": 3},
-        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
-        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
-        {"key": "terminate_on_velocity_tolerance_km_s", "label": "Velocity Tol", "kind": "float"},
-    ],
-    "DirectIntegratedExecution": [
-        {"key": "align_thruster_to_thrust", "label": "Align Thruster To Thrust", "kind": "bool"},
-        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
-        {"key": "use_strategy_fallback_thrust", "label": "Use Strategy Fallback", "kind": "bool"},
-        {"key": "use_orbit_controller", "label": "Use Orbit Controller", "kind": "bool"},
-        {"key": "orbit_controller_budget_ms", "label": "Orbit Budget (ms)", "kind": "float"},
-        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
-    ],
-    "ImpulsiveExecution": [
-        {"key": "align_thruster_to_thrust", "label": "Align Thruster To Thrust", "kind": "bool"},
-        {"key": "thruster_direction_body", "label": "Thruster Direction Body", "kind": "vector", "length": 3},
-        {"key": "require_attitude_alignment", "label": "Require Alignment", "kind": "bool"},
-        {"key": "alignment_tolerance_deg", "label": "Alignment Tol (deg)", "kind": "float"},
-        {"key": "use_strategy_fallback_thrust", "label": "Use Strategy Fallback", "kind": "bool"},
-        {"key": "pulse_period_s", "label": "Pulse Period (s)", "kind": "float"},
-        {"key": "pulse_width_s", "label": "Pulse Width (s)", "kind": "float"},
-        {"key": "pulse_phase_s", "label": "Pulse Phase (s)", "kind": "float"},
-        {"key": "min_burn_accel_km_s2", "label": "Min Burn Accel", "kind": "float"},
-        {"key": "orbit_controller_budget_ms", "label": "Orbit Budget (ms)", "kind": "float"},
-        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
-    ],
-    "SafeHoldExecution": [
-        {"key": "attitude_controller_budget_ms", "label": "Attitude Budget (ms)", "kind": "float"},
-    ],
-    "RocketGoNowExecution": [],
-    "RocketGoWhenPossibleExecution": [
-        {"key": "target_id", "label": "Target ID", "kind": "string"},
-        {"key": "go_when_possible_margin_m_s", "label": "Go Margin (m/s)", "kind": "float"},
-    ],
-    "RocketWaitOptimalExecution": [
-        {"key": "window_period_s", "label": "Window Period (s)", "kind": "float"},
-        {"key": "window_open_duration_s", "label": "Window Open Duration (s)", "kind": "float"},
-    ],
-}
+    def run(self) -> None:
+        try:
+            self.progress.emit(f"Running via API: {self.config_path}\n")
+            last_emit = -1
+            emit_stride = 1
+
+            def _step_callback(step: int, total: int) -> None:
+                nonlocal last_emit, emit_stride
+                total_i = max(int(total), 0)
+                step_i = max(int(step), 0)
+                emit_stride = max(1, total_i // 20) if total_i > 0 else 1
+                if step_i not in (0, total_i) and (step_i - last_emit) < emit_stride:
+                    return
+                last_emit = step_i
+                self.progress.emit(f"[progress] step {step_i}/{total_i}\n")
+
+            result = run_config_via_api(self.config_path, step_callback=_step_callback)
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -568,7 +137,8 @@ class MainWindow(QMainWindow):
         self.current_config = load_config(self.loaded_config_path)
         self.mc_variations: list[dict] = []
         self._collapse_validation_on_startup = True
-        self.process: QProcess | None = None
+        self.run_thread: QThread | None = None
+        self.run_worker: _ApiRunWorker | None = None
         self.preview_image_path: Path | None = None
         self.preview_zoom_factor = 1.0
         self.preview_fit_to_window = True
@@ -577,6 +147,22 @@ class MainWindow(QMainWindow):
         self.results_output_dir: Path | None = None
         self.preview_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self.rocket_guidance_modifiers_config: list[dict] = []
+        self.output_modes = OUTPUT_MODES
+        self.orbit_integrator_options = ORBIT_INTEGRATOR_OPTIONS
+        self.analysis_study_types = ANALYSIS_STUDY_TYPES
+        self.sensitivity_methods = SENSITIVITY_METHODS
+        self.mc_mode_options = MC_MODE_OPTIONS
+        self.mc_lhs_mode_options = MC_LHS_MODE_OPTIONS
+        self.chaser_init_mode_options = CHASER_INIT_MODE_OPTIONS
+        self.base_guidance_options = BASE_GUIDANCE_OPTIONS
+        self.orbit_control_options = ORBIT_CONTROL_OPTIONS
+        self.attitude_control_options = ATTITUDE_CONTROL_OPTIONS
+        self.mission_strategy_options = MISSION_STRATEGY_OPTIONS
+        self.mission_execution_options = MISSION_EXECUTION_OPTIONS
+        self.satellite_preset_options = SATELLITE_PRESET_OPTIONS
+        self.rocket_preset_options = ROCKET_PRESET_OPTIONS
+        self.figure_id_options = FIGURE_ID_OPTIONS
+        self.animation_type_options = ANIMATION_TYPE_OPTIONS
         self.is_dirty = False
         self._suppress_dirty_tracking = False
         self._suppress_config_selector_load = False
@@ -929,104 +515,7 @@ class MainWindow(QMainWindow):
         self.orbit_integrator_combo.currentIndexChanged.connect(self._refresh_integrator_visibility)
 
     def _build_scenario_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QFormLayout(tab)
-        self.scenario_form_layout = layout
-        self.scenario_name_edit = QLineEdit()
-        self.scenario_name_edit.setMinimumWidth(320)
-        self.scenario_description_edit = QLineEdit()
-        self.scenario_description_edit.setMinimumWidth(320)
-        self.duration_spin = QDoubleSpinBox()
-        self.duration_spin.setRange(0.001, 1.0e9)
-        self.duration_spin.setDecimals(3)
-        self.duration_spin.setValue(3600.0)
-        self.dt_spin = QDoubleSpinBox()
-        self.dt_spin.setRange(0.000001, 1.0e6)
-        self.dt_spin.setDecimals(6)
-        self.dt_spin.setValue(1.0)
-        self.orbit_integrator_combo = QComboBox()
-        self.orbit_integrator_combo.addItems(ORBIT_INTEGRATOR_OPTIONS)
-        self.orbit_adaptive_atol_spin = self._make_free_spinbox(decimals=12)
-        self.orbit_adaptive_atol_spin.setRange(0.0, 1.0)
-        self.orbit_adaptive_atol_spin.setValue(1.0e-9)
-        self.orbit_adaptive_rtol_spin = self._make_free_spinbox(decimals=12)
-        self.orbit_adaptive_rtol_spin.setRange(0.0, 1.0)
-        self.orbit_adaptive_rtol_spin.setValue(1.0e-7)
-        self.output_mode_combo = QComboBox()
-        self.output_mode_combo.addItems(OUTPUT_MODES)
-        self.output_dir_edit = QLineEdit()
-        self.output_dir_edit.setMinimumWidth(320)
-        self.output_dir_browse_button = QPushButton("Browse...")
-        self.output_dir_browse_button.clicked.connect(self._browse_output_directory)
-        self.orbit_substep_enabled_check = QCheckBox("Orbit Substep")
-        self.orbit_substep_spin = self._make_free_spinbox()
-        self.attitude_substep_enabled_check = QCheckBox("Attitude Substep")
-        self.attitude_substep_spin = self._make_free_spinbox()
-        self.attitude_enabled_check = QCheckBox("Enable Attitude Dynamics")
-        self.orbit_j2_check = QCheckBox("J2")
-        self.orbit_j3_check = QCheckBox("J3")
-        self.orbit_j4_check = QCheckBox("J4")
-        self.orbit_drag_check = QCheckBox("Drag")
-        self.orbit_srp_check = QCheckBox("SRP")
-        self.orbit_moon_check = QCheckBox("Third-Body Moon")
-        self.orbit_sun_check = QCheckBox("Third-Body Sun")
-        self.att_gg_check = QCheckBox("Gravity Gradient")
-        self.att_magnetic_check = QCheckBox("Magnetic")
-        self.att_drag_check = QCheckBox("Drag Torque")
-        self.att_srp_check = QCheckBox("SRP Torque")
-
-        layout.addRow("Scenario Name", self.scenario_name_edit)
-        layout.addRow("Scenario Description", self.scenario_description_edit)
-        layout.addRow("Duration (s)", self.duration_spin)
-        layout.addRow("dt (s)", self.dt_spin)
-        layout.addRow("Orbit Integrator", self.orbit_integrator_combo)
-        layout.addRow("Output Mode", self.output_mode_combo)
-        output_dir_row = QWidget()
-        output_dir_layout = QHBoxLayout(output_dir_row)
-        output_dir_layout.setContentsMargins(0, 0, 0, 0)
-        output_dir_layout.setSpacing(6)
-        output_dir_layout.addWidget(self.output_dir_edit, 1)
-        output_dir_layout.addWidget(self.output_dir_browse_button)
-        layout.addRow("Output Directory", output_dir_row)
-        layout.addRow("Adaptive Abs Tol", self.orbit_adaptive_atol_spin)
-        layout.addRow("Adaptive Rel Tol", self.orbit_adaptive_rtol_spin)
-        orbit_substep_row = QWidget()
-        orbit_substep_layout = QHBoxLayout(orbit_substep_row)
-        orbit_substep_layout.setContentsMargins(0, 0, 0, 0)
-        orbit_substep_layout.setSpacing(4)
-        orbit_substep_layout.addWidget(self.orbit_substep_enabled_check)
-        orbit_substep_layout.addWidget(self.orbit_substep_spin)
-        orbit_substep_layout.addStretch(1)
-        layout.addRow(orbit_substep_row)
-        attitude_substep_row = QWidget()
-        attitude_substep_layout = QHBoxLayout(attitude_substep_row)
-        attitude_substep_layout.setContentsMargins(0, 0, 0, 0)
-        attitude_substep_layout.setSpacing(4)
-        attitude_substep_layout.addWidget(self.attitude_substep_enabled_check)
-        attitude_substep_layout.addWidget(self.attitude_substep_spin)
-        attitude_substep_layout.addStretch(1)
-        layout.addRow(attitude_substep_row)
-        layout.addRow(self.attitude_enabled_check)
-        orbit_perturbations = QWidget()
-        orbit_perturbations_layout = QGridLayout(orbit_perturbations)
-        orbit_perturbations_layout.setContentsMargins(0, 0, 0, 0)
-        orbit_perturbations_layout.addWidget(self.orbit_j2_check, 0, 0)
-        orbit_perturbations_layout.addWidget(self.orbit_j3_check, 0, 1)
-        orbit_perturbations_layout.addWidget(self.orbit_j4_check, 0, 2)
-        orbit_perturbations_layout.addWidget(self.orbit_drag_check, 1, 0)
-        orbit_perturbations_layout.addWidget(self.orbit_srp_check, 1, 1)
-        orbit_perturbations_layout.addWidget(self.orbit_moon_check, 2, 0)
-        orbit_perturbations_layout.addWidget(self.orbit_sun_check, 2, 1)
-        layout.addRow("Orbital Perturbations", orbit_perturbations)
-        attitude_disturbances = QWidget()
-        attitude_disturbances_layout = QGridLayout(attitude_disturbances)
-        attitude_disturbances_layout.setContentsMargins(0, 0, 0, 0)
-        attitude_disturbances_layout.addWidget(self.att_gg_check, 0, 0)
-        attitude_disturbances_layout.addWidget(self.att_magnetic_check, 0, 1)
-        attitude_disturbances_layout.addWidget(self.att_drag_check, 1, 0)
-        attitude_disturbances_layout.addWidget(self.att_srp_check, 1, 1)
-        layout.addRow("Attitude Disturbances", attitude_disturbances)
-        return tab
+        return build_scenario_tab(self)
 
     def _browse_output_directory(self) -> None:
         current_text = self.output_dir_edit.text().strip()
@@ -1046,601 +535,19 @@ class MainWindow(QMainWindow):
             self.output_dir_edit.setText(selected)
 
     def _build_monte_carlo_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        self.mc_enabled_check = QCheckBox("Enable Analysis")
-        self.analysis_study_type_combo = QComboBox()
-        self.analysis_study_type_combo.addItems(["Monte Carlo", "Sensitivity"])
-        self.analysis_count_label = QLabel("Iterations")
-        self.mc_iterations_spin = QSpinBox()
-        self.mc_iterations_spin.setRange(1, 1000000)
-        self.mc_parallel_check = QCheckBox("Parallel")
-        self.mc_workers_spin = QSpinBox()
-        self.mc_workers_spin.setRange(0, 1024)
-        self.analysis_seed_label = QLabel("Base Seed")
-        self.mc_base_seed_spin = QSpinBox()
-        self.mc_base_seed_spin.setRange(0, 2**31 - 1)
-        execution_row = QHBoxLayout()
-        execution_row.addWidget(self.mc_enabled_check)
-        execution_row.addSpacing(12)
-        execution_row.addWidget(QLabel("Study"))
-        execution_row.addWidget(self.analysis_study_type_combo)
-        execution_row.addSpacing(12)
-        execution_row.addWidget(self.analysis_count_label)
-        execution_row.addWidget(self.mc_iterations_spin)
-        execution_row.addSpacing(12)
-        execution_row.addWidget(self.mc_parallel_check)
-        execution_row.addWidget(QLabel("Workers (0=auto)"))
-        execution_row.addWidget(self.mc_workers_spin)
-        execution_row.addSpacing(12)
-        execution_row.addWidget(self.analysis_seed_label)
-        execution_row.addWidget(self.mc_base_seed_spin)
-        execution_row.addStretch(1)
-        layout.addLayout(execution_row)
-
-        self.analysis_settings_box = QGroupBox("Study Settings")
-        analysis_settings_layout = QFormLayout(self.analysis_settings_box)
-        self.sensitivity_method_combo = QComboBox()
-        self.sensitivity_method_combo.addItems(["One-at-a-Time", "Latin Hypercube"])
-        self.analysis_lhs_samples_spin = QSpinBox()
-        self.analysis_lhs_samples_spin.setRange(1, 1000000)
-        self.analysis_metrics_edit = QPlainTextEdit()
-        self.analysis_metrics_edit.setPlaceholderText(
-            "summary.duration_s\n"
-            "derived.closest_approach_km\n"
-            "summary.thrust_stats.chaser.total_dv_m_s"
-        )
-        self.analysis_metrics_edit.setMaximumHeight(78)
-        self.analysis_baseline_enable_check = QCheckBox("Enable Baseline Comparison")
-        self.analysis_baseline_path_edit = QLineEdit()
-        self.analysis_baseline_path_edit.setPlaceholderText("Optional baseline summary JSON")
-        self.analysis_baseline_browse_button = QPushButton("Browse...")
-        self.analysis_baseline_browse_button.clicked.connect(self._browse_analysis_baseline_summary)
-        baseline_row = QWidget()
-        baseline_row_layout = QHBoxLayout(baseline_row)
-        baseline_row_layout.setContentsMargins(0, 0, 0, 0)
-        baseline_row_layout.setSpacing(6)
-        baseline_row_layout.addWidget(self.analysis_baseline_path_edit, 1)
-        baseline_row_layout.addWidget(self.analysis_baseline_browse_button)
-        self.analysis_help_label = QLabel("")
-        self.analysis_help_label.setWordWrap(True)
-        analysis_settings_layout.addRow("Sensitivity Method", self.sensitivity_method_combo)
-        analysis_settings_layout.addRow("LHS Samples", self.analysis_lhs_samples_spin)
-        analysis_settings_layout.addRow("Tracked Metrics", self.analysis_metrics_edit)
-        analysis_settings_layout.addRow(self.analysis_baseline_enable_check)
-        analysis_settings_layout.addRow("Baseline Summary", baseline_row)
-        analysis_settings_layout.addRow("Notes", self.analysis_help_label)
-        layout.addWidget(self.analysis_settings_box)
-
-        variations_split = QHBoxLayout()
-        group_box_style = (
-            "QGroupBox {"
-            " font-weight: normal;"
-            " margin-top: 18px;"
-            "}"
-            "QGroupBox::title {"
-            " subcontrol-origin: margin;"
-            " subcontrol-position: top left;"
-            " padding: 0 4px;"
-            " top: -3px;"
-            "}"
-        )
-        self.analysis_inputs_box = QGroupBox("Study Inputs")
-        variations_box = self.analysis_inputs_box
-        variations_box.setStyleSheet(group_box_style)
-        variations_box_layout = QVBoxLayout(variations_box)
-        self.mc_variations_list = QListWidget()
-        self.mc_variations_list.currentRowChanged.connect(self._on_mc_variation_selected)
-        variations_box_layout.addWidget(self.mc_variations_list)
-        variations_split.addWidget(variations_box, 2)
-
-        self.analysis_editor_box = QGroupBox("Input Editor")
-        editor_box = self.analysis_editor_box
-        editor_box.setStyleSheet(group_box_style)
-        editor_box_layout = QHBoxLayout(editor_box)
-        editor_box_layout.setContentsMargins(8, 16, 8, 8)
-        editor_box_layout.setSpacing(4)
-        editor_form = QFormLayout()
-        editor_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
-        editor_box_layout.addLayout(editor_form, 0)
-        button_column = QVBoxLayout()
-        button_column.setContentsMargins(0, 0, 0, 0)
-        button_column.setSpacing(4)
-        self.mc_new_variation_button = QPushButton("New")
-        self.mc_new_variation_button.clicked.connect(self._clear_mc_variation_editor)
-        button_column.addWidget(self.mc_new_variation_button)
-        self.mc_add_update_variation_button = QPushButton("Add / Update")
-        self.mc_add_update_variation_button.clicked.connect(self._on_add_or_update_mc_variation)
-        button_column.addWidget(self.mc_add_update_variation_button)
-        self.mc_remove_variation_button = QPushButton("Remove")
-        self.mc_remove_variation_button.clicked.connect(self._on_remove_mc_variation)
-        button_column.addWidget(self.mc_remove_variation_button)
-        button_column.addStretch(1)
-        editor_box_layout.addLayout(button_column)
-        editor_box_layout.addStretch(1)
-        self.mc_variation_form = editor_form
-        self.mc_category_combo = QComboBox()
-        self.mc_category_combo.currentIndexChanged.connect(self._refresh_mc_parameter_options)
-        editor_form.addRow("Category", self.mc_category_combo)
-
-        self.mc_parameter_combo = QComboBox()
-        editor_form.addRow("Parameter", self.mc_parameter_combo)
-
-        self.mc_custom_path_edit = QLineEdit()
-        self.mc_custom_path_edit.setPlaceholderText("simulator.environment.atmosphere_env.solar_flux_f107")
-        editor_form.addRow("Custom Path", self.mc_custom_path_edit)
-
-        self.mc_mode_combo = QComboBox()
-        self.mc_mode_combo.addItems(["choice", "uniform", "normal"])
-        self.mc_mode_combo.currentTextChanged.connect(self._refresh_mc_mode_ui)
-        editor_form.addRow("Mode", self.mc_mode_combo)
-
-        self.mc_mode_stack = QStackedWidget()
-        choice_page = QWidget()
-        choice_form = QFormLayout(choice_page)
-        self.mc_choice_options_edit = QLineEdit()
-        self.mc_choice_options_edit.setPlaceholderText("0.5, 1.0, 1.5")
-        choice_form.addRow("Options", self.mc_choice_options_edit)
-        self.mc_mode_stack.addWidget(choice_page)
-
-        uniform_page = QWidget()
-        uniform_form = QFormLayout(uniform_page)
-        self.mc_uniform_low_spin = self._make_free_spinbox()
-        self.mc_uniform_high_spin = self._make_free_spinbox()
-        uniform_form.addRow("Low", self.mc_uniform_low_spin)
-        uniform_form.addRow("High", self.mc_uniform_high_spin)
-        self.mc_mode_stack.addWidget(uniform_page)
-
-        normal_page = QWidget()
-        normal_form = QFormLayout(normal_page)
-        self.mc_normal_mean_spin = self._make_free_spinbox()
-        self.mc_normal_std_spin = self._make_free_spinbox()
-        normal_form.addRow("Mean", self.mc_normal_mean_spin)
-        normal_form.addRow("Std", self.mc_normal_std_spin)
-        self.mc_mode_stack.addWidget(normal_page)
-        editor_form.addRow("Settings", self.mc_mode_stack)
-
-        variations_split.addWidget(editor_box, 3)
-        layout.addLayout(variations_split, 1)
-        self._rebuild_mc_category_combo()
-        self._refresh_mc_parameter_options()
-        self._refresh_mc_mode_ui()
-        self._refresh_analysis_editor_ui()
-        return tab
+        return build_monte_carlo_tab(self)
 
     def _build_objects_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QGridLayout(tab)
-
-        target_box = QFrame()
-        target_box.setFrameShape(QFrame.StyledPanel)
-        target_box.setFrameShadow(QFrame.Plain)
-        target_form = QFormLayout(target_box)
-        self.target_enabled = QCheckBox("Enabled")
-        self.target_preset = QComboBox()
-        self._configure_compact_combo(self.target_preset)
-        self.target_preset.addItems(SATELLITE_PRESET_OPTIONS)
-        self.target_dry_mass = QDoubleSpinBox()
-        self.target_dry_mass.setRange(0.0, 1.0e9)
-        self.target_dry_mass.setDecimals(3)
-        self.target_fuel_mass = QDoubleSpinBox()
-        self.target_fuel_mass.setRange(0.0, 1.0e9)
-        self.target_fuel_mass.setDecimals(3)
-        self.target_a = QDoubleSpinBox()
-        self.target_a.setRange(1.0, 1.0e9)
-        self.target_a.setDecimals(3)
-        self.target_ecc = QDoubleSpinBox()
-        self.target_ecc.setRange(0.0, 100.0)
-        self.target_ecc.setDecimals(6)
-        self.target_inc = QDoubleSpinBox()
-        self.target_inc.setRange(-360.0, 360.0)
-        self.target_inc.setDecimals(3)
-        self.target_raan = QDoubleSpinBox()
-        self.target_raan.setRange(-360.0, 360.0)
-        self.target_raan.setDecimals(3)
-        self.target_argp = QDoubleSpinBox()
-        self.target_argp.setRange(-360.0, 360.0)
-        self.target_argp.setDecimals(3)
-        self.target_ta = QDoubleSpinBox()
-        self.target_ta.setRange(-360.0, 360.0)
-        self.target_ta.setDecimals(3)
-        target_form.addRow(self.target_enabled)
-        target_form.addRow("Preset", self.target_preset)
-        target_form.addRow("Dry Mass (kg)", self.target_dry_mass)
-        target_form.addRow("Fuel Mass (kg)", self.target_fuel_mass)
-        self.target_initial_state_button = self._make_section_toggle_button("target")
-        target_form.addRow("Initial State", self.target_initial_state_button)
-        self.target_initial_state_container = QWidget()
-        target_initial_state_form = QFormLayout(self.target_initial_state_container)
-        target_initial_state_form.setContentsMargins(0, 0, 0, 0)
-        target_initial_state_form.addRow("a_km", self.target_a)
-        target_initial_state_form.addRow("ecc", self.target_ecc)
-        target_initial_state_form.addRow("inc_deg", self.target_inc)
-        target_initial_state_form.addRow("raan_deg", self.target_raan)
-        target_initial_state_form.addRow("argp_deg", self.target_argp)
-        target_initial_state_form.addRow("true_anomaly_deg", self.target_ta)
-        target_form.addRow(self.target_initial_state_container)
-        self.target_strategy_combo = self._make_pointer_combo(MISSION_STRATEGY_OPTIONS["target"])
-        self.target_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["target"])
-        self.target_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["target"])
-        self.target_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["target"])
-        self.target_gnc_button = self._make_section_toggle_button("target", "gnc")
-        target_form.addRow("GNC", self.target_gnc_button)
-        self.target_gnc_container = QWidget()
-        target_gnc_form = QFormLayout(self.target_gnc_container)
-        target_gnc_form.setContentsMargins(0, 0, 0, 0)
-        target_gnc_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.target_strategy_combo, "target", "mission_strategy"))
-        target_gnc_form.addRow("Mission Execution", self._make_pointer_editor_row(self.target_execution_combo, "target", "mission_execution"))
-        target_gnc_form.addRow("Orbit Control", self._make_pointer_editor_row(self.target_orbit_control_combo, "target", "orbit_control"))
-        target_gnc_form.addRow("Attitude Control", self._make_pointer_editor_row(self.target_attitude_control_combo, "target", "attitude_control"))
-        target_form.addRow(self.target_gnc_container)
-        self.target_knowledge_button = self._make_section_toggle_button("target", "knowledge")
-        target_form.addRow("Knowledge / Sensor", self.target_knowledge_button)
-        self.target_knowledge_container = self._build_knowledge_editor("target")
-        target_form.addRow(self.target_knowledge_container)
-        layout.addWidget(self._wrap_object_panel(target_box, "Target"), 0, 0)
-
-        chaser_box = QFrame()
-        chaser_box.setFrameShape(QFrame.StyledPanel)
-        chaser_box.setFrameShadow(QFrame.Plain)
-        chaser_form = QFormLayout(chaser_box)
-        self.chaser_enabled = QCheckBox("Enabled")
-        self.chaser_preset = QComboBox()
-        self._configure_compact_combo(self.chaser_preset)
-        self.chaser_preset.addItems(SATELLITE_PRESET_OPTIONS)
-        self.chaser_dry_mass = QDoubleSpinBox()
-        self.chaser_dry_mass.setRange(0.0, 1.0e9)
-        self.chaser_dry_mass.setDecimals(3)
-        self.chaser_fuel_mass = QDoubleSpinBox()
-        self.chaser_fuel_mass.setRange(0.0, 1.0e9)
-        self.chaser_fuel_mass.setDecimals(3)
-        self.chaser_init_mode = QComboBox()
-        self.chaser_init_mode.addItems(["rocket_deployment", "relative_ric_rect", "relative_ric_curv"])
-        self.chaser_init_values = [self._make_free_spinbox() for _ in range(6)]
-        self.chaser_deploy_time = self._make_free_spinbox()
-        chaser_form.addRow(self.chaser_enabled)
-        chaser_form.addRow("Preset", self.chaser_preset)
-        chaser_form.addRow("Dry Mass (kg)", self.chaser_dry_mass)
-        chaser_form.addRow("Fuel Mass (kg)", self.chaser_fuel_mass)
-        self.chaser_initial_state_button = self._make_section_toggle_button("chaser")
-        chaser_form.addRow("Initial State", self.chaser_initial_state_button)
-        self.chaser_initial_state_container = QWidget()
-        chaser_initial_state_form = QFormLayout(self.chaser_initial_state_container)
-        chaser_initial_state_form.setContentsMargins(0, 0, 0, 0)
-        chaser_initial_state_form.addRow("Init Mode", self.chaser_init_mode)
-        chaser_initial_state_form.addRow("Deploy Time (s)", self.chaser_deploy_time)
-        for i, widget in enumerate(self.chaser_init_values):
-            chaser_initial_state_form.addRow(f"Init[{i}]", widget)
-        chaser_form.addRow(self.chaser_initial_state_container)
-        self.chaser_strategy_combo = self._make_pointer_combo(MISSION_STRATEGY_OPTIONS["chaser"])
-        self.chaser_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["chaser"])
-        self.chaser_orbit_control_combo = self._make_pointer_combo(ORBIT_CONTROL_OPTIONS["chaser"])
-        self.chaser_attitude_control_combo = self._make_pointer_combo(ATTITUDE_CONTROL_OPTIONS["chaser"])
-        self.chaser_gnc_button = self._make_section_toggle_button("chaser", "gnc")
-        chaser_form.addRow("GNC", self.chaser_gnc_button)
-        self.chaser_gnc_container = QWidget()
-        chaser_gnc_form = QFormLayout(self.chaser_gnc_container)
-        chaser_gnc_form.setContentsMargins(0, 0, 0, 0)
-        chaser_gnc_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.chaser_strategy_combo, "chaser", "mission_strategy"))
-        chaser_gnc_form.addRow("Mission Execution", self._make_pointer_editor_row(self.chaser_execution_combo, "chaser", "mission_execution"))
-        chaser_gnc_form.addRow("Orbit Control", self._make_pointer_editor_row(self.chaser_orbit_control_combo, "chaser", "orbit_control"))
-        chaser_gnc_form.addRow("Attitude Control", self._make_pointer_editor_row(self.chaser_attitude_control_combo, "chaser", "attitude_control"))
-        chaser_form.addRow(self.chaser_gnc_container)
-        self.chaser_knowledge_button = self._make_section_toggle_button("chaser", "knowledge")
-        chaser_form.addRow("Knowledge / Sensor", self.chaser_knowledge_button)
-        self.chaser_knowledge_container = self._build_knowledge_editor("chaser")
-        chaser_form.addRow(self.chaser_knowledge_container)
-        layout.addWidget(self._wrap_object_panel(chaser_box, "Chaser"), 0, 1)
-
-        rocket_box = QFrame()
-        rocket_box.setFrameShape(QFrame.StyledPanel)
-        rocket_box.setFrameShadow(QFrame.Plain)
-        rocket_form = QFormLayout(rocket_box)
-        self.rocket_enabled = QCheckBox("Enabled")
-        self.rocket_preset = QComboBox()
-        self._configure_compact_combo(self.rocket_preset)
-        self.rocket_preset.addItems(ROCKET_PRESET_OPTIONS)
-        self.rocket_payload = QDoubleSpinBox()
-        self.rocket_payload.setRange(0.0, 1.0e9)
-        self.rocket_payload.setDecimals(3)
-        self.rocket_launch_lat = self._make_free_spinbox()
-        self.rocket_launch_lon = self._make_free_spinbox()
-        self.rocket_launch_alt = self._make_free_spinbox()
-        self.rocket_launch_az = self._make_free_spinbox()
-        self.rocket_launch_lat.setMaximumWidth(self.rocket_payload.maximumWidth())
-        self.rocket_launch_lon.setMaximumWidth(self.rocket_payload.maximumWidth())
-        self.rocket_launch_alt.setMaximumWidth(self.rocket_payload.maximumWidth())
-        self.rocket_launch_az.setMaximumWidth(self.rocket_payload.maximumWidth())
-        rocket_form.addRow(self.rocket_enabled)
-        rocket_form.addRow("Stack Preset", self.rocket_preset)
-        rocket_form.addRow("Payload Mass (kg)", self.rocket_payload)
-        self.rocket_initial_state_button = self._make_section_toggle_button("rocket")
-        rocket_form.addRow("Initial State", self.rocket_initial_state_button)
-        self.rocket_initial_state_container = QWidget()
-        rocket_initial_state_form = QFormLayout(self.rocket_initial_state_container)
-        rocket_initial_state_form.setContentsMargins(0, 0, 0, 0)
-        rocket_initial_state_form.addRow("Launch Lat (deg)", self.rocket_launch_lat)
-        rocket_initial_state_form.addRow("Launch Lon (deg)", self.rocket_launch_lon)
-        rocket_initial_state_form.addRow("Launch Alt (km)", self.rocket_launch_alt)
-        rocket_initial_state_form.addRow("Launch Azimuth (deg)", self.rocket_launch_az)
-        rocket_form.addRow(self.rocket_initial_state_container)
-        self.rocket_strategy_combo = self._make_pointer_combo(MISSION_STRATEGY_OPTIONS["rocket"])
-        self.rocket_execution_combo = self._make_pointer_combo(MISSION_EXECUTION_OPTIONS["rocket"])
-        self.rocket_base_guidance_combo = self._make_pointer_combo(BASE_GUIDANCE_OPTIONS["rocket"])
-        self.rocket_guidance_modifiers_label = QLabel("None")
-        self.rocket_guidance_modifiers_label.setWordWrap(True)
-        self.rocket_guidance_modifiers_button = QPushButton("+")
-        self.rocket_guidance_modifiers_button.setFixedWidth(28)
-        self.rocket_guidance_modifiers_button.setToolTip("Edit ordered rocket guidance modifiers")
-        self.rocket_guidance_modifiers_button.clicked.connect(self._edit_rocket_guidance_modifiers)
-        self.rocket_gnc_button = self._make_section_toggle_button("rocket", "gnc")
-        rocket_form.addRow("GNC", self.rocket_gnc_button)
-        self.rocket_gnc_container = QWidget()
-        rocket_gnc_form = QFormLayout(self.rocket_gnc_container)
-        rocket_gnc_form.setContentsMargins(0, 0, 0, 0)
-        rocket_gnc_form.addRow("Mission Strategy", self._make_pointer_editor_row(self.rocket_strategy_combo, "rocket", "mission_strategy"))
-        rocket_gnc_form.addRow("Mission Execution", self._make_pointer_editor_row(self.rocket_execution_combo, "rocket", "mission_execution"))
-        rocket_gnc_form.addRow("Base Guidance", self._make_pointer_editor_row(self.rocket_base_guidance_combo, "rocket", "base_guidance"))
-        rocket_guidance_modifiers_row = QWidget()
-        rocket_guidance_modifiers_layout = QHBoxLayout(rocket_guidance_modifiers_row)
-        rocket_guidance_modifiers_layout.setContentsMargins(0, 0, 0, 0)
-        rocket_guidance_modifiers_layout.addWidget(self.rocket_guidance_modifiers_label, 1)
-        rocket_guidance_modifiers_layout.addWidget(self.rocket_guidance_modifiers_button)
-        rocket_gnc_form.addRow("Guidance Modifiers", rocket_guidance_modifiers_row)
-        rocket_form.addRow(self.rocket_gnc_container)
-        self.rocket_knowledge_button = self._make_section_toggle_button("rocket", "knowledge")
-        rocket_form.addRow("Knowledge / Sensor", self.rocket_knowledge_button)
-        self.rocket_knowledge_container = self._build_knowledge_editor("rocket")
-        rocket_form.addRow(self.rocket_knowledge_container)
-        layout.addWidget(self._wrap_object_panel(rocket_box, "Rocket"), 0, 2)
-        self._set_initial_state_section_visible("target", False)
-        self._set_initial_state_section_visible("chaser", False)
-        self._set_initial_state_section_visible("rocket", False)
-        self._set_object_section_visible("target", "gnc", False)
-        self._set_object_section_visible("chaser", "gnc", False)
-        self._set_object_section_visible("rocket", "gnc", False)
-        self._set_object_section_visible("target", "knowledge", False)
-        self._set_object_section_visible("chaser", "knowledge", False)
-        self._set_object_section_visible("rocket", "knowledge", False)
-        return tab
+        return build_objects_tab(self)
 
     def _build_outputs_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        self.outputs_mode_label = QLabel("")
-        self.outputs_mode_label.setWordWrap(True)
-        layout.addWidget(self.outputs_mode_label)
-
-        self.outputs_stack = QStackedWidget()
-        layout.addWidget(self.outputs_stack, 1)
-
-        single_run_page = QWidget()
-        single_run_layout = QVBoxLayout(single_run_page)
-        single_run_layout.setContentsMargins(0, 0, 0, 0)
-        single_run_layout.setSpacing(8)
-        self.stats_enabled = QCheckBox("Enable Stats")
-        self.stats_print_summary = QCheckBox("Print Summary")
-        self.stats_save_json = QCheckBox("Save JSON")
-        self.stats_save_csv = QCheckBox("Save CSV")
-        self.plots_enabled = QCheckBox("Enable Plots")
-        self.plots_dpi = QSpinBox()
-        self.plots_dpi.setRange(50, 2000)
-        self.reference_object_edit = QLineEdit()
-        self.figure_id_checks: dict[str, QCheckBox] = {}
-        figure_ids_widget = QWidget()
-        figure_ids_layout = QGridLayout(figure_ids_widget)
-        figure_ids_layout.setContentsMargins(0, 0, 0, 0)
-        for idx, figure_id in enumerate(FIGURE_ID_OPTIONS):
-            check = QCheckBox(figure_id)
-            self.figure_id_checks[figure_id] = check
-            figure_ids_layout.addWidget(check, idx // 3, idx % 3)
-        figure_ids_scroll = QScrollArea()
-        figure_ids_scroll.setWidgetResizable(True)
-        figure_ids_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        figure_ids_scroll.setWidget(figure_ids_widget)
-        figure_ids_scroll.setMaximumHeight(140)
-        figure_ids_panel = QWidget()
-        figure_ids_panel_layout = QVBoxLayout(figure_ids_panel)
-        figure_ids_panel_layout.setContentsMargins(0, 0, 0, 0)
-        figure_ids_panel_layout.setSpacing(4)
-        figure_ids_header = QHBoxLayout()
-        figure_ids_header.setContentsMargins(0, 0, 0, 0)
-        figure_ids_header.addWidget(QLabel("Figure IDs"))
-        figure_ids_header.addStretch(1)
-        plot_dpi_widget = QWidget()
-        plot_dpi_layout = QVBoxLayout(plot_dpi_widget)
-        plot_dpi_layout.setContentsMargins(0, 0, 0, 0)
-        plot_dpi_layout.setSpacing(4)
-        plot_dpi_layout.addWidget(QLabel("Plot DPI"))
-        plot_dpi_layout.addWidget(self.plots_dpi)
-        plot_dpi_layout.addStretch(1)
-        figure_ids_header.addWidget(plot_dpi_widget)
-        figure_ids_panel_layout.addLayout(figure_ids_header)
-        figure_ids_panel_layout.addWidget(figure_ids_scroll, 1)
-        self.animation_type_checks: dict[str, QCheckBox] = {}
-        animation_types_widget = QWidget()
-        animation_types_layout = QGridLayout(animation_types_widget)
-        animation_types_layout.setContentsMargins(0, 0, 0, 0)
-        for idx, anim_type in enumerate(ANIMATION_TYPE_OPTIONS):
-            check = QCheckBox(anim_type)
-            self.animation_type_checks[anim_type] = check
-            animation_types_layout.addWidget(check, idx // 2, idx % 2)
-        animation_types_scroll = QScrollArea()
-        animation_types_scroll.setWidgetResizable(True)
-        animation_types_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        animation_types_scroll.setWidget(animation_types_widget)
-        animation_types_scroll.setMaximumHeight(140)
-        self.animation_fps_spin = QDoubleSpinBox()
-        self.animation_fps_spin.setRange(1.0, 240.0)
-        self.animation_fps_spin.setDecimals(1)
-        self.animation_fps_spin.setValue(30.0)
-        self.animation_speed_multiple_spin = QDoubleSpinBox()
-        self.animation_speed_multiple_spin.setRange(0.1, 1000.0)
-        self.animation_speed_multiple_spin.setDecimals(2)
-        self.animation_speed_multiple_spin.setValue(10.0)
-        self.animation_frame_stride_spin = QSpinBox()
-        self.animation_frame_stride_spin.setRange(1, 100000)
-        self.animation_frame_stride_spin.setValue(1)
-        left_controls = QWidget()
-        left_controls_layout = QVBoxLayout(left_controls)
-        left_controls_layout.setContentsMargins(0, 0, 0, 0)
-        left_controls_layout.setSpacing(4)
-        left_controls_layout.addWidget(self.stats_enabled)
-        left_controls_layout.addWidget(self.stats_print_summary)
-        left_controls_layout.addWidget(self.stats_save_json)
-        left_controls_layout.addWidget(self.stats_save_csv)
-        left_controls_layout.addWidget(self.plots_enabled)
-        left_controls_layout.addWidget(figure_ids_panel)
-        single_run_layout.addWidget(left_controls, 0, Qt.AlignTop)
-
-        lower_fields = QWidget()
-        lower_fields_layout = QVBoxLayout(lower_fields)
-        lower_fields_layout.setContentsMargins(0, 0, 0, 0)
-        lower_fields_layout.setSpacing(6)
-        lower_fields_layout.addWidget(QLabel("RIC Reference Object"))
-        lower_fields_layout.addWidget(self.reference_object_edit, 0, Qt.AlignLeft)
-        animation_row = QHBoxLayout()
-        animation_row.setContentsMargins(0, 0, 0, 0)
-        animation_row.setSpacing(12)
-        animation_left = QWidget()
-        animation_left_layout = QVBoxLayout(animation_left)
-        animation_left_layout.setContentsMargins(0, 0, 0, 0)
-        animation_left_layout.setSpacing(6)
-        animation_left_layout.addWidget(QLabel("Animation Types"))
-        animation_left_layout.addWidget(animation_types_scroll, 0, Qt.AlignLeft)
-        animation_settings_form = QFormLayout()
-        animation_settings_form.addRow("Animation FPS", self.animation_fps_spin)
-        animation_settings_form.addRow("Speed Multiple", self.animation_speed_multiple_spin)
-        animation_settings_form.addRow("Frame Stride", self.animation_frame_stride_spin)
-        animation_row.addWidget(animation_left, 0, Qt.AlignTop)
-        animation_row.addLayout(animation_settings_form)
-        animation_row.addStretch(1)
-        lower_fields_layout.addLayout(animation_row)
-        single_run_layout.addWidget(lower_fields, 0, Qt.AlignLeft)
-        single_run_layout.addStretch(1)
-        self.outputs_stack.addWidget(single_run_page)
-
-        mc_page = QWidget()
-        mc_layout = QFormLayout(mc_page)
-        self.mc_save_iteration_summaries = QCheckBox("Save Iteration Summaries")
-        self.mc_save_aggregate_summary = QCheckBox("Save Aggregate Summary")
-        self.mc_save_histograms = QCheckBox("Save Histograms")
-        self.mc_display_histograms = QCheckBox("Display Histograms")
-        self.mc_save_ops_dashboard = QCheckBox("Save Ops Dashboard")
-        self.mc_display_ops_dashboard = QCheckBox("Display Ops Dashboard")
-        self.mc_save_raw_runs = QCheckBox("Save Raw Runs")
-        self.mc_require_rocket_insertion = QCheckBox("Require Rocket Insertion For Pass")
-        self.mc_baseline_summary_json = QLineEdit()
-        self.mc_gate_min_closest_approach = self._make_free_spinbox()
-        self.mc_gate_max_duration = self._make_free_spinbox()
-        self.mc_gate_max_total_dv = self._make_free_spinbox()
-        self.mc_gate_max_guardrail_events = self._make_free_spinbox()
-        mc_layout.addRow(self.mc_save_iteration_summaries)
-        mc_layout.addRow(self.mc_save_aggregate_summary)
-        mc_layout.addRow(self.mc_save_histograms)
-        mc_layout.addRow(self.mc_display_histograms)
-        mc_layout.addRow(self.mc_save_ops_dashboard)
-        mc_layout.addRow(self.mc_display_ops_dashboard)
-        mc_layout.addRow(self.mc_save_raw_runs)
-        mc_layout.addRow(self.mc_require_rocket_insertion)
-        mc_layout.addRow("Baseline Summary JSON", self.mc_baseline_summary_json)
-        mc_layout.addRow("Gate: Min Closest Approach (km)", self.mc_gate_min_closest_approach)
-        mc_layout.addRow("Gate: Max Duration (s)", self.mc_gate_max_duration)
-        mc_layout.addRow("Gate: Max Total dV (m/s)", self.mc_gate_max_total_dv)
-        mc_layout.addRow("Gate: Max Guardrail Events", self.mc_gate_max_guardrail_events)
-        self.outputs_stack.addWidget(mc_page)
-        return tab
+        return build_outputs_tab(self)
 
     def _build_yaml_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        buttons = QHBoxLayout()
-        self.refresh_yaml_button = QPushButton("Refresh From Form")
-        self.refresh_yaml_button.clicked.connect(self._refresh_yaml)
-        buttons.addWidget(self.refresh_yaml_button)
-        self.apply_yaml_button = QPushButton("Apply YAML To Form")
-        self.apply_yaml_button.clicked.connect(self._apply_yaml_to_form)
-        buttons.addWidget(self.apply_yaml_button)
-        self.validate_yaml_button = QPushButton("Validate YAML")
-        self.validate_yaml_button.clicked.connect(self._validate_yaml)
-        buttons.addWidget(self.validate_yaml_button)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
-        self.yaml_editor = QPlainTextEdit()
-        layout.addWidget(self.yaml_editor, 1)
-        return tab
+        return build_yaml_tab(self)
 
     def _build_results_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        self.results_tabs = QTabWidget()
-        layout.addWidget(self.results_tabs, 1)
-
-        console_tab = QWidget()
-        console_layout = QVBoxLayout(console_tab)
-        self.console = QPlainTextEdit()
-        self.console.setReadOnly(True)
-        console_layout.addWidget(self.console)
-        self.results_tabs.addTab(console_tab, "Console")
-
-        summary_tab = QWidget()
-        summary_layout = QVBoxLayout(summary_tab)
-        self.results_summary = QPlainTextEdit()
-        self.results_summary.setReadOnly(True)
-        summary_layout.addWidget(self.results_summary)
-        self.results_tabs.addTab(summary_tab, "Summary")
-
-        artifacts_tab = QWidget()
-        artifacts_layout = QGridLayout(artifacts_tab)
-        self.output_files = QListWidget()
-        self.output_files.currentTextChanged.connect(self._on_output_file_selected)
-        artifacts_layout.addWidget(QLabel("Output Files"), 0, 0)
-        artifacts_layout.addWidget(self.output_files, 1, 0)
-
-        self.preview_title = QLabel("Select an artifact to preview.")
-        artifacts_layout.addWidget(self.preview_title, 0, 1)
-
-        self.preview_stack = QTabWidget()
-        self.preview_image = QLabel("No image selected.")
-        self.preview_image.setAlignment(Qt.AlignCenter)
-        self.preview_image.setMinimumSize(320, 240)
-        self.preview_image.installEventFilter(self)
-        preview_controls = QWidget()
-        preview_controls_layout = QHBoxLayout(preview_controls)
-        preview_controls_layout.setContentsMargins(0, 0, 0, 0)
-        self.zoom_out_button = QPushButton("Zoom -")
-        self.zoom_out_button.clicked.connect(self._zoom_out_preview)
-        preview_controls_layout.addWidget(self.zoom_out_button)
-        self.zoom_in_button = QPushButton("Zoom +")
-        self.zoom_in_button.clicked.connect(self._zoom_in_preview)
-        preview_controls_layout.addWidget(self.zoom_in_button)
-        self.zoom_fit_button = QPushButton("Fit")
-        self.zoom_fit_button.clicked.connect(self._fit_preview_image)
-        preview_controls_layout.addWidget(self.zoom_fit_button)
-        self.zoom_actual_button = QPushButton("1:1")
-        self.zoom_actual_button.clicked.connect(self._actual_size_preview)
-        preview_controls_layout.addWidget(self.zoom_actual_button)
-        self.zoom_label = QLabel("Fit")
-        preview_controls_layout.addWidget(self.zoom_label)
-        preview_controls_layout.addStretch(1)
-        self.preview_scroll = QScrollArea()
-        self.preview_scroll.setWidgetResizable(False)
-        self.preview_scroll.setWidget(self.preview_image)
-        self.preview_scroll.viewport().installEventFilter(self)
-        self.preview_text = QPlainTextEdit()
-        self.preview_text.setReadOnly(True)
-        image_tab = QWidget()
-        image_layout = QVBoxLayout(image_tab)
-        image_layout.addWidget(preview_controls)
-        image_layout.addWidget(self.preview_scroll, 1)
-        self.preview_stack.addTab(image_tab, "Image")
-        self.preview_stack.addTab(self.preview_text, "Text")
-        artifacts_layout.addWidget(self.preview_stack, 1, 1)
-        artifacts_layout.setColumnStretch(0, 2)
-        artifacts_layout.setColumnStretch(1, 3)
-        self.results_tabs.addTab(artifacts_tab, "Artifacts")
-        return tab
+        return build_results_tab(self)
 
     def _make_free_spinbox(self, decimals: int = 6) -> QDoubleSpinBox:
         widget = QDoubleSpinBox()
@@ -1664,6 +571,23 @@ class MainWindow(QMainWindow):
         combo.setMinimumContentsLength(12)
         combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         combo.setMaximumWidth(126)
+
+    def _populate_value_combo(self, combo: QComboBox, options: list[tuple[str, str]]) -> None:
+        combo.clear()
+        for value, label in options:
+            combo.addItem(label, value)
+
+    def _set_combo_data_or_text(self, combo: QComboBox, value: str) -> None:
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+            return
+        text_idx = combo.findText(value)
+        if text_idx >= 0:
+            combo.setCurrentIndex(text_idx)
+            return
+        combo.addItem(value, value)
+        combo.setCurrentIndex(combo.count() - 1)
 
     def _make_section_toggle_button(self, object_key: str, section_key: str = "initial_state") -> QPushButton:
         button = QPushButton("+")
@@ -1989,66 +913,28 @@ class MainWindow(QMainWindow):
         self._refresh_mc_variations_list()
 
     def _pointer_form_schema(self, pointer: dict) -> list[dict] | None:
-        class_name = str(pointer.get("class_name", "") or "")
-        return PARAMETER_FORM_SCHEMAS.get(class_name)
+        return pointer_form_schema(pointer, PARAMETER_FORM_SCHEMAS)
 
     def _pointer_display_name(self, pointer: dict) -> str:
-        return f"{pointer.get('module', '')}.{pointer.get('class_name', '') or pointer.get('function', '')}".strip(".")
+        return pointer_display_name(pointer)
 
     def _default_params_for_pointer(self, pointer: dict) -> dict:
-        module_name = str(pointer.get("module", "") or "")
-        class_name = str(pointer.get("class_name", "") or "")
-        if not module_name or not class_name:
-            return {}
-        try:
-            module = importlib.import_module(module_name)
-            cls = getattr(module, class_name)
-            instance = cls()
-            return copy.deepcopy(getattr(instance, "__dict__", {}) or {})
-        except Exception:
-            return {}
+        return default_params_for_pointer(pointer)
 
     def _normalize_form_value(self, field_spec: dict, params: dict, defaults: dict) -> object:
-        key = field_spec["key"]
-        if key in params:
-            return params.get(key)
-        return defaults.get(key)
+        return normalize_form_value(field_spec, params, defaults)
 
     def _format_vector_text(self, value: object, length: int | None = None) -> str:
-        if value is None:
-            values = [0.0] * int(length or 0)
-        else:
-            values = list(value) if isinstance(value, (list, tuple)) else [value]
-        if length is not None and len(values) < length:
-            values = values + [0.0] * (length - len(values))
-        return ", ".join(str(v) for v in values)
+        return format_vector_text(value, length)
 
     def _parse_vector_text(self, text: str, length: int | None = None) -> list[float]:
-        raw = text.strip()
-        if not raw:
-            values: list[float] = [0.0] * int(length or 0)
-        else:
-            parsed = yaml.safe_load(f"[{raw}]") if "[" not in raw else yaml.safe_load(raw)
-            if not isinstance(parsed, list):
-                raise ValueError("Vector values must be a comma-separated list.")
-            values = [float(v) for v in parsed]
-        if length is not None and len(values) != length:
-            raise ValueError(f"Expected {length} values.")
-        return values
+        return parse_vector_text(text, length)
 
     def _format_yaml_text(self, value: object) -> str:
-        if value is None:
-            payload: object = []
-        else:
-            payload = value
-        text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=False).strip()
-        return text if text else "[]"
+        return format_yaml_text(value)
 
     def _parse_yaml_text(self, text: str) -> object:
-        raw = text.strip()
-        if not raw:
-            return []
-        return yaml.safe_load(raw)
+        return parse_yaml_text(text)
 
     def _edit_pointer_params_structured(self, pointer: dict, combo: QComboBox, object_key: str, pointer_kind: str) -> bool:
         schema = self._pointer_form_schema(pointer)
@@ -2269,8 +1155,32 @@ class MainWindow(QMainWindow):
         self._refresh_mc_variation_button_state()
 
     def _selected_sensitivity_method(self) -> str:
+        value = self.sensitivity_method_combo.currentData()
+        if isinstance(value, str) and value.strip():
+            return value.strip()
         raw = self.sensitivity_method_combo.currentText().strip().lower()
         return "lhs" if "latin" in raw else "one_at_a_time"
+
+    def _current_analysis_ui_profile(self) -> AnalysisUiProfile:
+        study_type = self._selected_analysis_study_type()
+        sensitivity_method = self._selected_sensitivity_method()
+        if study_type == "monte_carlo":
+            profile_key = "monte_carlo"
+        elif sensitivity_method == "lhs":
+            profile_key = "sensitivity_lhs"
+        else:
+            profile_key = "sensitivity_one_at_a_time"
+        return ANALYSIS_UI_PROFILES.get(
+            profile_key,
+            AnalysisUiProfile(
+                count_label="Iterations",
+                seed_label="Base Seed",
+                inputs_title="Study Inputs",
+                editor_title="Input Editor",
+                help_text="",
+                mode_label="Mode",
+            ),
+        )
 
     def _format_analysis_metrics_text(self, metrics: list[object] | tuple[object, ...]) -> str:
         return "\n".join(str(metric).strip() for metric in metrics if str(metric).strip())
@@ -2324,8 +1234,9 @@ class MainWindow(QMainWindow):
         self.analysis_lhs_samples_spin.setValue(int(self.mc_iterations_spin.value()))
 
         self.analysis_settings_box.setVisible(sensitivity_active)
-        self.analysis_count_label.setText("Iterations" if study_type == "monte_carlo" else ("Samples" if lhs_active else "Runs (auto)"))
-        self.analysis_seed_label.setText("Base Seed" if study_type == "monte_carlo" else ("Seed" if lhs_active else "Seed"))
+        analysis_ui = self._current_analysis_ui_profile()
+        self.analysis_count_label.setText(analysis_ui.count_label)
+        self.analysis_seed_label.setText(analysis_ui.seed_label)
         self.mc_iterations_spin.setEnabled(study_type == "monte_carlo" or lhs_active)
         self.mc_base_seed_spin.setEnabled(study_type == "monte_carlo" or lhs_active)
         self.analysis_lhs_samples_spin.setEnabled(False)
@@ -2335,42 +1246,26 @@ class MainWindow(QMainWindow):
             lhs_label.setVisible(False)
         self.sensitivity_method_combo.setEnabled(sensitivity_active)
 
-        if study_type == "monte_carlo":
-            self.analysis_inputs_box.setTitle("Monte Carlo Variations")
-            self.analysis_editor_box.setTitle("Variation Editor")
-            self.analysis_help_label.setText(
-                "Configure random variations, iteration count, and campaign execution settings for Monte Carlo studies."
-            )
-        elif lhs_active:
-            self.analysis_inputs_box.setTitle("LHS Parameters")
-            self.analysis_editor_box.setTitle("Distribution Editor")
-            self.analysis_help_label.setText(
-                "Latin hypercube sampling draws one stratified sample per parameter per run. Use uniform or normal distributions."
-            )
-        else:
-            self.analysis_inputs_box.setTitle("Sensitivity Parameters")
-            self.analysis_editor_box.setTitle("Parameter Editor")
-            self.analysis_help_label.setText(
-                "One-at-a-time sensitivity varies one parameter at a time. Choice mode uses explicit values; uniform/normal provide quick helpers."
-            )
+        self.analysis_inputs_box.setTitle(analysis_ui.inputs_title)
+        self.analysis_editor_box.setTitle(analysis_ui.editor_title)
+        self.analysis_help_label.setText(analysis_ui.help_text)
 
-        allowed_modes = ["uniform", "normal"] if lhs_active else ["choice", "uniform", "normal"]
-        current_mode = self.mc_mode_combo.currentText().strip().lower()
-        if [self.mc_mode_combo.itemText(i) for i in range(self.mc_mode_combo.count())] != allowed_modes:
+        allowed_modes = MC_LHS_MODE_OPTIONS if lhs_active else MC_MODE_OPTIONS
+        current_mode = str(self.mc_mode_combo.currentData() or self.mc_mode_combo.currentText()).strip().lower()
+        if [str(self.mc_mode_combo.itemData(i) or self.mc_mode_combo.itemText(i)) for i in range(self.mc_mode_combo.count())] != allowed_modes:
             self.mc_mode_combo.blockSignals(True)
-            self.mc_mode_combo.clear()
-            self.mc_mode_combo.addItems(allowed_modes)
+            self._populate_value_combo(self.mc_mode_combo, [(mode, mode) for mode in allowed_modes])
             self.mc_mode_combo.blockSignals(False)
         if current_mode not in allowed_modes:
             current_mode = allowed_modes[0]
-        self.mc_mode_combo.setCurrentText(current_mode)
+        self._set_combo_data_or_text(self.mc_mode_combo, current_mode)
         mode_label = self.mc_variation_form.labelForField(self.mc_mode_combo)
         if mode_label is not None:
-            mode_label.setText("Distribution" if lhs_active else "Mode")
+            mode_label.setText(analysis_ui.mode_label)
         self._refresh_mc_mode_ui()
 
     def _refresh_mc_mode_ui(self) -> None:
-        mode = self.mc_mode_combo.currentText().strip().lower()
+        mode = str(self.mc_mode_combo.currentData() or self.mc_mode_combo.currentText()).strip().lower()
         mode_to_index = {"choice": 0, "uniform": 1, "normal": 2}
         self.mc_mode_stack.setCurrentIndex(mode_to_index.get(mode, 0))
 
@@ -2450,9 +1345,9 @@ class MainWindow(QMainWindow):
         variation = dict(self.mc_variations[row] or {})
         self._set_mc_variation_path_selection(str(variation.get("parameter_path", "") or ""))
         mode = str(variation.get("mode", "choice") or "choice").lower()
-        allowed_modes = [self.mc_mode_combo.itemText(i) for i in range(self.mc_mode_combo.count())]
+        allowed_modes = [str(self.mc_mode_combo.itemData(i) or self.mc_mode_combo.itemText(i)) for i in range(self.mc_mode_combo.count())]
         fallback_mode = allowed_modes[0] if allowed_modes else "choice"
-        self.mc_mode_combo.setCurrentText(mode if mode in set(allowed_modes) else fallback_mode)
+        self._set_combo_data_or_text(self.mc_mode_combo, mode if mode in set(allowed_modes) else fallback_mode)
         self.mc_choice_options_edit.setText(", ".join(str(v) for v in list(variation.get("options", []) or [])))
         self.mc_uniform_low_spin.setValue(float(variation.get("low", 0.0) or 0.0))
         self.mc_uniform_high_spin.setValue(float(variation.get("high", 0.0) or 0.0))
@@ -2471,7 +1366,7 @@ class MainWindow(QMainWindow):
         self._refresh_mc_parameter_options()
         self.mc_custom_path_edit.clear()
         default_mode = "uniform" if (self._selected_analysis_study_type() == "sensitivity" and self._selected_sensitivity_method() == "lhs") else "choice"
-        self.mc_mode_combo.setCurrentText(default_mode)
+        self._set_combo_data_or_text(self.mc_mode_combo, default_mode)
         self.mc_choice_options_edit.clear()
         self.mc_uniform_low_spin.setValue(0.0)
         self.mc_uniform_high_spin.setValue(0.0)
@@ -2502,7 +1397,7 @@ class MainWindow(QMainWindow):
             parameter_path = str(self.mc_parameter_combo.currentData() or "").strip()
         if not parameter_path:
             raise ValueError("Select a parameter or enter a custom path.")
-        mode = self.mc_mode_combo.currentText().strip().lower()
+        mode = str(self.mc_mode_combo.currentData() or self.mc_mode_combo.currentText()).strip().lower()
         lhs_active = self._selected_analysis_study_type() == "sensitivity" and self._selected_sensitivity_method() == "lhs"
         variation: dict[str, object] = {"parameter_path": parameter_path, "mode": mode}
         if mode == "choice":
@@ -2552,512 +1447,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Removed analysis input.", 5000)
 
     def _load_config_into_widgets(self, cfg: dict) -> None:
-        self._suppress_dirty_tracking = True
-        sim = cfg.get("simulator", {})
-        outputs = cfg.get("outputs", {})
-        mc = cfg.get("monte_carlo", {})
-        analysis = dict(cfg.get("analysis", {}) or {})
-        target = cfg.get("target", {})
-        chaser = cfg.get("chaser", {})
-        rocket = cfg.get("rocket", {})
-
-        self.scenario_name_edit.setText(str(cfg.get("scenario_name", "")))
-        self.scenario_description_edit.setText(str(cfg.get("scenario_description", "") or ""))
-        self.duration_spin.setValue(float(sim.get("duration_s", 3600.0)))
-        self.dt_spin.setValue(float(sim.get("dt_s", 1.0)))
-        self.output_mode_combo.setCurrentText(str(outputs.get("mode", "interactive")))
-        self.output_dir_edit.setText(str(outputs.get("output_dir", "outputs/gui_run")))
-        analysis_enabled = bool(analysis.get("enabled", False))
-        study_type = str(analysis.get("study_type", "monte_carlo") or "monte_carlo").strip().lower()
-        analysis_metrics = list(analysis.get("metrics", []) or [])
-        analysis_baseline = dict(analysis.get("baseline", {}) or {})
-        sensitivity = dict(analysis.get("sensitivity", {}) or {})
-        sensitivity_method = str(sensitivity.get("method", "one_at_a_time") or "one_at_a_time").strip().lower()
-        if not analysis_enabled and not bool(mc.get("enabled", False)):
-            study_type = "monte_carlo"
-        self.mc_enabled_check.setChecked(bool(analysis_enabled or mc.get("enabled", False)))
-        self.analysis_study_type_combo.setCurrentText("Sensitivity" if study_type == "sensitivity" else "Monte Carlo")
-        self.sensitivity_method_combo.setCurrentText("Latin Hypercube" if sensitivity_method == "lhs" else "One-at-a-Time")
-        self.analysis_metrics_edit.setPlainText(self._format_analysis_metrics_text(analysis_metrics))
-        self.analysis_baseline_enable_check.setChecked(bool(analysis_baseline.get("enabled", False)))
-        self.analysis_baseline_path_edit.setText(str(analysis_baseline.get("summary_json", "") or ""))
-        if study_type == "sensitivity" and analysis_enabled:
-            execution = dict(analysis.get("execution", {}) or {})
-            params = list(sensitivity.get("parameters", []) or [])
-            lhs_samples = int(sensitivity.get("samples", 0) or 0)
-            self.analysis_lhs_samples_spin.setValue(max(lhs_samples, 1))
-            if sensitivity_method == "lhs":
-                self.mc_iterations_spin.setValue(max(lhs_samples, 1))
-                self.mc_base_seed_spin.setValue(int(sensitivity.get("seed", 0) or 0))
-            else:
-                self.mc_iterations_spin.setValue(max(sum(len(list(dict(p or {}).get("values", []) or [])) for p in params), 1))
-                self.mc_base_seed_spin.setValue(int(sensitivity.get("seed", 0) or 0))
-            self.mc_parallel_check.setChecked(bool(execution.get("parallel_enabled", False)))
-            self.mc_workers_spin.setValue(int(execution.get("parallel_workers", 0)))
-            self.mc_variations = []
-            for param in params:
-                param_dict = dict(param or {})
-                parameter_path = str(param_dict.get("parameter_path", param_dict.get("path", "")) or "")
-                if not parameter_path:
-                    continue
-                if sensitivity_method == "lhs":
-                    distribution = str(param_dict.get("distribution", "uniform") or "uniform").strip().lower()
-                    variation = {"parameter_path": parameter_path, "mode": distribution}
-                    if distribution == "uniform":
-                        variation["low"] = float(param_dict.get("low", 0.0) or 0.0)
-                        variation["high"] = float(param_dict.get("high", 0.0) or 0.0)
-                    else:
-                        variation["mean"] = float(param_dict.get("mean", 0.0) or 0.0)
-                        variation["std"] = float(param_dict.get("std", 0.0) or 0.0)
-                else:
-                    values = list(param_dict.get("values", []) or [])
-                    if values:
-                        variation = {
-                            "parameter_path": parameter_path,
-                            "mode": "choice",
-                            "options": values,
-                        }
-                    elif param_dict.get("distribution") == "normal":
-                        variation = {
-                            "parameter_path": parameter_path,
-                            "mode": "normal",
-                            "mean": float(param_dict.get("mean", 0.0) or 0.0),
-                            "std": float(param_dict.get("std", 0.0) or 0.0),
-                        }
-                    else:
-                        variation = {
-                            "parameter_path": parameter_path,
-                            "mode": "uniform",
-                            "low": float(param_dict.get("low", 0.0) or 0.0),
-                            "high": float(param_dict.get("high", 0.0) or 0.0),
-                        }
-                self.mc_variations.append(variation)
-        else:
-            self.mc_iterations_spin.setValue(int(mc.get("iterations", 1)))
-            self.mc_parallel_check.setChecked(bool(mc.get("parallel_enabled", False)))
-            self.mc_workers_spin.setValue(int(mc.get("parallel_workers", 0)))
-            self.mc_base_seed_spin.setValue(int(mc.get("base_seed", 0)))
-            self.analysis_lhs_samples_spin.setValue(max(int(sensitivity.get("samples", 0) or 0), 1))
-            self.mc_variations = [dict(v or {}) for v in list(mc.get("variations", []) or [])]
-        self._rebuild_mc_category_combo()
-        self._refresh_mc_parameter_options()
-        self._refresh_mc_variations_list()
-        self._clear_mc_variation_editor()
-        self._refresh_analysis_editor_ui()
-        dynamics = dict(sim.get("dynamics", {}) or {})
-        orbit_dyn = dict(dynamics.get("orbit", {}) or {})
-        att_dyn = dict(dynamics.get("attitude", {}) or {})
-        disturbance_torques = dict(att_dyn.get("disturbance_torques", {}) or {})
-        orbit_substep_val = orbit_dyn.get("orbit_substep_s")
-        attitude_substep_val = att_dyn.get("attitude_substep_s")
-        self._set_combo_text_or_append(self.orbit_integrator_combo, str(orbit_dyn.get("integrator", "rk4") or "rk4"))
-        self.orbit_adaptive_atol_spin.setValue(float(orbit_dyn.get("adaptive_atol", 1.0e-9) or 0.0))
-        self.orbit_adaptive_rtol_spin.setValue(float(orbit_dyn.get("adaptive_rtol", 1.0e-7) or 0.0))
-        self.orbit_substep_enabled_check.setChecked(orbit_substep_val is not None)
-        self.attitude_substep_enabled_check.setChecked(attitude_substep_val is not None)
-        self.orbit_substep_spin.setValue(float(orbit_substep_val or 0.0))
-        self.attitude_substep_spin.setValue(float(attitude_substep_val or 0.0))
-        self.attitude_enabled_check.setChecked(bool(att_dyn.get("enabled", True)))
-        self.orbit_j2_check.setChecked(bool(orbit_dyn.get("j2", False)))
-        self.orbit_j3_check.setChecked(bool(orbit_dyn.get("j3", False)))
-        self.orbit_j4_check.setChecked(bool(orbit_dyn.get("j4", False)))
-        self.orbit_drag_check.setChecked(bool(orbit_dyn.get("drag", False)))
-        self.orbit_srp_check.setChecked(bool(orbit_dyn.get("srp", False)))
-        self.orbit_moon_check.setChecked(bool(orbit_dyn.get("third_body_moon", False)))
-        self.orbit_sun_check.setChecked(bool(orbit_dyn.get("third_body_sun", False)))
-        self.att_gg_check.setChecked(bool(disturbance_torques.get("gravity_gradient", False)))
-        self.att_magnetic_check.setChecked(bool(disturbance_torques.get("magnetic", False)))
-        self.att_drag_check.setChecked(bool(disturbance_torques.get("drag", False)))
-        self.att_srp_check.setChecked(bool(disturbance_torques.get("srp", False)))
-        self._refresh_substep_visibility()
-        self._refresh_integrator_visibility()
-
-        target_specs = dict(target.get("specs", {}) or {})
-        target_coes = dict(target.get("initial_state", {}).get("coes", {}) or {})
-        self.target_enabled.setChecked(bool(target.get("enabled", True)))
-        self._set_combo_text_or_append(self.target_preset, str(target_specs.get("preset_satellite", "") or SATELLITE_PRESET_OPTIONS[0]))
-        target_mass_fallback = float(target_specs.get("mass_kg", 400.0) or 0.0)
-        self.target_dry_mass.setValue(float(target_specs.get("dry_mass_kg", target_mass_fallback) or 0.0))
-        self.target_fuel_mass.setValue(float(target_specs.get("fuel_mass_kg", 0.0) or 0.0))
-        self.target_a.setValue(float(target_coes.get("a_km", 7000.0) or 7000.0))
-        self.target_ecc.setValue(float(target_coes.get("ecc", 0.001) or 0.0))
-        self.target_inc.setValue(float(target_coes.get("inc_deg", 45.0) or 0.0))
-        self.target_raan.setValue(float(target_coes.get("raan_deg", 0.0) or 0.0))
-        self.target_argp.setValue(float(target_coes.get("argp_deg", 0.0) or 0.0))
-        self.target_ta.setValue(float(target_coes.get("true_anomaly_deg", 0.0) or 0.0))
-        self._set_pointer_combo_value(self.target_strategy_combo, dict(target.get("mission_strategy", {}) or {}) if target.get("mission_strategy") else None)
-        self._set_pointer_combo_value(self.target_execution_combo, dict(target.get("mission_execution", {}) or {}) if target.get("mission_execution") else None)
-        self._set_pointer_combo_value(self.target_orbit_control_combo, dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
-        self._set_pointer_combo_value(self.target_attitude_control_combo, dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
-        self._load_knowledge_into_widgets("target", dict(target.get("knowledge", {}) or {}))
-
-        chaser_specs = dict(chaser.get("specs", {}) or {})
-        chaser_init = dict(chaser.get("initial_state", {}) or {})
-        self.chaser_enabled.setChecked(bool(chaser.get("enabled", False)))
-        self._set_combo_text_or_append(self.chaser_preset, str(chaser_specs.get("preset_satellite", "") or SATELLITE_PRESET_OPTIONS[0]))
-        chaser_mass_fallback = float(chaser_specs.get("mass_kg", 200.0) or 0.0)
-        self.chaser_dry_mass.setValue(float(chaser_specs.get("dry_mass_kg", chaser_mass_fallback) or 0.0))
-        self.chaser_fuel_mass.setValue(float(chaser_specs.get("fuel_mass_kg", 0.0) or 0.0))
-        rel_block = dict(chaser_init.get("relative_to_target_ric", {}) or {})
-        if rel_block:
-            frame = str(rel_block.get("frame", "rect") or "rect").strip().lower()
-            self.chaser_init_mode.setCurrentText("relative_ric_curv" if frame == "curv" else "relative_ric_rect")
-            values = list(rel_block.get("state", [0.0] * 6))
-        elif "relative_ric_rect" in chaser_init:
-            self.chaser_init_mode.setCurrentText("relative_ric_rect")
-            values = list(chaser_init.get("relative_ric_rect", [0.0] * 6))
-        elif "relative_ric_curv" in chaser_init:
-            self.chaser_init_mode.setCurrentText("relative_ric_curv")
-            values = list(chaser_init.get("relative_ric_curv", [0.0] * 6))
-        else:
-            self.chaser_init_mode.setCurrentText("rocket_deployment")
-            values = list(chaser_init.get("deploy_dv_body_m_s", [10.0, 0.0, 0.0])) + [0.0, 0.0, 0.0]
-        self.chaser_deploy_time.setValue(float(chaser_init.get("deploy_time_s", 900.0) or 0.0))
-        for i, widget in enumerate(self.chaser_init_values):
-            widget.setValue(float(values[i] if i < len(values) else 0.0))
-        self._set_pointer_combo_value(self.chaser_strategy_combo, dict(chaser.get("mission_strategy", {}) or {}) if chaser.get("mission_strategy") else None)
-        self._set_pointer_combo_value(self.chaser_execution_combo, dict(chaser.get("mission_execution", {}) or {}) if chaser.get("mission_execution") else None)
-        self._set_pointer_combo_value(self.chaser_orbit_control_combo, dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
-        self._set_pointer_combo_value(self.chaser_attitude_control_combo, dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
-        self._load_knowledge_into_widgets("chaser", dict(chaser.get("knowledge", {}) or {}))
-
-        rocket_specs = dict(rocket.get("specs", {}) or {})
-        rocket_init = dict(rocket.get("initial_state", {}) or {})
-        self.rocket_enabled.setChecked(bool(rocket.get("enabled", False)))
-        self._set_combo_text_or_append(self.rocket_preset, str(rocket_specs.get("preset_stack", "") or ROCKET_PRESET_OPTIONS[0]))
-        self.rocket_payload.setValue(float(rocket_specs.get("payload_mass_kg", 150.0) or 0.0))
-        self.rocket_launch_lat.setValue(float(rocket_init.get("launch_lat_deg", 28.5) or 0.0))
-        self.rocket_launch_lon.setValue(float(rocket_init.get("launch_lon_deg", -80.6) or 0.0))
-        self.rocket_launch_alt.setValue(float(rocket_init.get("launch_alt_km", 0.0) or 0.0))
-        self.rocket_launch_az.setValue(float(rocket_init.get("launch_azimuth_deg", 90.0) or 0.0))
-        self._set_pointer_combo_value(self.rocket_strategy_combo, dict(rocket.get("mission_strategy", {}) or {}) if rocket.get("mission_strategy") else None)
-        self._set_pointer_combo_value(self.rocket_execution_combo, dict(rocket.get("mission_execution", {}) or {}) if rocket.get("mission_execution") else None)
-        rocket_base_guidance = dict(rocket.get("base_guidance", {}) or {}) if rocket.get("base_guidance") else None
-        if rocket_base_guidance is None and rocket.get("guidance"):
-            rocket_base_guidance = dict(rocket.get("guidance", {}) or {})
-        self._set_pointer_combo_value(self.rocket_base_guidance_combo, rocket_base_guidance)
-        self.rocket_guidance_modifiers_config = copy.deepcopy(list(rocket.get("guidance_modifiers", []) or []))
-        self._refresh_rocket_guidance_modifiers_label()
-        self._load_knowledge_into_widgets("rocket", dict(rocket.get("knowledge", {}) or {}))
-        stats = dict(outputs.get("stats", {}) or {})
-        plots = dict(outputs.get("plots", {}) or {})
-        animations = dict(outputs.get("animations", {}) or {})
-        mc_outputs = dict(outputs.get("monte_carlo", {}) or {})
-        self.stats_enabled.setChecked(bool(stats.get("enabled", True)))
-        self.stats_print_summary.setChecked(bool(stats.get("print_summary", True)))
-        self.stats_save_json.setChecked(bool(stats.get("save_json", True)))
-        self.stats_save_csv.setChecked(bool(stats.get("save_csv", False)))
-        self.plots_enabled.setChecked(bool(plots.get("enabled", True)))
-        self.plots_dpi.setValue(int(plots.get("dpi", 150) or 150))
-        for check in self.figure_id_checks.values():
-            check.setChecked(False)
-        for figure_id in list(plots.get("figure_ids", []) or []):
-            if figure_id in self.figure_id_checks:
-                self.figure_id_checks[figure_id].setChecked(True)
-        self.reference_object_edit.setText(str(plots.get("reference_object_id", "") or ""))
-        for check in self.animation_type_checks.values():
-            check.setChecked(False)
-        for anim_type in list(animations.get("types", []) or []):
-            if anim_type in self.animation_type_checks:
-                self.animation_type_checks[anim_type].setChecked(True)
-        self.animation_fps_spin.setValue(float(animations.get("fps", 30.0) or 30.0))
-        self.animation_speed_multiple_spin.setValue(float(animations.get("speed_multiple", 10.0) or 10.0))
-        self.animation_frame_stride_spin.setValue(int(animations.get("frame_stride", 1) or 1))
-        self.mc_save_iteration_summaries.setChecked(bool(mc_outputs.get("save_iteration_summaries", False)))
-        self.mc_save_aggregate_summary.setChecked(bool(mc_outputs.get("save_aggregate_summary", True)))
-        self.mc_save_histograms.setChecked(bool(mc_outputs.get("save_histograms", False)))
-        self.mc_display_histograms.setChecked(bool(mc_outputs.get("display_histograms", False)))
-        self.mc_save_ops_dashboard.setChecked(bool(mc_outputs.get("save_ops_dashboard", True)))
-        self.mc_display_ops_dashboard.setChecked(bool(mc_outputs.get("display_ops_dashboard", False)))
-        self.mc_save_raw_runs.setChecked(bool(mc_outputs.get("save_raw_runs", False)))
-        self.mc_require_rocket_insertion.setChecked(bool(mc_outputs.get("require_rocket_insertion", False)))
-        self.mc_baseline_summary_json.setText(str(mc_outputs.get("baseline_summary_json", "") or ""))
-        gates = dict(mc_outputs.get("gates", {}) or {})
-        self.mc_gate_min_closest_approach.setValue(float(gates.get("min_closest_approach_km", 0.0) or 0.0))
-        self.mc_gate_max_duration.setValue(float(gates.get("max_duration_s", 0.0) or 0.0))
-        self.mc_gate_max_total_dv.setValue(float(gates.get("max_total_dv_m_s", 0.0) or 0.0))
-        self.mc_gate_max_guardrail_events.setValue(float(gates.get("max_guardrail_events", 0.0) or 0.0))
-        self._refresh_outputs_mode_ui()
-        self._suppress_dirty_tracking = False
+        GUI_CONFIG_ADAPTER.load_into_window(self, cfg)
 
     def _collect_config_from_widgets(self) -> dict:
-        cfg = dict(self.current_config)
-        cfg["scenario_name"] = self.scenario_name_edit.text().strip()
-        cfg["scenario_description"] = self.scenario_description_edit.text().strip()
-        sim = cfg.setdefault("simulator", {})
-        outputs = cfg.setdefault("outputs", {})
-        mc = cfg.setdefault("monte_carlo", {})
-        analysis = cfg.setdefault("analysis", {})
-        target = cfg.setdefault("target", {})
-        chaser = cfg.setdefault("chaser", {})
-        rocket = cfg.setdefault("rocket", {})
-
-        sim["duration_s"] = float(self.duration_spin.value())
-        sim["dt_s"] = float(self.dt_spin.value())
-        dynamics = sim.setdefault("dynamics", {})
-        orbit_dyn = dynamics.setdefault("orbit", {})
-        att_dyn = dynamics.setdefault("attitude", {})
-        disturbance_torques = att_dyn.setdefault("disturbance_torques", {})
-
-        orbit_substep = float(self.orbit_substep_spin.value())
-        attitude_substep = float(self.attitude_substep_spin.value())
-        orbit_dyn["integrator"] = self.orbit_integrator_combo.currentText()
-        orbit_dyn["adaptive_atol"] = float(self.orbit_adaptive_atol_spin.value())
-        orbit_dyn["adaptive_rtol"] = float(self.orbit_adaptive_rtol_spin.value())
-        orbit_dyn["orbit_substep_s"] = orbit_substep if (self.orbit_substep_enabled_check.isChecked() and orbit_substep > 0.0) else None
-        att_dyn["attitude_substep_s"] = attitude_substep if (self.attitude_substep_enabled_check.isChecked() and attitude_substep > 0.0) else None
-        att_dyn["enabled"] = bool(self.attitude_enabled_check.isChecked())
-        orbit_dyn["j2"] = bool(self.orbit_j2_check.isChecked())
-        orbit_dyn["j3"] = bool(self.orbit_j3_check.isChecked())
-        orbit_dyn["j4"] = bool(self.orbit_j4_check.isChecked())
-        orbit_dyn["drag"] = bool(self.orbit_drag_check.isChecked())
-        orbit_dyn["srp"] = bool(self.orbit_srp_check.isChecked())
-        orbit_dyn["third_body_moon"] = bool(self.orbit_moon_check.isChecked())
-        orbit_dyn["third_body_sun"] = bool(self.orbit_sun_check.isChecked())
-        disturbance_torques["gravity_gradient"] = bool(self.att_gg_check.isChecked())
-        disturbance_torques["magnetic"] = bool(self.att_magnetic_check.isChecked())
-        disturbance_torques["drag"] = bool(self.att_drag_check.isChecked())
-        disturbance_torques["srp"] = bool(self.att_srp_check.isChecked())
-
-        outputs["mode"] = self.output_mode_combo.currentText()
-        output_dir = self.output_dir_edit.text().strip() or "outputs/gui_run"
-        outputs["output_dir"] = output_dir
-        if self.output_dir_edit.text().strip() != output_dir:
-            self.output_dir_edit.setText(output_dir)
-        analysis_enabled = bool(self.mc_enabled_check.isChecked())
-        study_type = self._selected_analysis_study_type()
-        mc["enabled"] = bool(analysis_enabled and study_type == "monte_carlo")
-        mc["iterations"] = int(self.mc_iterations_spin.value())
-        mc["parallel_enabled"] = bool(self.mc_parallel_check.isChecked())
-        mc["parallel_workers"] = int(self.mc_workers_spin.value())
-        mc["base_seed"] = int(self.mc_base_seed_spin.value())
-        mc["variations"] = copy.deepcopy(self.mc_variations)
-        analysis["enabled"] = analysis_enabled
-        analysis["study_type"] = study_type
-        analysis["execution"] = {
-            "parallel_enabled": bool(self.mc_parallel_check.isChecked()),
-            "parallel_workers": int(self.mc_workers_spin.value()),
-        }
-        analysis["metrics"] = self._parse_analysis_metrics_text()
-        analysis["baseline"] = {
-            "enabled": bool(self.analysis_baseline_enable_check.isChecked()),
-            "summary_json": self.analysis_baseline_path_edit.text().strip(),
-        }
-        analysis["monte_carlo"] = {
-            "iterations": int(self.mc_iterations_spin.value()),
-            "base_seed": int(self.mc_base_seed_spin.value()),
-            "variations": copy.deepcopy(self.mc_variations),
-        }
-        sensitivity_method = self._selected_sensitivity_method()
-        params = []
-        for variation in self.mc_variations:
-            parameter_path = str(dict(variation or {}).get("parameter_path", "") or "")
-            if not parameter_path:
-                continue
-            mode = str(dict(variation or {}).get("mode", "choice") or "choice").strip().lower()
-            if sensitivity_method == "lhs":
-                param_entry = {
-                    "parameter_path": parameter_path,
-                    "distribution": mode if mode in {"uniform", "normal"} else "uniform",
-                }
-                if mode == "normal":
-                    param_entry["mean"] = float(dict(variation or {}).get("mean", 0.0) or 0.0)
-                    param_entry["std"] = float(dict(variation or {}).get("std", 0.0) or 0.0)
-                else:
-                    param_entry["low"] = float(dict(variation or {}).get("low", 0.0) or 0.0)
-                    param_entry["high"] = float(dict(variation or {}).get("high", 0.0) or 0.0)
-            else:
-                values = list(dict(variation or {}).get("options", []) or [])
-                if mode == "uniform":
-                    values = [dict(variation or {}).get("low"), dict(variation or {}).get("high")]
-                elif mode == "normal":
-                    mean = dict(variation or {}).get("mean")
-                    std = dict(variation or {}).get("std")
-                    if isinstance(mean, (int, float)) and isinstance(std, (int, float)):
-                        values = [float(mean) - float(std), float(mean), float(mean) + float(std)]
-                param_entry = {
-                    "parameter_path": parameter_path,
-                    "values": [v for v in values if v is not None],
-                    "distribution": mode if mode in {"uniform", "normal"} else "uniform",
-                }
-                if mode == "uniform":
-                    param_entry["low"] = float(dict(variation or {}).get("low", 0.0) or 0.0)
-                    param_entry["high"] = float(dict(variation or {}).get("high", 0.0) or 0.0)
-                elif mode == "normal":
-                    param_entry["mean"] = float(dict(variation or {}).get("mean", 0.0) or 0.0)
-                    param_entry["std"] = float(dict(variation or {}).get("std", 0.0) or 0.0)
-            params.append(param_entry)
-        analysis["sensitivity"] = {
-            "method": sensitivity_method,
-            "samples": int(self.mc_iterations_spin.value()),
-            "seed": int(self.mc_base_seed_spin.value()),
-            "parameters": params,
-        }
-
-        target["enabled"] = bool(self.target_enabled.isChecked())
-        target.setdefault("specs", {})["preset_satellite"] = self.target_preset.currentText().strip()
-        target["specs"]["dry_mass_kg"] = float(self.target_dry_mass.value())
-        target["specs"]["fuel_mass_kg"] = float(self.target_fuel_mass.value())
-        target["specs"].pop("mass_kg", None)
-        target.setdefault("initial_state", {})["coes"] = {
-            "a_km": float(self.target_a.value()),
-            "ecc": float(self.target_ecc.value()),
-            "inc_deg": float(self.target_inc.value()),
-            "raan_deg": float(self.target_raan.value()),
-            "argp_deg": float(self.target_argp.value()),
-            "true_anomaly_deg": float(self.target_ta.value()),
-        }
-        target["mission_strategy"] = self._combo_pointer_value(self.target_strategy_combo, existing=dict(target.get("mission_strategy", {}) or {}) if target.get("mission_strategy") else None)
-        target["mission_execution"] = self._combo_pointer_value(self.target_execution_combo, existing=dict(target.get("mission_execution", {}) or {}) if target.get("mission_execution") else None)
-        target.pop("guidance", None)
-        target["orbit_control"] = self._combo_pointer_value(self.target_orbit_control_combo, existing=dict(target.get("orbit_control", {}) or {}) if target.get("orbit_control") else None)
-        target["attitude_control"] = self._combo_pointer_value(self.target_attitude_control_combo, existing=dict(target.get("attitude_control", {}) or {}) if target.get("attitude_control") else None)
-        target["knowledge"] = self._collect_knowledge_from_widgets("target", existing=dict(target.get("knowledge", {}) or {}))
-
-        chaser["enabled"] = bool(self.chaser_enabled.isChecked())
-        chaser.setdefault("specs", {})["preset_satellite"] = self.chaser_preset.currentText().strip()
-        chaser["specs"]["dry_mass_kg"] = float(self.chaser_dry_mass.value())
-        chaser["specs"]["fuel_mass_kg"] = float(self.chaser_fuel_mass.value())
-        chaser["specs"].pop("mass_kg", None)
-        init_mode = self.chaser_init_mode.currentText()
-        chaser_initial_state = dict(chaser.get("initial_state", {}) or {})
-        if init_mode == "rocket_deployment":
-            chaser_initial_state["source"] = "rocket_deployment"
-            chaser_initial_state["deploy_time_s"] = float(self.chaser_deploy_time.value())
-            chaser_initial_state["deploy_dv_body_m_s"] = [float(self.chaser_init_values[i].value()) for i in range(3)]
-            chaser_initial_state.pop("relative_to_target_ric", None)
-            chaser_initial_state.pop("relative_ric_rect", None)
-            chaser_initial_state.pop("relative_ric_curv", None)
-        else:
-            chaser_initial_state.pop("source", None)
-            chaser_initial_state.pop("deploy_time_s", None)
-            chaser_initial_state.pop("deploy_dv_body_m_s", None)
-            chaser_initial_state["relative_to_target_ric"] = {
-                "frame": "rect" if init_mode == "relative_ric_rect" else "curv",
-                "state": [float(widget.value()) for widget in self.chaser_init_values],
-            }
-            chaser_initial_state.pop("relative_ric_rect", None)
-            chaser_initial_state.pop("relative_ric_curv", None)
-        chaser["initial_state"] = chaser_initial_state
-        chaser["mission_strategy"] = self._combo_pointer_value(self.chaser_strategy_combo, existing=dict(chaser.get("mission_strategy", {}) or {}) if chaser.get("mission_strategy") else None)
-        chaser["mission_execution"] = self._combo_pointer_value(self.chaser_execution_combo, existing=dict(chaser.get("mission_execution", {}) or {}) if chaser.get("mission_execution") else None)
-        chaser.pop("guidance", None)
-        chaser["orbit_control"] = self._combo_pointer_value(self.chaser_orbit_control_combo, existing=dict(chaser.get("orbit_control", {}) or {}) if chaser.get("orbit_control") else None)
-        chaser["attitude_control"] = self._combo_pointer_value(self.chaser_attitude_control_combo, existing=dict(chaser.get("attitude_control", {}) or {}) if chaser.get("attitude_control") else None)
-        chaser["knowledge"] = self._collect_knowledge_from_widgets("chaser", existing=dict(chaser.get("knowledge", {}) or {}))
-
-        rocket["enabled"] = bool(self.rocket_enabled.isChecked())
-        rocket.setdefault("specs", {})["preset_stack"] = self.rocket_preset.currentText().strip()
-        rocket["specs"]["payload_mass_kg"] = float(self.rocket_payload.value())
-        rocket["initial_state"] = {
-            "launch_lat_deg": float(self.rocket_launch_lat.value()),
-            "launch_lon_deg": float(self.rocket_launch_lon.value()),
-            "launch_alt_km": float(self.rocket_launch_alt.value()),
-            "launch_azimuth_deg": float(self.rocket_launch_az.value()),
-        }
-        rocket["mission_strategy"] = self._combo_pointer_value(self.rocket_strategy_combo, existing=dict(rocket.get("mission_strategy", {}) or {}) if rocket.get("mission_strategy") else None)
-        rocket["mission_execution"] = self._combo_pointer_value(self.rocket_execution_combo, existing=dict(rocket.get("mission_execution", {}) or {}) if rocket.get("mission_execution") else None)
-        rocket["base_guidance"] = self._combo_pointer_value(
-            self.rocket_base_guidance_combo,
-            existing=dict(rocket.get("base_guidance", {}) or {}) if rocket.get("base_guidance") else (
-                dict(rocket.get("guidance", {}) or {}) if rocket.get("guidance") else None
-            ),
-        )
-        rocket["guidance_modifiers"] = copy.deepcopy(self.rocket_guidance_modifiers_config)
-        rocket.pop("guidance", None)
-        rocket.pop("orbit_control", None)
-        rocket.pop("attitude_control", None)
-        rocket["knowledge"] = self._collect_knowledge_from_widgets("rocket", existing=dict(rocket.get("knowledge", {}) or {}))
-
-        stats = outputs.setdefault("stats", {})
-        plots = outputs.setdefault("plots", {})
-        animations = outputs.setdefault("animations", {})
-        mc_outputs = outputs.setdefault("monte_carlo", {})
-        stats["enabled"] = bool(self.stats_enabled.isChecked())
-        stats["print_summary"] = bool(self.stats_print_summary.isChecked())
-        stats["save_json"] = bool(self.stats_save_json.isChecked())
-        stats["save_csv"] = bool(self.stats_save_csv.isChecked())
-        plots["enabled"] = bool(self.plots_enabled.isChecked())
-        plots["dpi"] = int(self.plots_dpi.value())
-        figure_ids = [figure_id for figure_id, check in self.figure_id_checks.items() if check.isChecked()]
-        plots["figure_ids"] = figure_ids
-        ref_obj = self.reference_object_edit.text().strip()
-        if ref_obj:
-            plots["reference_object_id"] = ref_obj
-        else:
-            plots.pop("reference_object_id", None)
-        animation_types = [anim_type for anim_type, check in self.animation_type_checks.items() if check.isChecked()]
-        animations["enabled"] = bool(animation_types)
-        animations["types"] = animation_types
-        animations["fps"] = float(self.animation_fps_spin.value())
-        animations["speed_multiple"] = float(self.animation_speed_multiple_spin.value())
-        animations["frame_stride"] = int(self.animation_frame_stride_spin.value())
-        mc_outputs["save_iteration_summaries"] = bool(self.mc_save_iteration_summaries.isChecked())
-        mc_outputs["save_aggregate_summary"] = bool(self.mc_save_aggregate_summary.isChecked())
-        mc_outputs["save_histograms"] = bool(self.mc_save_histograms.isChecked())
-        mc_outputs["display_histograms"] = bool(self.mc_display_histograms.isChecked())
-        mc_outputs["save_ops_dashboard"] = bool(self.mc_save_ops_dashboard.isChecked())
-        mc_outputs["display_ops_dashboard"] = bool(self.mc_display_ops_dashboard.isChecked())
-        mc_outputs["save_raw_runs"] = bool(self.mc_save_raw_runs.isChecked())
-        mc_outputs["require_rocket_insertion"] = bool(self.mc_require_rocket_insertion.isChecked())
-        mc_outputs["baseline_summary_json"] = self.mc_baseline_summary_json.text().strip()
-        gates = {}
-        if float(self.mc_gate_min_closest_approach.value()) != 0.0:
-            gates["min_closest_approach_km"] = float(self.mc_gate_min_closest_approach.value())
-        if float(self.mc_gate_max_duration.value()) != 0.0:
-            gates["max_duration_s"] = float(self.mc_gate_max_duration.value())
-        if float(self.mc_gate_max_total_dv.value()) != 0.0:
-            gates["max_total_dv_m_s"] = float(self.mc_gate_max_total_dv.value())
-        if float(self.mc_gate_max_guardrail_events.value()) != 0.0:
-            gates["max_guardrail_events"] = float(self.mc_gate_max_guardrail_events.value())
-        if gates:
-            mc_outputs["gates"] = gates
-        else:
-            mc_outputs.pop("gates", None)
-        return cfg
+        return GUI_CONFIG_ADAPTER.collect_from_window(self, self.current_config)
 
     def _load_knowledge_into_widgets(self, object_key: str, knowledge: dict) -> None:
-        conditions = dict(knowledge.get("conditions", {}) or {})
-        targets = list(knowledge.get("targets", []) or [])
-        getattr(self, f"{object_key}_knowledge_targets_edit").setText(", ".join(str(t) for t in targets))
-        getattr(self, f"{object_key}_knowledge_refresh_rate").setValue(float(knowledge.get("refresh_rate_s", 1.0) or 0.0))
-        getattr(self, f"{object_key}_knowledge_max_range").setValue(float(conditions.get("max_range_km", 0.0) or 0.0))
-        getattr(self, f"{object_key}_knowledge_dropout_prob").setValue(float(conditions.get("dropout_prob", 0.0) or 0.0))
-        getattr(self, f"{object_key}_knowledge_solid_angle").setValue(float(conditions.get("solid_angle_sr", 4.0 * 3.141592653589793) or 0.0))
-        getattr(self, f"{object_key}_knowledge_require_los").setChecked(bool(conditions.get("require_line_of_sight", False)))
-        sensor_pos = list(conditions.get("sensor_position_body_m", [0.0, 0.0, 0.0]) or [0.0, 0.0, 0.0])
-        sensor_bore = list(conditions.get("sensor_boresight_body", [0.0, 0.0, 0.0]) or [0.0, 0.0, 0.0])
-        for axis, value in zip(("x", "y", "z"), sensor_pos):
-            getattr(self, f"{object_key}_knowledge_sensor_pos_{axis}").setValue(float(value or 0.0))
-        for axis, value in zip(("x", "y", "z"), sensor_bore):
-            getattr(self, f"{object_key}_knowledge_sensor_bore_{axis}").setValue(float(value or 0.0))
-        self._refresh_knowledge_summary_label(object_key)
+        GUI_CONFIG_ADAPTER.load_knowledge_into_window(self, object_key, knowledge)
 
     def _collect_knowledge_from_widgets(self, object_key: str, existing: dict | None = None) -> dict:
-        knowledge = copy.deepcopy(existing or {})
-        raw_targets = getattr(self, f"{object_key}_knowledge_targets_edit").text().strip()
-        knowledge["targets"] = [tok.strip() for tok in raw_targets.split(",") if tok.strip()]
-        knowledge["refresh_rate_s"] = float(getattr(self, f"{object_key}_knowledge_refresh_rate").value())
-        conditions = dict(knowledge.get("conditions", {}) or {})
-        max_range = float(getattr(self, f"{object_key}_knowledge_max_range").value())
-        conditions["max_range_km"] = max_range if max_range > 0.0 else None
-        conditions["dropout_prob"] = float(getattr(self, f"{object_key}_knowledge_dropout_prob").value())
-        solid_angle = float(getattr(self, f"{object_key}_knowledge_solid_angle").value())
-        conditions["solid_angle_sr"] = solid_angle if solid_angle > 0.0 else None
-        conditions["require_line_of_sight"] = bool(getattr(self, f"{object_key}_knowledge_require_los").isChecked())
-        conditions["sensor_position_body_m"] = [
-            float(getattr(self, f"{object_key}_knowledge_sensor_pos_x").value()),
-            float(getattr(self, f"{object_key}_knowledge_sensor_pos_y").value()),
-            float(getattr(self, f"{object_key}_knowledge_sensor_pos_z").value()),
-        ]
-        sensor_bore = [
-            float(getattr(self, f"{object_key}_knowledge_sensor_bore_x").value()),
-            float(getattr(self, f"{object_key}_knowledge_sensor_bore_y").value()),
-            float(getattr(self, f"{object_key}_knowledge_sensor_bore_z").value()),
-        ]
-        conditions["sensor_boresight_body"] = sensor_bore if any(abs(v) > 0.0 for v in sensor_bore) else None
-        knowledge["conditions"] = conditions
-        return knowledge
+        return GUI_CONFIG_ADAPTER.collect_knowledge_from_window(self, object_key, existing)
 
     def _refresh_yaml(self) -> None:
         try:
@@ -3373,7 +1772,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Started a new config from the default template.", 5000)
 
     def _on_run(self) -> None:
-        if self.process is not None:
+        if self.run_thread is not None:
             self._show_error("Run In Progress", "A simulation is already running.")
             return
         try:
@@ -3383,38 +1782,51 @@ class MainWindow(QMainWindow):
             self.results_output_dir = None
             if str(cfg_dict.get("outputs", {}).get("mode", "")).strip().lower() == "interactive":
                 run_config_path = self._build_preview_run_config(cfg_dict, save_path)
-            cmd = build_cli_run_command(run_config_path)
             self.console.clear()
             self.output_files.clear()
-            self.process = QProcess(self)
-            self.process.setWorkingDirectory(str(self.repo_root))
-            self.process.setProcessChannelMode(QProcess.MergedChannels)
-            process_env = QProcessEnvironment.systemEnvironment()
-            process_env.insert("NONCOOP_GUI", "1")
-            self.process.setProcessEnvironment(process_env)
-            self.process.readyReadStandardOutput.connect(self._append_process_output)
-            self.process.finished.connect(self._on_process_finished)
-            self.process.start(cmd[0], cmd[1:])
+            self.run_thread = QThread(self)
+            self.run_worker = _ApiRunWorker(run_config_path)
+            self.run_worker.moveToThread(self.run_thread)
+            self.run_thread.started.connect(self.run_worker.run)
+            self.run_worker.progress.connect(self._append_console_text)
+            self.run_worker.finished.connect(self._on_run_finished)
+            self.run_worker.failed.connect(self._on_run_failed)
+            self.run_worker.finished.connect(self.run_thread.quit)
+            self.run_worker.failed.connect(self.run_thread.quit)
+            self.run_thread.finished.connect(self._cleanup_run_worker)
+            self.run_thread.start()
             self.run_button.setEnabled(False)
             self.statusBar().showMessage("Simulation running...")
             self.tabs.setCurrentIndex(5)
         except Exception as exc:
             self._show_error("Run Failed", str(exc))
 
-    def _append_process_output(self) -> None:
-        if self.process is None:
-            return
-        txt = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+    def _append_console_text(self, txt: str) -> None:
         if txt:
             self.console.moveCursor(QTextCursor.End)
             self.console.insertPlainText(txt)
             self.console.ensureCursorVisible()
 
-    def _on_process_finished(self, exit_code: int, _status) -> None:
+    def _on_run_finished(self, result) -> None:
         self.run_button.setEnabled(True)
-        self.statusBar().showMessage(f"Simulation finished with code {exit_code}.", 10000)
+        if getattr(result, "output_dir", None) and self.results_output_dir is None:
+            self.results_output_dir = self._resolve_output_dir(str(result.output_dir))
+        self._append_console_text(str(getattr(result, "stdout", "")))
+        self.statusBar().showMessage("Simulation finished.", 10000)
         self._refresh_output_files()
-        self.process = None
+
+    def _on_run_failed(self, message: str) -> None:
+        self.run_button.setEnabled(True)
+        self._append_console_text(f"\nRun failed: {message}\n")
+        self._show_error("Run Failed", message)
+
+    def _cleanup_run_worker(self) -> None:
+        if self.run_worker is not None:
+            self.run_worker.deleteLater()
+        if self.run_thread is not None:
+            self.run_thread.deleteLater()
+        self.run_worker = None
+        self.run_thread = None
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -3630,6 +2042,9 @@ class MainWindow(QMainWindow):
         self.validation_toggle.setText("Hide Details")
 
     def _selected_analysis_study_type(self) -> str:
+        value = self.analysis_study_type_combo.currentData()
+        if isinstance(value, str) and value.strip():
+            return value.strip()
         raw = self.analysis_study_type_combo.currentText().strip().lower()
         return "sensitivity" if raw == "sensitivity" else "monte_carlo"
 

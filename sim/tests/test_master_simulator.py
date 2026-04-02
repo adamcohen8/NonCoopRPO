@@ -55,6 +55,20 @@ class TimeSplitThrustMission:
         }
 
 
+class DelayedIntegratedBurnMission:
+    def __init__(self, burn_start_t_s: float, thrust_eci_km_s2: list[float] | tuple[float, float, float]):
+        self.burn_start_t_s = float(burn_start_t_s)
+        self.thrust_eci_km_s2 = np.array(thrust_eci_km_s2, dtype=float)
+
+    def update(self, *, t_s, **kwargs):
+        thrust_cmd = self.thrust_eci_km_s2.copy() if float(t_s) >= self.burn_start_t_s else np.zeros(3, dtype=float)
+        return {
+            "mission_use_integrated_command": True,
+            "thrust_eci_km_s2": thrust_cmd,
+            "torque_body_nm": np.array([0.0, float(t_s), 0.0], dtype=float),
+        }
+
+
 class LegacyTruthTimeStrategy:
     def update(self, truth, t_s):
         return {"legacy_time_s": float(t_s), "x_km": float(truth.position_eci_km[0])}
@@ -298,6 +312,217 @@ class TestMasterSimulator(unittest.TestCase):
         payload = _run_single_config(cfg)
         thrust_hist = np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float)
         self.assertGreater(float(np.linalg.norm(thrust_hist[-1, :])), 0.0)
+
+    def test_satellite_applied_thrust_follows_current_body_pointing(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "body_pointing_coupled_thrust",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {
+                        "mass_kg": 100.0,
+                        "thruster": "BASIC_CHEMICAL_BOTTOM_Z",
+                    },
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "curv", "state": [0.1, -1.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "PursuitMissionStrategy",
+                        "params": {"target_id": "target", "max_accel_km_s2": 2.0e-5},
+                    },
+                    "mission_execution": {
+                        "module": "sim.mission.modules",
+                        "class_name": "ControllerPointingExecution",
+                        "params": {"alignment_tolerance_deg": 180.0},
+                    },
+                    "orbit_control": {
+                        "module": "sim.control.orbit.lqr",
+                        "class_name": "HCWLQRController",
+                        "params": {
+                            "mean_motion_rad_s": 0.001078,
+                            "max_accel_km_s2": 2.0e-5,
+                            "design_dt_s": 1.0,
+                            "ric_curv_state_slice": [0, 6],
+                            "chief_eci_state_slice": [6, 12],
+                        },
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                },
+                "simulator": {
+                    "duration_s": 1.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": True}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_body_pointing_coupled_thrust",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float)
+        applied = thrust_hist[-1, :]
+        self.assertGreater(float(np.linalg.norm(applied)), 0.0)
+        self.assertAlmostEqual(float(applied[0]), 0.0, places=12)
+        self.assertAlmostEqual(float(applied[1]), 0.0, places=12)
+        self.assertLess(float(applied[2]), 0.0)
+
+    def test_satellite_applied_thruster_torque_follows_mount_offset(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "body_pointing_coupled_thruster_torque",
+                "rocket": {"enabled": False},
+                "target": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                    },
+                },
+                "chaser": {
+                    "enabled": True,
+                    "specs": {
+                        "mass_kg": 100.0,
+                        "thruster_direction_body": [0.0, 0.0, 1.0],
+                        "thruster_position_body_m": [0.2, 0.0, 0.0],
+                    },
+                    "initial_state": {
+                        "relative_to_target_ric": {"frame": "curv", "state": [0.1, -1.0, 0.0, 0.0, 0.0, 0.0]},
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_strategy": {
+                        "module": "sim.mission.modules",
+                        "class_name": "PursuitMissionStrategy",
+                        "params": {"target_id": "target", "max_accel_km_s2": 2.0e-5},
+                    },
+                    "mission_execution": {
+                        "module": "sim.mission.modules",
+                        "class_name": "ControllerPointingExecution",
+                        "params": {"alignment_tolerance_deg": 180.0},
+                    },
+                    "orbit_control": {
+                        "module": "sim.control.orbit.lqr",
+                        "class_name": "HCWLQRController",
+                        "params": {
+                            "mean_motion_rad_s": 0.001078,
+                            "max_accel_km_s2": 2.0e-5,
+                            "design_dt_s": 1.0,
+                            "ric_curv_state_slice": [0, 6],
+                            "chief_eci_state_slice": [6, 12],
+                        },
+                    },
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                },
+                "simulator": {
+                    "duration_s": 1.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": True}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_body_pointing_coupled_thruster_torque",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        applied_thrust = np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float)[-1, :]
+        applied_torque = np.array(payload["applied_torque_by_object"]["chaser"], dtype=float)[-1, :]
+        expected_torque_y = 0.2 * 100.0 * abs(float(applied_thrust[2])) * 1e3
+
+        self.assertGreater(float(np.linalg.norm(applied_thrust)), 0.0)
+        self.assertAlmostEqual(float(applied_torque[0]), 0.0, places=12)
+        self.assertAlmostEqual(float(applied_torque[2]), 0.0, places=12)
+        self.assertGreater(float(applied_torque[1]), 0.0)
+        self.assertAlmostEqual(float(applied_torque[1]), expected_torque_y, places=12)
+
+    def test_burns_latch_to_orbit_cadence_while_torque_updates_each_attitude_substep(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "latched_burn_timing",
+                "rocket": {"enabled": False},
+                "target": {"enabled": False},
+                "chaser": {
+                    "enabled": True,
+                    "specs": {"mass_kg": 100.0},
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_execution": {
+                        "module": "sim.tests.test_master_simulator",
+                        "class_name": "DelayedIntegratedBurnMission",
+                        "params": {
+                            "burn_start_t_s": 0.5,
+                            "thrust_eci_km_s2": [1.0e-5, 0.0, 0.0],
+                        },
+                    },
+                },
+                "simulator": {
+                    "duration_s": 2.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {
+                        "orbit": {"orbit_substep_s": 1.0},
+                        "attitude": {"enabled": True, "attitude_substep_s": 0.25},
+                    },
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_latched_burn_timing",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        debug = payload["controller_debug_by_object"]["chaser"]
+        first_step = [entry for entry in debug if float(entry["t_s"]) <= 1.0 + 1e-12]
+        second_step = [entry for entry in debug if float(entry["t_s"]) > 1.0 + 1e-12]
+
+        self.assertEqual(len(first_step), 4)
+        self.assertTrue(np.allclose(np.array(first_step[0]["command_raw"]["thrust_eci_km_s2"], dtype=float), np.zeros(3)))
+        self.assertGreater(float(np.linalg.norm(np.array(first_step[-1]["command_raw"]["thrust_eci_km_s2"], dtype=float))), 0.0)
+        for entry in first_step:
+            self.assertTrue(np.allclose(np.array(entry["command_applied"]["thrust_eci_km_s2"], dtype=float), np.zeros(3)))
+        self.assertAlmostEqual(float(first_step[0]["command_applied"]["torque_body_nm"][1]), 0.25, places=12)
+        self.assertAlmostEqual(float(first_step[-1]["command_applied"]["torque_body_nm"][1]), 1.0, places=12)
+
+        self.assertGreater(len(second_step), 0)
+        self.assertGreater(float(np.linalg.norm(np.array(second_step[0]["command_applied"]["thrust_eci_km_s2"], dtype=float))), 0.0)
 
     def test_safe_hold_strategy_and_execution_hold_zero_thrust(self):
         cfg = scenario_config_from_dict(

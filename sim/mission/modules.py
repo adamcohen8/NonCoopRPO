@@ -1190,10 +1190,10 @@ class ControllerPointingExecution:
         if "desired_attitude_quat_bn" in intent:
             q_des = np.array(intent.get("desired_attitude_quat_bn"), dtype=float).reshape(-1)
         elif bool(intent.get("align_to_thrust", self.align_thruster_to_thrust)) and thrust_norm > 1e-15:
-            q_des = PoseCommandGenerator.sun_track(
+            q_des = _desired_attitude_for_thrust(
                 truth=truth,
-                sun_dir_eci=_unit(thrust_cmd),
-                panel_normal_body=np.array(self.thruster_direction_body, dtype=float),
+                thrust_eci_km_s2=thrust_cmd,
+                thruster_direction_body=np.array(self.thruster_direction_body, dtype=float),
             )
         if q_des is not None and q_des.size == 4 and attitude_controller is not None and hasattr(attitude_controller, "set_target"):
             try:
@@ -1208,9 +1208,9 @@ class ControllerPointingExecution:
         if thrust_norm > 1e-15:
             b_dir = _unit(np.array(self.thruster_direction_body, dtype=float))
             b_to_eci = quaternion_to_dcm_bn(np.array(truth.attitude_quat_bn, dtype=float)).T
-            thrust_axis_eci = _unit(b_to_eci @ b_dir)
+            force_axis_eci = -_unit(b_to_eci @ b_dir)
             thrust_dir = _unit(thrust_cmd)
-            alignment_error_rad = float(np.arccos(np.clip(np.dot(thrust_axis_eci, thrust_dir), -1.0, 1.0)))
+            alignment_error_rad = float(np.arccos(np.clip(np.dot(force_axis_eci, thrust_dir), -1.0, 1.0)))
             if self.require_attitude_alignment and alignment_error_rad > tol_rad:
                 thrust_cmd = np.zeros(3, dtype=float)
 

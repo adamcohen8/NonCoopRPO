@@ -130,7 +130,16 @@ class SimulationKernel:
                     cmd = Command.zero()
                     skipped = True
 
-                applied = obj.actuator.apply(cmd, obj.limits, self.config.dt_s)
+                cmd_for_actuator = Command(
+                    thrust_eci_km_s2=np.array(cmd.thrust_eci_km_s2, dtype=float),
+                    torque_body_nm=np.array(cmd.torque_body_nm, dtype=float),
+                    mode_flags={
+                        **dict(cmd.mode_flags),
+                        "current_mass_kg": float(obj.truth.mass_kg),
+                        "current_attitude_quat_bn": np.array(obj.truth.attitude_quat_bn, dtype=float),
+                    },
+                )
+                applied = obj.actuator.apply(cmd_for_actuator, obj.limits, self.config.dt_s)
                 next_applied_command[oid] = applied
 
                 runtime_by_object[oid][k + 1] = runtime_ms

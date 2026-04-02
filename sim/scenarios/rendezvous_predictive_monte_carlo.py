@@ -404,7 +404,14 @@ def _run_one_trial(seed: int, config: PredictiveRendezvousMCConfig) -> dict:
 
         dv_used_km_s += float(np.linalg.norm(thrust) * dt_s)
 
-        cmd_chaser = Command(thrust_eci_km_s2=thrust, torque_body_nm=c_att.torque_body_nm, mode_flags={"mode": "pred_mc"})
+        cmd_chaser = Command(
+            thrust_eci_km_s2=thrust,
+            torque_body_nm=c_att.torque_body_nm,
+            mode_flags={
+                "mode": "pred_mc",
+                "current_mass_kg": float(chaser.truth.mass_kg),
+            },
+        )
         cmd_chief = Command.zero()
         app_chaser = chaser.actuator.apply(cmd_chaser, chaser.limits, dt_s)
         app_chief = chief.actuator.apply(cmd_chief, chief.limits, dt_s)

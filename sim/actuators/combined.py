@@ -11,5 +11,5 @@ class CombinedActuator:
     attitude: object
 
     def apply(self, command: Command, limits: dict, dt_s: float) -> Command:
-        c_orb = self.orbital.apply(command, limits, dt_s)
-        return self.attitude.apply(c_orb, limits, dt_s)
+        c_att = self.attitude.apply(command, limits, dt_s)
+        return self.orbital.apply(c_att, limits, dt_s)

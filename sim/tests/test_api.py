@@ -196,6 +196,20 @@ class TestSimulationApi:
             assert snap1.step_index == 1
             assert snap1.time_s == 1.0
 
+    def test_session_run_after_reset_binds_step_callback_to_existing_engine(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SimulationConfig.from_dict(_api_config(Path(tmpdir)))
+            session = SimulationSession.from_config(cfg)
+            callback_events: list[tuple[int, int]] = []
+
+            snap0 = session.reset()
+            result = session.run(step_callback=lambda step, total: callback_events.append((step, total)))
+
+            assert snap0 is not None
+            assert isinstance(result, SimulationResult)
+            assert callback_events[0] == (0, 2)
+            assert callback_events[-1] == (2, 2)
+
     def test_session_run_monte_carlo_scenario(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = SimulationConfig.from_dict(_api_config(Path(tmpdir), monte_carlo=True))
