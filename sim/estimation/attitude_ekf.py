@@ -28,7 +28,10 @@ class AttitudeEKFEstimator(Estimator):
         if measurement is None:
             return StateBelief(state=x_pred, covariance=p_pred, last_update_t_s=t_s)
 
-        z = measurement.vector.copy()
+        z = np.asarray(measurement.vector, dtype=float).reshape(-1)
+        if z.size < 7:
+            return StateBelief(state=x_pred, covariance=p_pred, last_update_t_s=t_s)
+        z = z[:7].copy()
         z[:4] = normalize_quaternion(z[:4])
         if np.dot(z[:4], x_pred[:4]) < 0.0:
             z[:4] *= -1.0
@@ -37,10 +40,16 @@ class AttitudeEKFEstimator(Estimator):
         r = np.diag(self.meas_noise_diag)
         y = z - h @ x_pred
         s = h @ p_pred @ h.T + r
-        k = p_pred @ h.T @ np.linalg.inv(s)
+        hp_t = p_pred @ h.T
+        try:
+            k = np.linalg.solve(s.T, hp_t.T).T
+        except np.linalg.LinAlgError:
+            k = hp_t @ np.linalg.pinv(s)
         x_upd = x_pred + k @ y
         x_upd[:4] = normalize_quaternion(x_upd[:4])
-        p_upd = (np.eye(7) - k @ h) @ p_pred
+        i_kh = np.eye(7) - k @ h
+        p_upd = i_kh @ p_pred @ i_kh.T + k @ r @ k.T
+        p_upd = 0.5 * (p_upd + p_upd.T)
         return StateBelief(state=x_upd, covariance=p_upd, last_update_t_s=t_s)
 
     def _propagate_state(self, x: np.ndarray) -> np.ndarray:

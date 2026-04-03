@@ -17,6 +17,22 @@ from sim.dynamics.orbit.spherical_harmonics import (
 
 
 class TestOrbitSphericalHarmonics(unittest.TestCase):
+    @staticmethod
+    def _write_minimal_eop(path: Path) -> None:
+        path.write_text(
+            "\n".join(
+                [
+                    "VERSION 1.1",
+                    "UPDATED 2026 Apr 03 00:00:00 UTC",
+                    "NUM_OBSERVED_POINTS 2",
+                    "2024 03 31 60400 0.0 0.0 0.0 0 0 0 0 0 37",
+                    "2024 04 01 60401 0.0 0.0 0.0 0 0 0 0 0 37",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
     def test_parse_terms(self):
         raw = [
             {"n": 3, "m": 3, "c_nm": 1e-6, "s_nm": -2e-6},
@@ -73,16 +89,19 @@ class TestOrbitSphericalHarmonics(unittest.TestCase):
     def test_normalized_c20_matches_equivalent_j2_perturbation(self):
         r = np.array([7000.0, 100.0, 200.0], dtype=float)
         terms = [SphericalHarmonicTerm(n=2, m=0, c_nm=-4.841693259705e-04, s_nm=0.0, normalized=True)]
-        a = accel_spherical_harmonics_terms(
-            r_eci_km=r,
-            t_s=0.0,
-            terms=terms,
-            mu_km3_s2=EARTH_MU_KM3_S2,
-            re_km=6378.1363,
-            jd_utc_start=2460400.5,
-            frame_model="hpop_like",
-            eop_path="validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/EOP-All.txt",
-        )
+        with tempfile.TemporaryDirectory() as td:
+            eop_path = Path(td) / "EOP-All.txt"
+            self._write_minimal_eop(eop_path)
+            a = accel_spherical_harmonics_terms(
+                r_eci_km=r,
+                t_s=0.0,
+                terms=terms,
+                mu_km3_s2=EARTH_MU_KM3_S2,
+                re_km=6378.1363,
+                jd_utc_start=2460400.5,
+                frame_model="hpop_like",
+                eop_path=str(eop_path),
+            )
         a_j2 = accel_j2(r, EARTH_MU_KM3_S2, j2=0.0010826355254902923, re_km=6378.1363)
         self.assertLess(float(np.linalg.norm(a - a_j2)), 1e-10)
 

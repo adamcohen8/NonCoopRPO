@@ -61,16 +61,31 @@ class OrbitEKFEstimator(Estimator):
             )
             return StateBelief(state=x_pred, covariance=p_pred, last_update_t_s=t_s)
 
-        z = measurement.vector[:6] if measurement.vector.size >= 6 else measurement.vector
+        z = np.asarray(measurement.vector, dtype=float).reshape(-1)
         if z.size < 6:
-            z = np.pad(z, (0, 6 - z.size))
+            self.last_update_diagnostics = OrbitEKFUpdateDiagnostics(
+                measurement_available=True,
+                update_applied=False,
+                predicted_cov_trace=float(np.trace(p_pred)),
+                posterior_cov_trace=float(np.trace(p_pred)),
+            )
+            return StateBelief(state=x_pred, covariance=p_pred, last_update_t_s=t_s)
+        z = z[:6]
         y = z - x_pred
-        s = p_pred + self._r
-        s_inv = np.linalg.inv(s)
-        k = p_pred @ s_inv
+        s = self._h @ p_pred @ self._h.T + self._r
+        hp_t = p_pred @ self._h.T
+        try:
+            k = np.linalg.solve(s.T, hp_t.T).T
+            s_y = np.linalg.solve(s, y)
+        except np.linalg.LinAlgError:
+            s_pinv = np.linalg.pinv(s)
+            k = hp_t @ s_pinv
+            s_y = s_pinv @ y
         x_upd = x_pred + k @ y
-        p_upd = (self._i6 - k) @ p_pred
-        nis = float(y.T @ s_inv @ y)
+        i_kh = self._i6 - k @ self._h
+        p_upd = i_kh @ p_pred @ i_kh.T + k @ self._r @ k.T
+        p_upd = 0.5 * (p_upd + p_upd.T)
+        nis = float(y.T @ s_y)
         self.last_update_diagnostics = OrbitEKFUpdateDiagnostics(
             measurement_available=True,
             update_applied=True,

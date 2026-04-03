@@ -52,6 +52,9 @@ class OrbitUKFEstimator(Estimator):
 
         if measurement is None:
             return StateBelief(state=x_pred, covariance=p_pred, last_update_t_s=t_s)
+        z = np.asarray(measurement.vector, dtype=float).reshape(-1)
+        if z.size < n:
+            return StateBelief(state=x_pred, covariance=p_pred, last_update_t_s=t_s)
 
         h_sigma = sigma_pred
         z_pred = np.sum(wm[:, None] * h_sigma, axis=0)
@@ -64,10 +67,15 @@ class OrbitUKFEstimator(Estimator):
             s_mat += wc[i] * np.outer(dz, dz)
             pxz += wc[i] * np.outer(dx, dz)
 
-        k_gain = pxz @ np.linalg.inv(s_mat)
-        innovation = measurement.vector[:n] - z_pred
+        try:
+            k_gain = np.linalg.solve(s_mat.T, pxz.T).T
+        except np.linalg.LinAlgError:
+            k_gain = pxz @ np.linalg.pinv(s_mat)
+        innovation = z[:n] - z_pred
         x_upd = x_pred + k_gain @ innovation
-        p_upd = p_pred - k_gain @ s_mat @ k_gain.T
+        i_kh = np.eye(n) - k_gain
+        p_upd = i_kh @ p_pred @ i_kh.T + k_gain @ r @ k_gain.T
+        p_upd = 0.5 * (p_upd + p_upd.T)
         return StateBelief(state=x_upd, covariance=p_upd, last_update_t_s=t_s)
 
     def _sigma_points(self, x: np.ndarray, p: np.ndarray, lam: float) -> np.ndarray:

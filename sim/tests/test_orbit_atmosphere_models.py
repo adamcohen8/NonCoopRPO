@@ -1,17 +1,29 @@
 import unittest
 from datetime import datetime, timezone
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
 from sim.dynamics.orbit.accelerations import accel_drag, accel_srp
 from sim.dynamics.orbit.atmosphere import density_exponential, density_from_model, density_ussa1976
+from sim.dynamics.orbit.epoch import datetime_to_julian_date
 from sim.dynamics.orbit.eclipse import resolve_srp_geometry, srp_shadow_factor
 from sim.dynamics.orbit.epoch import AU_KM
 from sim.dynamics.orbit.environment import EARTH_ROT_RATE_RAD_S
 
 
 class TestOrbitAtmosphereModels(unittest.TestCase):
+    @staticmethod
+    def _write_minimal_jb2008_tables(sol_path: Path, dtc_path: Path, dt_utc: datetime) -> None:
+        jd_floor = int(np.floor(datetime_to_julian_date(dt_utc) - 1.0))
+        day_of_year = int(dt_utc.timetuple().tm_yday)
+        sol_row = [0.0, 0.0, float(jd_floor), 150.0, 150.0, 140.0, 140.0, 130.0, 130.0, 120.0, 120.0]
+        dtc_row = [float(dt_utc.year), float(day_of_year)] + [0.0] * 24
+        np.savetxt(sol_path, np.array([sol_row, sol_row], dtype=float), fmt="%.6f")
+        np.savetxt(dtc_path, np.array([dtc_row, dtc_row], dtype=float), fmt="%.6f")
+
     def test_ussa1976_density_reasonable_at_sea_level(self):
         r = np.array([6378.137, 0.0, 0.0], dtype=float)
         rho = density_ussa1976(r, t_s=0.0)
@@ -72,7 +84,22 @@ class TestOrbitAtmosphereModels(unittest.TestCase):
 
     def test_density_jb2008_builtin_backend_returns_finite_density(self):
         r = np.array([7000.0, 0.0, 0.0], dtype=float)
-        rho = density_from_model("jb2008", r, t_s=60.0, env={"jd_utc_start": 2460400.5, "geodetic_model": "wgs84"})
+        dt_utc = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as td:
+            sol_path = Path(td) / "SOLFSMY.txt"
+            dtc_path = Path(td) / "DTCFILE.txt"
+            self._write_minimal_jb2008_tables(sol_path, dtc_path, dt_utc)
+            rho = density_from_model(
+                "jb2008",
+                r,
+                t_s=60.0,
+                env={
+                    "atmo_epoch_utc": dt_utc,
+                    "jb2008_sol_path": str(sol_path),
+                    "jb2008_dtc_path": str(dtc_path),
+                    "geodetic_model": "wgs84",
+                },
+            )
         self.assertTrue(np.isfinite(rho))
         self.assertGreaterEqual(rho, 0.0)
 
