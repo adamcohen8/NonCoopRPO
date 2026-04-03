@@ -14,8 +14,7 @@ def default_de440_coeff_path() -> Path:
     return (
         Path(__file__).resolve().parents[3]
         / "validation"
-        / "High Precision Orbit Propagator_4-2"
-        / "High Precision Orbit Propagator_4.2.2"
+        / "data"
         / "DE440Coeff.mat"
     ).resolve()
 

@@ -71,7 +71,7 @@ simulator:
       enabled: false
   environment:
     ephemeris_mode: "de440_hpop"
-    de440_coeff_path: "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/DE440Coeff.mat"
+    de440_coeff_path: "validation/data/DE440Coeff.mat"
     de440_eop_path: "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/EOP-All.txt"
     srp_shadow_model: "conical"
     atmosphere_model: "exponential"

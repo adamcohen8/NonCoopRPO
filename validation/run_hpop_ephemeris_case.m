@@ -28,7 +28,7 @@ end
 
 SAT_Const
 constants
-load(fullfile(hpop_root, 'DE440Coeff.mat'));
+load(fullfile(fileparts(mfilename('fullpath')), 'data', 'DE440Coeff.mat'));
 PC = DE440Coeff;
 
 fid = fopen(fullfile(hpop_root, 'EOP-All.txt'), 'r');

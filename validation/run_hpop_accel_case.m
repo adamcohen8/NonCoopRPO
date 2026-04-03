@@ -28,7 +28,7 @@ global const Cnm Snm AuxParam eopdata swdata SOLdata DTCdata APdata PC
 
 SAT_Const
 constants
-load(fullfile(hpop_root, 'DE440Coeff.mat'));
+load(fullfile(fileparts(mfilename('fullpath')), 'data', 'DE440Coeff.mat'));
 PC = DE440Coeff;
 
 Cnm = zeros(361,361);
