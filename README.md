@@ -202,7 +202,7 @@ You have an active HPOP cross-validation workflow:
   - 3D ECI orbit overlays
   - RMS/max summary metrics
 
-For spherical harmonics parity, the validator can use HPOP’s `GGM03C.txt` coefficients directly.
+For spherical harmonics parity, the validator can use the repo-owned copy at `validation/data/GGM03C.txt`.
 
 ## Automated Validation Harness
 

@@ -33,7 +33,7 @@ PC = DE440Coeff;
 
 Cnm = zeros(361,361);
 Snm = zeros(361,361);
-fid = fopen(fullfile(hpop_root, 'GGM03C.txt'), 'r');
+fid = fopen(fullfile(fileparts(mfilename('fullpath')), 'data', 'GGM03C.txt'), 'r');
 for n = 0:360
     for m = 0:n
         temp = fscanf(fid, '%d %d %f %f %f %f', [6 1]);

@@ -68,7 +68,7 @@ simulator:
         degree: 8
         order: 8
         source: "hpop_ggm03"
-        coeff_path: "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/GGM03C.txt"
+        coeff_path: "validation/data/GGM03C.txt"
         reference_radius_km: 6378.1363
         frame_model: "hpop_like"
         eop_path: "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/EOP-All.txt"

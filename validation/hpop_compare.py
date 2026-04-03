@@ -167,7 +167,7 @@ def _build_plugins(
     if model_l in ("j2j3j4", "j2_j3_j4"):
         return [j2_plugin, j3_plugin, j4_plugin], env
     if model_l in ("sh8x8", "spherical_8x8"):
-        ggm03_path = hpop_root / "GGM03C.txt"
+        ggm03_path = REPO_ROOT / "validation" / "data" / "GGM03C.txt"
         terms = load_hpop_ggm03_terms(
             coeff_path=ggm03_path,
             max_degree=8,

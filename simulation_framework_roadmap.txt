@@ -2,128 +2,304 @@ SIMULATION FRAMEWORK ROADMAP
 
 Purpose
 
-This document outlines a structured roadmap for building a modular,
-real-time capable orbital engagement simulation framework suitable for
-Software-in-the-Loop (SIL) and Hardware-in-the-Loop (HIL) testing.
+This document outlines a practical roadmap for the next stage of the
+Orbital Engagement Lab. The framework is no longer in a greenfield
+"build the basics" phase. It already contains a deterministic
+simulation kernel, multi-object dynamics, sensing and estimation,
+control stacks, campaign tooling, validation workflows, GUI support,
+and early SIL integration patterns.
 
-North-Star Architecture
+The roadmap below focuses on consolidation, validation, mission-layer
+maturity, and real-world usability.
 
-Each simulation step should execute in this order:
+Current State
 
-1)  Truth dynamics propagate (orbit + attitude + mass properties)
-2)  Sensors/knowledge generate measurements (with
-    noise/latency/dropouts)
-3)  Estimator updates beliefs (state + covariance)
-4)  Controllers output commands (subject to compute deadline)
-5)  Actuators apply commands (saturation, lag, impulse bits)
-6)  Scoring logs survivability + compute metrics
+The repository already supports:
 
-Core Data Models
+- Deterministic step-based simulation with truth, sensing, estimation,
+  control, actuation, and logging
+- Multi-object orbital and attitude simulation
+- Multiple orbital fidelity levels, including perturbation plugins and
+  higher-fidelity validation paths
+- Actuator and controller modeling for both orbit and attitude use
+  cases
+- Knowledge/object-tracking flows and mission-level behaviors
+- Monte Carlo, sensitivity analysis, and reporting workflows
+- API, CLI, GUI, and RL-oriented interfaces
+- Validation harnesses and HPOP comparison tooling
+- Early cFS SIL bridge patterns
 
-StateTruth: - position/velocity - attitude quaternion - angular rate -
-mass - time
+This means the highest-value work is no longer "add one more module."
+The highest-value work is making the framework more coherent,
+trustworthy, maintainable, and ready for repeatable engineering use.
 
-StateBelief: - estimated state(s) - covariance matrices - last update
-time
+North-Star Direction
 
-Command: - thrust vector / impulse - torque command - mode flags
+The framework should evolve into a simulation platform that is:
 
-SimConfig: - dt - integrator choice - perturbation selection - real-time
-mode
+1)  Architecturally coherent
+2)  Easy to configure correctly
+3)  Validated at multiple fidelity tiers
+4)  Suitable for mission-logic and autonomy experiments
+5)  Usable in repeatable SIL workflows
+6)  Stable enough that new features do not create silent regressions
 
-Module Interfaces
+Guiding Principle
 
-DynamicsModel.step(state, command, env, dt) -> new_state
-SensorModel.measure(truth, env, t) -> measurement
-Estimator.update(belief, measurement, t) -> new_belief
-Controller.act(belief, t, budget_ms) -> command Actuator.apply(command,
-limits, dt) -> applied_command
+Prefer depth over breadth.
 
-PHASE 1 – Simulation Kernel
+In the next phase, the project should favor:
 
--   Multi-object world model
--   Deterministic execution order
--   Real-time scheduler with deadline tracking
--   Compute time logging and overrun handling
+- tighter interfaces over more feature branches,
+- trusted reference scenarios over many overlapping demos,
+- better validation over speculative model expansion, and
+- clearer workflow ownership over additional ad hoc entrypoints.
 
-PHASE 2 – Orbital Dynamics
+PHASE 1 - Platform Consolidation
 
-Tier 1: - Two-body Earth gravity - ECI propagation - Fixed-step RK4
+Goal:
+Make the framework feel like one system rather than a collection of
+closely related capabilities.
 
-Tier 2: - J2 perturbation - Adaptive integrator (RKF78 or
-Dormand-Prince)
+Priority work:
 
-Tier 3 (HPOP-like): - Drag model - Solar radiation pressure - Third-body
-perturbations - Frame transformations (ECI/ECEF)
+- Define the public simulation interface around the Python API
+- Reduce overlap between legacy orchestration paths and newer API-driven
+  single-run/session workflows
+- Clarify which modules are public extension points versus internal
+  implementation details
+- Standardize result payloads, run summaries, and artifact metadata
+- Make stepping, full-run execution, and batch execution follow a
+  shared mental model
 
-Use plugin-based acceleration models: a_total = a_2body +
-sum(a_perturb_i)
+Exit criteria:
 
-PHASE 3 – Attitude Dynamics
+- A user can understand the primary programmatic workflow from one API
+- Internal and legacy execution paths are clearly identified or retired
+- Core run outputs are consistent across CLI, GUI, and API usage
 
-Tier 1: - Quaternion + angular rates - Euler rigid body equations
+PHASE 2 - Scenario and Config Cleanup
 
-Tier 2: - Disturbance torques (gravity gradient, magnetic, drag, SRP)
+Goal:
+Make scenarios easier to author, review, validate, and evolve without
+schema drift.
 
-Tier 3: - Reaction wheels - CMGs - Thruster torque coupling - Saturation
-models
+Priority work:
 
-PHASE 4 – Actuator Modeling
+- Simplify the YAML model around the current mission/objective
+  architecture
+- Add explicit config versioning and migration guidance
+- Deprecate legacy fields and ambiguous patterns
+- Provide a small set of canonical scenario templates
+- Improve plugin and pointer validation so invalid configs fail early
+- Document supported combinations of dynamics, controllers, objectives,
+  and outputs
 
-Orbital: - Continuous thrust - Impulsive thrust - Throttle lag - Minimum
-impulse bit - Mass depletion
+Exit criteria:
 
-Attitude: - Reaction wheel limits - Magnetorquer constraints - Thruster
-pulse modeling
+- New scenarios can be created from a small set of canonical templates
+- Deprecated schema paths are identified and migration is straightforward
+- Config validation catches most authoring mistakes before runtime
 
-PHASE 5 – Knowledge Module
+PHASE 3 - Validation as a First-Class System
 
-Sensors: - Own-state sensors (GPS-like, star tracker, IMU) -
-Other-object sensors (angle-only, range, range-rate) - Noise, bias,
-latency, dropouts
+Goal:
+Treat validation as a continuous engineering discipline, not just a set
+of scripts.
 
-Access model: - Ground site visibility - Onboard FOV constraints -
-Update cadence control
+Priority work:
 
-Estimator: - EKF or UKF - State + covariance output - Track
-age-of-information
+- Establish validation tiers:
+  Tier A: smoke and schema validation
+  Tier B: deterministic regression scenarios
+  Tier C: Monte Carlo and campaign regression
+  Tier D: HPOP or external-reference parity checks
+- Store and compare baseline metrics for key benchmark scenarios
+- Promote validation outputs into clear pass/fail reports
+- Add regression coverage for mission behaviors, not just low-level
+  dynamics
+- Wire core validation suites into CI-friendly execution paths
 
-PHASE 6 – Control Modules
+Exit criteria:
 
-Provide a controller SDK with: Controller.act(belief, t, budget_ms) ->
-Command
+- There is a documented benchmark suite for physics and mission behavior
+- Regressions in key scenarios are detectable automatically
+- Validation reports are understandable without manually inspecting raw
+  plots
 
-Baseline orbit strategies: - Stationkeeping - Safety barrier avoidance -
-Risk-threshold maneuvering
+PHASE 4 - Mission-Layer Maturity
 
-Baseline attitude strategies: - Quaternion PD - LQR small-angle
+Goal:
+Make mission behavior a first-class strength of the platform.
 
-Advanced options: - Robust MPC - Stochastic policies
+Priority work:
 
-PHASE 7 – Scoring & Experiment Harness
+- Harden the mission executive and mode-transition model
+- Formalize objective success/failure conditions and transition rules
+- Improve observability for mission decisions, knowledge state, and
+  controller intent
+- Add fault/contingency hooks for degraded sensing, missed detections,
+  or command dropouts
+- Define standard mission archetypes such as inspect, stationkeep,
+  evade, pursue, and safe-hold
 
-Metrics: - Minimum separation - Time inside keep-out region - Fuel
-usage - Compute overruns - Jitter statistics
+Exit criteria:
 
-Monte Carlo runner: - Configurable uncertainty parameters - Seed
-control - Automatic plot and JSON output
+- Mission scenarios are explainable as mode graphs or objective flows
+- Mission behavior can be debugged from logs and summaries
+- Objective-level regression tests exist for representative scenarios
 
-Suggested Folder Structure
+PHASE 5 - SIL and Real-Time Hardening
 
-sim/ core/ dynamics/ orbit/ attitude/ actuators/ sensors/ estimation/
-control/ orbit/ attitude/ scenarios/ metrics/ utils/ tests/ examples/
+Goal:
+Move from "starter SIL integration" to repeatable closed-loop
+co-simulation workflows.
+
+Priority work:
+
+- Expand runtime budgeting beyond controller timing to include stage-wise
+  timing and deadline accounting
+- Add modeled latency, jitter, packet loss, and replay support for SIL
+  links
+- Add sequence checks and transport-level diagnostics
+- Define simulator-time-master behavior and rate-matching rules clearly
+- Create a small number of repeatable SIL benchmark scenarios
+- Produce requirements-style readiness criteria for SIL usage
+
+Exit criteria:
+
+- SIL workflows can be run repeatedly with known timing assumptions
+- Communication and timing faults can be injected intentionally
+- The project has a documented "SIL ready" checklist
+
+PHASE 6 - Fidelity Closure and Reference Physics
+
+Goal:
+Invest in fidelity where it materially improves confidence or mission
+relevance.
+
+Priority work:
+
+- Maintain explicit fidelity profiles from fast analytic runs to
+  high-fidelity orbit propagation
+- Close known gaps between default simulation modes and reference-model
+  validation cases
+- Improve traceability from a scenario's configuration to the active
+  force/environment models
+- Expand reference comparisons only where they support real use cases
+- Avoid one-off physics additions that are not validated or exercised by
+  benchmark scenarios
+
+Exit criteria:
+
+- Users can intentionally choose between speed-oriented and
+  fidelity-oriented profiles
+- High-fidelity paths are connected to validation evidence
+- Added physics models come with tests or benchmark coverage
+
+PHASE 7 - Workflow Curation and UX
+
+Goal:
+Make the framework easier to approach and harder to misuse.
+
+Priority work:
+
+- Curate a small number of endorsed workflows:
+  single scenario run
+  campaign analysis
+  validation suite
+  API-driven study
+  GUI-driven configuration and execution
+  SIL loop demo
+- Reduce overlapping or stale examples
+- Improve GUI guidance so users understand what a scenario is actually
+  configuring
+- Generate clearer run summaries describing active models, assumptions,
+  controllers, and outputs
+- Align docs, examples, and presets around the same canonical flows
+
+Exit criteria:
+
+- A new user can choose the right workflow quickly
+- Example coverage is broad but curated rather than sprawling
+- GUI, CLI, and docs describe the same conceptual model
+
+PHASE 8 - Performance, Scale, and Reproducibility
+
+Goal:
+Support larger campaign studies and more dependable experiment replay.
+
+Priority work:
+
+- Profile campaign bottlenecks and define benchmark runtime targets
+- Improve parallel execution robustness and worker reproducibility
+- Strengthen seed handling and artifact traceability
+- Add resumable or checkpoint-friendly campaign workflows where useful
+- Track throughput, memory use, and artifact volume for larger studies
+
+Exit criteria:
+
+- Campaign performance is measurable and tracked against expectations
+- Batch studies are reproducible from config, seed, and recorded
+  metadata
+- Large analysis runs fail less often and are easier to resume or audit
 
 Priority Order
 
-1)  Simulation kernel + real-time scheduler
-2)  Simple 2-body orbital model
-3)  Actuator limits + timeout handling
-4)  Knowledge module with noise and delay
-5)  Baseline strategies + metrics
-6)  Upgrade physics fidelity
+Recommended next sequence:
+
+1)  Platform consolidation
+2)  Scenario and config cleanup
+3)  Validation as a first-class system
+4)  Mission-layer maturity
+5)  SIL and real-time hardening
+6)  Fidelity closure and reference physics
+7)  Workflow curation and UX
+8)  Performance, scale, and reproducibility
+
+Why this order
+
+- Consolidation reduces future rework
+- Config cleanup reduces friction and prevents misuse
+- Validation increases confidence before further expansion
+- Mission maturity turns the framework into a stronger autonomy and
+  engagement lab
+- SIL hardening benefits from having clearer interfaces and validation
+  discipline already in place
+
+Near-Term Milestones
+
+Milestone A - Unify the execution model
+
+- Make API, CLI, and GUI runs feel like the same system
+- Retire or isolate legacy orchestration paths
+- Normalize result payloads and summaries
+
+Milestone B - Build the benchmark backbone
+
+- Define a canonical benchmark suite
+- Add stored baselines and pass/fail gating
+- Cover both physics and mission behavior regressions
+
+Milestone C - Mature the mission layer
+
+- Harden objective composition and mode transitions
+- Improve mission observability and debugging
+- Add representative mission archetype benchmarks
+
+Milestone D - Make SIL repeatable
+
+- Add timing diagnostics and transport fault modeling
+- Create repeatable SIL scenarios and acceptance criteria
+- Use the simulator as a dependable closed-loop test harness
 
 End Goal
 
-A modular, real-time capable orbital engagement simulation framework
-that supports closed-loop testing, strategy comparison, Monte Carlo
-analysis, and computational budget enforcement.
+A modular, validated, and operationally coherent orbital engagement
+simulation platform that supports:
+
+- closed-loop spacecraft GNC experimentation,
+- mission-logic and autonomy prototyping,
+- campaign-scale analysis,
+- high-confidence regression testing, and
+- repeatable SIL integration workflows.

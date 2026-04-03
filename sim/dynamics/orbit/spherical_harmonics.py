@@ -287,7 +287,7 @@ def accel_spherical_harmonics_terms(
 
 
 def default_hpop_ggm03_coeff_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "validation" / "High Precision Orbit Propagator_4-2" / "High Precision Orbit Propagator_4.2.2" / "GGM03C.txt"
+    return Path(__file__).resolve().parents[3] / "validation" / "data" / "GGM03C.txt"
 
 
 def configure_spherical_harmonics_env(base_env: dict | None, orbit_cfg: dict | None) -> dict:
