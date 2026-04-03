@@ -146,11 +146,11 @@ The broader project flow is:
 - `sim/metrics/` scoring and engagement metrics
 - `sim/optimization/` gain tuning and PSO framework
 - `sim/rocket/` dedicated ascent engine
-- `sim_gui/` native desktop GUI
+- `sim/gui/` native desktop GUI
 - `machine_learning/` RL environments and training helpers
 - `validation/` validation tooling and external reference-model workflows
 - `examples/` runnable scripts and demos
-- `presets/` reusable parameter presets
+- `sim/presets/` reusable parameter presets
 - `integrations/` external integration stubs, including a cFS SIL bridge
 - `sim/tests/` unit and regression tests
 
@@ -526,7 +526,7 @@ For training infrastructure, the repository now also includes:
 
 ## Presets
 
-The `presets/` package provides reusable templates for:
+The `sim/presets/` package provides reusable templates for:
 
 - rockets
 - satellites
@@ -536,7 +536,7 @@ The `presets/` package provides reusable templates for:
 Example:
 
 ```python
-from presets import build_sim_object_from_presets
+from sim.presets import build_sim_object_from_presets
 
 sat = build_sim_object_from_presets(
     object_id="sat_01",

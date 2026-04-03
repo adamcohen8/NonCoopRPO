@@ -8,8 +8,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from presets.rockets import BASIC_1ST_STAGE, BASIC_SSTO_ROCKET, BASIC_TWO_STAGE_STACK, RocketStackPreset
-from presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, resolve_thruster_mount_from_specs
+from sim.presets.rockets import BASIC_1ST_STAGE, BASIC_SSTO_ROCKET, BASIC_TWO_STAGE_STACK, RocketStackPreset
+from sim.presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, resolve_thruster_mount_from_specs
 from sim.config import SimulationScenarioConfig
 from sim.control.attitude.zero_torque import ZeroTorqueController
 from sim.control.orbit.zero_controller import ZeroController

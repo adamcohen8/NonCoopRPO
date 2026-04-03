@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from presets.rockets import BASIC_TWO_STAGE_STACK
+from sim.presets.rockets import BASIC_TWO_STAGE_STACK
 from sim.rocket import (
     GuidanceCommand,
     HoldAttitudeGuidance,

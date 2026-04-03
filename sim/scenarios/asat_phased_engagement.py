@@ -5,7 +5,7 @@ from typing import Literal
 
 import numpy as np
 
-from presets.rockets import BASIC_TWO_STAGE_STACK
+from sim.presets.rockets import BASIC_TWO_STAGE_STACK
 from sim.core.models import StateBelief, StateTruth
 from sim.dynamics.orbit.accelerations import OrbitContext
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2

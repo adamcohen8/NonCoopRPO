@@ -24,7 +24,7 @@ This folder contains reusable baseline hardware presets for the new simulation f
 ## Quick Usage
 
 ```python
-from presets import build_sim_object_from_presets
+from sim.presets import build_sim_object_from_presets
 
 sat = build_sim_object_from_presets(
     object_id="sat_01",

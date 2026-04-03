@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from presets import BASIC_CHEMICAL_BOTTOM_Z, BASIC_SATELLITE, build_sim_object_from_presets
+from sim.presets import BASIC_CHEMICAL_BOTTOM_Z, BASIC_SATELLITE, build_sim_object_from_presets
 from sim.core.models import Command
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2
 from sim.dynamics.orbit.two_body import propagate_two_body_rk4

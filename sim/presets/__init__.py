@@ -1,4 +1,4 @@
-from presets.attitude_control import (
+from sim.presets.attitude_control import (
     BASIC_REACTION_WHEEL_TRIAD,
     BASIC_REACTION_WHEEL_X,
     BASIC_REACTION_WHEEL_Y,
@@ -6,7 +6,7 @@ from presets.attitude_control import (
     ReactionWheelAssemblyPreset,
     ReactionWheelPreset,
 )
-from presets.rockets import (
+from sim.presets.rockets import (
     BASIC_1ST_STAGE,
     BASIC_2ND_STAGE,
     BASIC_SSTO_ROCKET,
@@ -14,15 +14,15 @@ from presets.rockets import (
     RocketStackPreset,
     RocketStagePreset,
 )
-from presets.satellites import BASIC_SATELLITE, SatellitePreset
-from presets.simulation import (
+from sim.presets.satellites import BASIC_SATELLITE, SatellitePreset
+from sim.presets.simulation import (
     DEFAULT_ROCKET_VEHICLE,
     DEFAULT_TWO_STAGE_VEHICLE,
     RocketVehiclePreset,
     build_rocket_vehicle_from_presets,
     build_sim_object_from_presets,
 )
-from presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, ChemicalPropulsionPreset, ThrusterMountPreset
+from sim.presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, ChemicalPropulsionPreset, ThrusterMountPreset
 
 __all__ = [
     "RocketStagePreset",

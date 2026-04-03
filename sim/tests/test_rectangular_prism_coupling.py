@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from presets import build_sim_object_from_presets
+from sim.presets import build_sim_object_from_presets
 from sim.core.models import StateTruth
 from sim.dynamics.attitude.disturbances import DisturbanceTorqueConfig, DisturbanceTorqueModel
 from sim.dynamics.spacecraft_geometry import RectangularPrismGeometry

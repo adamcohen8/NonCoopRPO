@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from presets import BASIC_SATELLITE, build_sim_object_from_presets
+from sim.presets import BASIC_SATELLITE, build_sim_object_from_presets
 from sim.core.models import Command
 from sim.utils.quaternion import quaternion_to_dcm_bn
 

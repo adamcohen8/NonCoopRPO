@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from presets.rockets import RocketStackPreset
+from sim.presets.rockets import RocketStackPreset
 from sim.config import SimulationScenarioConfig
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
 from sim.utils.figure_size import cap_figsize

@@ -449,8 +449,8 @@ def get_gui_capabilities() -> GuiCapabilities:
         monte_carlo_modes=["choice", "uniform", "normal"],
         monte_carlo_lhs_modes=["uniform", "normal"],
         chaser_init_modes=["rocket_deployment", "relative_ric_rect", "relative_ric_curv"],
-        satellite_presets=_discover_named_presets("presets.satellites", "SatellitePreset"),
-        rocket_preset_stacks=_discover_named_presets("presets.rockets", "RocketStackPreset"),
+        satellite_presets=_discover_named_presets("sim.presets.satellites", "SatellitePreset"),
+        rocket_preset_stacks=_discover_named_presets("sim.presets.rockets", "RocketStackPreset"),
         figure_ids=list(AVAILABLE_FIGURE_IDS),
         animation_types=list(AVAILABLE_ANIMATION_TYPES),
         base_guidance_options={

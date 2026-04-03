@@ -200,7 +200,7 @@ def _make_controller(
     params: dict[str, float],
     case: AttitudeTuneCase,
 ) -> Controller:
-    from presets.attitude_control import BASIC_REACTION_WHEEL_TRIAD
+    from sim.presets.attitude_control import BASIC_REACTION_WHEEL_TRIAD
 
     wheel_axes = np.vstack([w.axis_body for w in BASIC_REACTION_WHEEL_TRIAD.wheels])
     wheel_limits = np.array([w.max_torque_nm for w in BASIC_REACTION_WHEEL_TRIAD.wheels], dtype=float) * float(case.wheel_scale)
@@ -275,8 +275,8 @@ def _make_controller(
 
 
 def _run_case(algorithm: ControllerAlgorithm, params: dict[str, float], case: AttitudeTuneCase) -> TuneCaseResult:
-    from presets.satellites import BASIC_SATELLITE
-    from presets.simulation import build_sim_object_from_presets
+    from sim.presets.satellites import BASIC_SATELLITE
+    from sim.presets.simulation import build_sim_object_from_presets
 
     init_c_bn = _rot_z(case.init_eci_euler_rad[2]) @ _rot_y(case.init_eci_euler_rad[1]) @ _rot_x(case.init_eci_euler_rad[0])
     q0 = dcm_to_quaternion_bn(init_c_bn)

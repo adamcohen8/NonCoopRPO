@@ -4,10 +4,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from presets.attitude_control import BASIC_REACTION_WHEEL_TRIAD, ReactionWheelAssemblyPreset
-from presets.rockets import BASIC_SSTO_ROCKET, BASIC_TWO_STAGE_STACK, RocketStackPreset, RocketStagePreset
-from presets.satellites import BASIC_SATELLITE, SatellitePreset
-from presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, ChemicalPropulsionPreset
+from sim.presets.attitude_control import BASIC_REACTION_WHEEL_TRIAD, ReactionWheelAssemblyPreset
+from sim.presets.rockets import BASIC_SSTO_ROCKET, BASIC_TWO_STAGE_STACK, RocketStackPreset, RocketStagePreset
+from sim.presets.satellites import BASIC_SATELLITE, SatellitePreset
+from sim.presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, ChemicalPropulsionPreset
 from sim.actuators import AttitudeActuator, CombinedActuator, OrbitalActuator, OrbitalActuatorLimits, ReactionWheelLimits
 from sim.control.orbit.zero_controller import ZeroController
 from sim.core.kernel import SimObject

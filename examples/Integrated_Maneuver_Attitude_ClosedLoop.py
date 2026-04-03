@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from presets import BASIC_CHEMICAL_BOTTOM_Z, BASIC_REACTION_WHEEL_TRIAD, BASIC_SATELLITE, build_sim_object_from_presets
+from sim.presets import BASIC_CHEMICAL_BOTTOM_Z, BASIC_REACTION_WHEEL_TRIAD, BASIC_SATELLITE, build_sim_object_from_presets
 from sim.control.attitude import SmallAngleLQRController
 from sim.control.orbit import IntegratedManeuverCommand, OrbitalAttitudeManeuverCoordinator
 from sim.core.models import Command, StateBelief

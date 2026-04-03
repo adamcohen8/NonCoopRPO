@@ -5,7 +5,7 @@ from typing import Protocol
 
 import numpy as np
 
-from presets.rockets import RocketStackPreset
+from sim.presets.rockets import RocketStackPreset
 from sim.rocket.aero import RocketAeroConfig
 
 

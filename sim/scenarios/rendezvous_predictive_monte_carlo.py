@@ -7,7 +7,7 @@ from typing import Literal
 import matplotlib.pyplot as plt
 import numpy as np
 
-from presets import BASIC_CHEMICAL_BOTTOM_Z, BASIC_REACTION_WHEEL_TRIAD, BASIC_SATELLITE, build_sim_object_from_presets
+from sim.presets import BASIC_CHEMICAL_BOTTOM_Z, BASIC_REACTION_WHEEL_TRIAD, BASIC_SATELLITE, build_sim_object_from_presets
 from sim.actuators.attitude import ReactionWheelLimits
 from sim.control.attitude import RICFrameLQRController, SmallAngleLQRController
 from sim.control.orbit import HCWLQRController, PredictiveBurnConfig, PredictiveBurnScheduler

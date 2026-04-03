@@ -3,7 +3,7 @@ import warnings
 
 import numpy as np
 
-from presets.rockets import RocketStackPreset, RocketStagePreset
+from sim.presets.rockets import RocketStackPreset, RocketStagePreset
 from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
 from sim.rocket import GuidanceCommand, HoldAttitudeGuidance, RocketAscentSimulator, RocketSimConfig, RocketVehicleConfig
 

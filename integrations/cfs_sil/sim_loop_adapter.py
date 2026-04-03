@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from integrations.cfs_sil.python_bridge import CfsSilUdpBridge, SimSensorState
-from presets import BASIC_SATELLITE, build_sim_object_from_presets
+from sim.presets import BASIC_SATELLITE, build_sim_object_from_presets
 from sim.core.models import Command
 from sim.dynamics.orbit.atmosphere import density_from_model
 

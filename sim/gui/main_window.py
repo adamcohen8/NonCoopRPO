@@ -64,7 +64,7 @@ from sim.app.pointer_utils import (
     pointer_display_name,
     pointer_form_schema,
 )
-from sim_gui.sections import (
+from sim.gui.sections import (
     build_monte_carlo_tab,
     build_objects_tab,
     build_outputs_tab,
