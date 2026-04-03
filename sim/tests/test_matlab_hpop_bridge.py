@@ -47,7 +47,13 @@ def _write_satellite_states(path: Path, jd_utc: float, truth_rows: list[list[flo
 
 @patch("validation.matlab_hpop_bridge._run_single_config")
 @patch("validation.matlab_hpop_bridge.subprocess.run")
-def test_run_matlab_hpop_validation_generates_case_and_compares(mock_subprocess_run, mock_run_single_config, tmp_path) -> None:
+@patch("validation.matlab_hpop_bridge._resolve_matlab_executable", return_value="matlab")
+def test_run_matlab_hpop_validation_generates_case_and_compares(
+    mock_resolve_matlab_executable,
+    mock_subprocess_run,
+    mock_run_single_config,
+    tmp_path,
+) -> None:
     cfg_path = tmp_path / "case.yaml"
     cfg_path.write_text(
         yaml.safe_dump(
@@ -107,6 +113,7 @@ def test_run_matlab_hpop_validation_generates_case_and_compares(mock_subprocess_
         plot_mode="none",
     )
 
+    mock_resolve_matlab_executable.assert_called_once_with("matlab")
     assert float(result["pos_err_max_m"]) == 0.0
     assert float(result["vel_err_max_mm_s"]) == 0.0
     assert int(result["gravity_degree"]) == 2
@@ -123,7 +130,13 @@ def test_run_matlab_hpop_validation_generates_case_and_compares(mock_subprocess_
 
 @patch("validation.matlab_hpop_bridge._run_single_config")
 @patch("validation.matlab_hpop_bridge.subprocess.run")
-def test_run_matlab_hpop_validation_injects_shared_moon_ephemeris(mock_subprocess_run, mock_run_single_config, tmp_path) -> None:
+@patch("validation.matlab_hpop_bridge._resolve_matlab_executable", return_value="matlab")
+def test_run_matlab_hpop_validation_injects_shared_moon_ephemeris(
+    mock_resolve_matlab_executable,
+    mock_subprocess_run,
+    mock_run_single_config,
+    tmp_path,
+) -> None:
     cfg_path = tmp_path / "case_shared_moon.yaml"
     cfg_path.write_text(
         yaml.safe_dump(
@@ -202,6 +215,7 @@ def test_run_matlab_hpop_validation_injects_shared_moon_ephemeris(mock_subproces
         plot_mode="none",
     )
 
+    assert mock_resolve_matlab_executable.call_count == 2
     assert result["shared_ephemeris_bodies"] == ["moon"]
     assert float(result["shared_ephemeris_step_s"]) == 0.25
     assert Path(result["ephemeris_export_path"]).exists()
