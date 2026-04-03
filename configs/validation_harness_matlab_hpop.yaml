@@ -1,0 +1,15 @@
+suite_name: "validation_harness_matlab_hpop"
+output_dir: "../outputs/validation_harness_matlab_hpop"
+
+benchmarks:
+  - name: "matlab_hpop_target_j2"
+    kind: "matlab_hpop"
+    description: "Config-driven passive target orbit comparison between the master simulator and MATLAB HPOP."
+    tags: ["orbit", "matlab", "hpop"]
+    config_path: "../validation/configs/validation_matlab_hpop_target.yaml"
+    hpop_root: "../validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2"
+    params:
+      object_id: "target"
+      matlab_executable: "matlab"
+      plot_mode: "none"
+      timeout_s: 300.0

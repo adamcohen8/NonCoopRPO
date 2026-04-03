@@ -7,7 +7,6 @@ from pathlib import Path
 import re
 import sys
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -217,6 +216,141 @@ def _resample_states_linear(t_src_s: np.ndarray, x_src: np.ndarray, t_query_s: n
     return xq
 
 
+def _normalize_plot_mode(plot_mode: str) -> str:
+    mode = str(plot_mode).strip().lower()
+    if mode not in {"interactive", "save", "both", "none"}:
+        raise ValueError("plot_mode must be one of: interactive, save, both, none.")
+    return mode
+
+
+def _import_pyplot():
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
+def compare_state_histories(
+    *,
+    sim_t_s: np.ndarray,
+    sim_x_eci_km_km_s: np.ndarray,
+    ref_t_s: np.ndarray,
+    ref_x_eci_km_km_s: np.ndarray,
+    model: str,
+    plot_mode: str = "interactive",
+    output_dir: Path | None = None,
+    ref_label: str = "HPOP",
+) -> dict[str, str]:
+    plot_mode_norm = _normalize_plot_mode(plot_mode)
+    sim_t = np.array(sim_t_s, dtype=float).reshape(-1)
+    ref_t = np.array(ref_t_s, dtype=float).reshape(-1)
+    sim_x = np.array(sim_x_eci_km_km_s, dtype=float)
+    ref_x = np.array(ref_x_eci_km_km_s, dtype=float)
+
+    if sim_t.ndim != 1 or sim_t.size < 2:
+        raise ValueError("sim_t_s must be 1D with at least 2 samples.")
+    if ref_t.ndim != 1 or ref_t.size < 2:
+        raise ValueError("ref_t_s must be 1D with at least 2 samples.")
+    if sim_x.shape != (sim_t.size, 6):
+        raise ValueError("sim_x_eci_km_km_s must have shape (N,6) matching sim_t_s.")
+    if ref_x.shape != (ref_t.size, 6):
+        raise ValueError("ref_x_eci_km_km_s must have shape (N,6) matching ref_t_s.")
+    if np.any(np.diff(sim_t) <= 0.0):
+        raise ValueError("sim_t_s must be strictly increasing.")
+    if np.any(np.diff(ref_t) <= 0.0):
+        raise ValueError("ref_t_s must be strictly increasing.")
+    if float(ref_t[0]) < float(sim_t[0]) - 1.0e-9 or float(ref_t[-1]) > float(sim_t[-1]) + 1.0e-9:
+        raise ValueError("Reference time grid must lie within the simulator time span.")
+
+    if sim_t.size == ref_t.size and np.allclose(sim_t, ref_t, atol=1.0e-6, rtol=0.0):
+        sim_x_grid = sim_x.copy()
+    else:
+        sim_x_grid = _resample_states_linear(sim_t, sim_x, ref_t)
+
+    d = sim_x_grid - ref_x
+    pos_err_m = d[:, :3] * 1e3
+    vel_err_mm_s = d[:, 3:] * 1e6
+    pos_err_norm_m = np.linalg.norm(pos_err_m, axis=1)
+    vel_err_norm_mm_s = np.linalg.norm(vel_err_mm_s, axis=1)
+
+    outdir = Path(output_dir) if output_dir is not None else REPO_ROOT / "outputs" / "validation_hpop"
+    if plot_mode_norm in ("save", "both"):
+        outdir.mkdir(parents=True, exist_ok=True)
+
+    plot_path = outdir / f"hpop_compare_{model}.png"
+    eci_plot_path = outdir / f"hpop_compare_{model}_eci_overlay.png"
+    if plot_mode_norm != "none":
+        plt = _import_pyplot()
+        fig, axes = plt.subplots(4, 2, figsize=(12, 10), sharex=True)
+        pos_lbl = ["dx (m)", "dy (m)", "dz (m)"]
+        vel_lbl = ["dvx (mm/s)", "dvy (mm/s)", "dvz (mm/s)"]
+        for i in range(3):
+            axes[i, 0].plot(ref_t, pos_err_m[:, i], color="tab:blue")
+            axes[i, 0].set_ylabel(pos_lbl[i])
+            axes[i, 0].grid(True, alpha=0.3)
+            axes[i, 1].plot(ref_t, vel_err_mm_s[:, i], color="tab:orange")
+            axes[i, 1].set_ylabel(vel_lbl[i])
+            axes[i, 1].grid(True, alpha=0.3)
+        axes[3, 0].plot(ref_t, pos_err_norm_m, color="tab:green")
+        axes[3, 0].set_ylabel("|dr| (m)")
+        axes[3, 0].set_xlabel("Time (s)")
+        axes[3, 0].grid(True, alpha=0.3)
+        axes[3, 1].plot(ref_t, vel_err_norm_mm_s, color="tab:red")
+        axes[3, 1].set_ylabel("|dv| (mm/s)")
+        axes[3, 1].set_xlabel("Time (s)")
+        axes[3, 1].grid(True, alpha=0.3)
+        axes[0, 0].set_title(f"Position Difference: Simulator ({model}) - {ref_label}")
+        axes[0, 1].set_title(f"Velocity Difference: Simulator ({model}) - {ref_label}")
+        fig.tight_layout()
+
+        if plot_mode_norm in ("save", "both"):
+            fig.savefig(plot_path, dpi=160)
+        if plot_mode_norm in ("interactive", "both"):
+            plt.show()
+        plt.close(fig)
+
+        fig_eci = plt.figure(figsize=(9, 8))
+        ax_eci = fig_eci.add_subplot(111, projection="3d")
+        ax_eci.plot(ref_x[:, 0], ref_x[:, 1], ref_x[:, 2], "--", linewidth=1.2, label=ref_label)
+        ax_eci.plot(sim_x_grid[:, 0], sim_x_grid[:, 1], sim_x_grid[:, 2], linewidth=1.4, label=f"Simulator ({model})")
+        ax_eci.scatter([ref_x[0, 0]], [ref_x[0, 1]], [ref_x[0, 2]], s=25, c="tab:green", label="Start")
+        ax_eci.set_title(f"3D ECI Orbit Overlay: Simulator vs {ref_label}")
+        ax_eci.set_xlabel("X (km)")
+        ax_eci.set_ylabel("Y (km)")
+        ax_eci.set_zlabel("Z (km)")
+        ax_eci.grid(True, alpha=0.3)
+        ax_eci.legend(loc="best")
+        r_stack = np.vstack((ref_x[:, :3], sim_x_grid[:, :3]))
+        span = np.ptp(r_stack, axis=0)
+        max_span = float(np.max(span))
+        center = np.mean(r_stack, axis=0)
+        half = 0.5 * max(max_span, 1e-6)
+        ax_eci.set_xlim(center[0] - half, center[0] + half)
+        ax_eci.set_ylim(center[1] - half, center[1] + half)
+        ax_eci.set_zlim(center[2] - half, center[2] + half)
+        try:
+            ax_eci.set_box_aspect((1.0, 1.0, 1.0))
+        except Exception:
+            pass
+        fig_eci.tight_layout()
+
+        if plot_mode_norm in ("save", "both"):
+            fig_eci.savefig(eci_plot_path, dpi=160)
+        if plot_mode_norm in ("interactive", "both"):
+            plt.show()
+        plt.close(fig_eci)
+
+    return {
+        "validation_samples": str(int(ref_t.size)),
+        "used_duration_s": f"{float(ref_t[-1]):.3f}",
+        "pos_err_rms_m": f"{float(np.sqrt(np.mean(pos_err_norm_m**2))):.6f}",
+        "pos_err_max_m": f"{float(np.max(pos_err_norm_m)):.6f}",
+        "vel_err_rms_mm_s": f"{float(np.sqrt(np.mean(vel_err_norm_mm_s**2))):.6f}",
+        "vel_err_max_mm_s": f"{float(np.max(vel_err_norm_mm_s)):.6f}",
+        "eci_overlay_plot_path": str(eci_plot_path) if plot_mode_norm in ("save", "both") else "",
+        "plot_path": str(plot_path) if plot_mode_norm in ("save", "both") else "",
+    }
+
+
 def run_validation(
     hpop_root: Path,
     model: str,
@@ -271,81 +405,20 @@ def run_validation(
         ctx=ctx,
     )
 
-    d = sim_x - hpop_x_grid
-    pos_err_m = d[:, :3] * 1e3
-    vel_err_mm_s = d[:, 3:] * 1e6
-    pos_err_norm_m = np.linalg.norm(pos_err_m, axis=1)
-    vel_err_norm_mm_s = np.linalg.norm(vel_err_mm_s, axis=1)
-
-    outdir = Path(output_dir) if output_dir is not None else REPO_ROOT / "outputs" / "validation_hpop"
-    if plot_mode in ("save", "both"):
-        outdir.mkdir(parents=True, exist_ok=True)
-
-    fig, axes = plt.subplots(4, 2, figsize=(12, 10), sharex=True)
-    pos_lbl = ["dx (m)", "dy (m)", "dz (m)"]
-    vel_lbl = ["dvx (mm/s)", "dvy (mm/s)", "dvz (mm/s)"]
-    for i in range(3):
-        axes[i, 0].plot(t_grid, pos_err_m[:, i], color="tab:blue")
-        axes[i, 0].set_ylabel(pos_lbl[i])
-        axes[i, 0].grid(True, alpha=0.3)
-        axes[i, 1].plot(t_grid, vel_err_mm_s[:, i], color="tab:orange")
-        axes[i, 1].set_ylabel(vel_lbl[i])
-        axes[i, 1].grid(True, alpha=0.3)
-    axes[3, 0].plot(t_grid, pos_err_norm_m, color="tab:green")
-    axes[3, 0].set_ylabel("|dr| (m)")
-    axes[3, 0].set_xlabel("Time (s)")
-    axes[3, 0].grid(True, alpha=0.3)
-    axes[3, 1].plot(t_grid, vel_err_norm_mm_s, color="tab:red")
-    axes[3, 1].set_ylabel("|dv| (mm/s)")
-    axes[3, 1].set_xlabel("Time (s)")
-    axes[3, 1].grid(True, alpha=0.3)
-    axes[0, 0].set_title(f"Position Difference: Simulator ({model}) - HPOP")
-    axes[0, 1].set_title(f"Velocity Difference: Simulator ({model}) - HPOP")
-    fig.tight_layout()
-
-    plot_path = outdir / f"hpop_compare_{model}.png"
-    if plot_mode in ("save", "both"):
-        fig.savefig(plot_path, dpi=160)
-    if plot_mode in ("interactive", "both"):
-        plt.show()
-    plt.close(fig)
-
-    fig_eci = plt.figure(figsize=(9, 8))
-    ax_eci = fig_eci.add_subplot(111, projection="3d")
-    ax_eci.plot(hpop_x_grid[:, 0], hpop_x_grid[:, 1], hpop_x_grid[:, 2], "--", linewidth=1.2, label="HPOP")
-    ax_eci.plot(sim_x[:, 0], sim_x[:, 1], sim_x[:, 2], linewidth=1.4, label=f"Simulator ({model})")
-    ax_eci.scatter([hpop_x_grid[0, 0]], [hpop_x_grid[0, 1]], [hpop_x_grid[0, 2]], s=25, c="tab:green", label="Start")
-    ax_eci.set_title("3D ECI Orbit Overlay: Simulator vs HPOP")
-    ax_eci.set_xlabel("X (km)")
-    ax_eci.set_ylabel("Y (km)")
-    ax_eci.set_zlabel("Z (km)")
-    ax_eci.grid(True, alpha=0.3)
-    ax_eci.legend(loc="best")
-    r_stack = np.vstack((hpop_x_grid[:, :3], sim_x[:, :3]))
-    span = np.ptp(r_stack, axis=0)
-    max_span = float(np.max(span))
-    center = np.mean(r_stack, axis=0)
-    half = 0.5 * max(max_span, 1e-6)
-    ax_eci.set_xlim(center[0] - half, center[0] + half)
-    ax_eci.set_ylim(center[1] - half, center[1] + half)
-    ax_eci.set_zlim(center[2] - half, center[2] + half)
-    try:
-        ax_eci.set_box_aspect((1.0, 1.0, 1.0))
-    except Exception:
-        pass
-    fig_eci.tight_layout()
-
-    eci_plot_path = outdir / f"hpop_compare_{model}_eci_overlay.png"
-    if plot_mode in ("save", "both"):
-        fig_eci.savefig(eci_plot_path, dpi=160)
-    if plot_mode in ("interactive", "both"):
-        plt.show()
-    plt.close(fig_eci)
+    comparison = compare_state_histories(
+        sim_t_s=t_grid,
+        sim_x_eci_km_km_s=sim_x,
+        ref_t_s=t_grid,
+        ref_x_eci_km_km_s=hpop_x_grid,
+        model=model,
+        plot_mode=plot_mode,
+        output_dir=output_dir,
+        ref_label="HPOP",
+    )
 
     return {
         "hpop_root": str(hpop_root),
         "hpop_samples": str(int(hpop.t_s.size)),
-        "validation_samples": str(int(t_grid.size)),
         "validation_dt_s": f"{dt:.3f}",
         "model": model,
         "mass_kg": f"{mass_kg:.6f}",
@@ -356,13 +429,7 @@ def run_validation(
         "atmosphere_model": str(atmosphere_model),
         "density_override_kg_m3": "" if density_override_kg_m3 is None else f"{float(density_override_kg_m3):.6e}",
         "requested_duration_s": f"{t_end_req:.3f}",
-        "used_duration_s": f"{float(t_grid[-1]):.3f}",
-        "pos_err_rms_m": f"{float(np.sqrt(np.mean(pos_err_norm_m**2))):.6f}",
-        "pos_err_max_m": f"{float(np.max(pos_err_norm_m)):.6f}",
-        "vel_err_rms_mm_s": f"{float(np.sqrt(np.mean(vel_err_norm_mm_s**2))):.6f}",
-        "vel_err_max_mm_s": f"{float(np.max(vel_err_norm_mm_s)):.6f}",
-        "eci_overlay_plot_path": str(eci_plot_path) if plot_mode in ("save", "both") else "",
-        "plot_path": str(plot_path) if plot_mode in ("save", "both") else "",
+        **comparison,
     }
 
 
@@ -404,7 +471,7 @@ if __name__ == "__main__":
     parser.add_argument("--sun-dir-x", type=float, default=1.0, help="ECI sun direction x component for SRP mode.")
     parser.add_argument("--sun-dir-y", type=float, default=0.0, help="ECI sun direction y component for SRP mode.")
     parser.add_argument("--sun-dir-z", type=float, default=0.0, help="ECI sun direction z component for SRP mode.")
-    parser.add_argument("--plot-mode", choices=["interactive", "save", "both"], default="interactive")
+    parser.add_argument("--plot-mode", choices=["interactive", "save", "both", "none"], default="interactive")
     parser.add_argument(
         "--output-dir",
         type=str,

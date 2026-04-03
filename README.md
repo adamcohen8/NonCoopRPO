@@ -241,6 +241,33 @@ Artifacts are written under the suite `output_dir`, including:
 - `validation_harness_report.json`
 - `validation_harness_report.md`
 
+### MATLAB HPOP bridge
+
+For passive single-run orbit cases, you can now drive the master simulator and MATLAB HPOP from the same YAML config:
+
+```bash
+python validation/matlab_hpop_bridge.py \
+  --config configs/validation_integrated_lqr_single.yaml \
+  --object-id target \
+  --hpop-root "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2" \
+  --matlab-executable matlab \
+  --plot-mode none
+```
+
+The bridge will:
+
+- run the selected config through the master simulator,
+- generate a MATLAB HPOP case directory from the selected object's actual initial truth state,
+- invoke MATLAB in batch mode via [`run_hpop_case.m`](validation/run_hpop_case.m), and
+- compare the two trajectories with JSON/report artifacts under the chosen output directory.
+
+Current assumptions:
+
+- `simulator.initial_jd_utc` must be set,
+- the selected object must be `target` or `chaser`,
+- the selected object must be passive for the run (no applied thrust history), and
+- this workflow is intended for orbit-model validation rather than full closed-loop guidance validation.
+
 ## Additional Notes
 
 ### Headless automation and CI

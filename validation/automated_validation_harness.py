@@ -268,6 +268,25 @@ def _run_hpop_benchmark(spec: BenchmarkSpec, benchmark_output_dir: Path, base_di
     )
     return {k: _coerce_scalar(v) for k, v in result.items()}
 
+
+def _run_matlab_hpop_benchmark(spec: BenchmarkSpec, benchmark_output_dir: Path, base_dir: Path) -> dict[str, Any]:
+    from validation.matlab_hpop_bridge import run_matlab_hpop_validation
+
+    cfg_path = _resolve_path(spec.config_path, base_dir=base_dir)
+    if cfg_path is None:
+        raise ValueError("matlab_hpop benchmark requires config_path.")
+    params = dict(spec.params)
+    result = run_matlab_hpop_validation(
+        config_path=cfg_path,
+        output_dir=benchmark_output_dir,
+        hpop_root=_resolve_path(spec.hpop_root, base_dir=base_dir) or _default_hpop_root_dir(),
+        object_id=params.get("object_id"),
+        matlab_executable=str(params.get("matlab_executable", "matlab")),
+        plot_mode=str(params.get("plot_mode", "none")),
+        timeout_s=(float(params["timeout_s"]) if params.get("timeout_s") is not None else None),
+    )
+    return {k: _coerce_scalar(v) for k, v in result.items()}
+
 def filter_harness_spec(
     spec: HarnessSpec,
     *,
@@ -354,6 +373,8 @@ def run_harness(spec: HarnessSpec, *, base_dir: Path) -> dict[str, Any]:
                 payload = _run_simulation_validation(cfg_path, bench_out)
             elif spec_item.kind == "hpop":
                 payload = _run_hpop_benchmark(spec_item, bench_out, base_dir)
+            elif spec_item.kind == "matlab_hpop":
+                payload = _run_matlab_hpop_benchmark(spec_item, bench_out, base_dir)
             else:
                 raise ValueError(f"Unsupported benchmark kind: {spec_item.kind}")
             evaluations = _evaluate_checks(payload, merged_checks)

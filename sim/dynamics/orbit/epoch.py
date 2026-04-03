@@ -217,6 +217,25 @@ def resolve_sun_moon_positions(env: dict, t_s: float) -> tuple[np.ndarray, np.nd
     Resolve Sun and Moon inertial position vectors (km) using explicit env values,
     optional callable hook, then configured analytic mode.
     """
+    if "sun_ephemeris_time_s" in env and "sun_ephemeris_eci_km" in env:
+        tt = np.asarray(env["sun_ephemeris_time_s"], dtype=float).reshape(-1)
+        rr = np.asarray(env["sun_ephemeris_eci_km"], dtype=float)
+        if tt.size >= 1 and rr.ndim == 2 and rr.shape[0] == tt.size and rr.shape[1] == 3:
+            sun = np.array([np.interp(float(t_s), tt, rr[:, j]) for j in range(3)], dtype=float)
+            if "moon_ephemeris_time_s" in env and "moon_ephemeris_eci_km" in env:
+                tt_m = np.asarray(env["moon_ephemeris_time_s"], dtype=float).reshape(-1)
+                rr_m = np.asarray(env["moon_ephemeris_eci_km"], dtype=float)
+                if tt_m.size >= 1 and rr_m.ndim == 2 and rr_m.shape[0] == tt_m.size and rr_m.shape[1] == 3:
+                    moon = np.array([np.interp(float(t_s), tt_m, rr_m[:, j]) for j in range(3)], dtype=float)
+                    return sun, moon
+    if "moon_ephemeris_time_s" in env and "moon_ephemeris_eci_km" in env:
+        tt = np.asarray(env["moon_ephemeris_time_s"], dtype=float).reshape(-1)
+        rr = np.asarray(env["moon_ephemeris_eci_km"], dtype=float)
+        if tt.size >= 1 and rr.ndim == 2 and rr.shape[0] == tt.size and rr.shape[1] == 3:
+            moon = np.array([np.interp(float(t_s), tt, rr[:, j]) for j in range(3)], dtype=float)
+            if "sun_pos_eci_km" in env:
+                return np.array(env["sun_pos_eci_km"], dtype=float), moon
+
     if "sun_pos_eci_km" in env and "moon_pos_eci_km" in env:
         return np.array(env["sun_pos_eci_km"], dtype=float), np.array(env["moon_pos_eci_km"], dtype=float)
 
@@ -234,6 +253,11 @@ def resolve_sun_moon_positions(env: dict, t_s: float) -> tuple[np.ndarray, np.nd
                 return np.array(out["sun_pos_eci_km"], dtype=float), np.array(out["moon_pos_eci_km"], dtype=float)
 
     mode = str(env.get("ephemeris_mode", "analytic_enhanced")).lower()
+    if mode in ("de440_hpop", "hpop_de440", "de440"):
+        from sim.dynamics.orbit.de440_hpop import hpop_de440_positions_km
+
+        pos = hpop_de440_positions_km(jd, env)
+        return np.array(pos["sun"], dtype=float), np.array(pos["moon"], dtype=float)
     if mode in ("spice", "spiceypy"):
         from sim.dynamics.orbit.spice import spice_sun_moon_positions_eci_km
 
@@ -260,6 +284,13 @@ def resolve_body_position_eci_km(body_name: str, env: dict, t_s: float) -> np.nd
         )
 
     mode = str(env.get("ephemeris_mode", "analytic_enhanced")).lower()
+    if mode in ("de440_hpop", "hpop_de440", "de440"):
+        from sim.dynamics.orbit.de440_hpop import hpop_de440_positions_km
+
+        pos = hpop_de440_positions_km(jd, env)
+        if name not in pos:
+            raise RuntimeError(f"Body '{body_name}' is not supported by de440_hpop ephemeris mode.")
+        return np.array(pos[name], dtype=float)
     if mode in ("spice", "spiceypy"):
         from sim.dynamics.orbit.spice import spice_body_position_eci_km
 

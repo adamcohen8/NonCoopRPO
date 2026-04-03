@@ -1,7 +1,7 @@
 Verification and Validation (V&V) Status and Plan
 Project: Orbital Engagement Lab
-Review Date: 2026-04-02
-Basis: repository review plus focused execution spot-checks on 2026-04-02
+Review Date: 2026-04-03
+Basis: repository review plus focused execution spot-checks and MATLAB HPOP cross-validation runs on 2026-04-02 and 2026-04-03
 
 Project Scope Covered
 - This project is broader than the earlier ASAT-only framing.
@@ -20,7 +20,7 @@ Confidence Framework
 
 Current Assessed Confidence Level
 - Current repository evidence supports Level 1 for core software verification.
-- There is partial Level 2 evidence for selected rendezvous/orbit validation cases.
+- There is strong Level 2 evidence for selected orbit force-model validation cases and partial Level 2 evidence for broader integrated validation.
 - Level 3 is not achieved in the current repo state.
 
 Evidence Reviewed
@@ -29,14 +29,75 @@ Evidence Reviewed
 - The repository includes HPOP cross-validation tooling for orbit model parity checks.
 - The repository includes integrated single-run and Monte Carlo validation scenarios for rendezvous/orbit cases.
 - The repository includes sensitivity, Latin hypercube sampling, controller benchmarking, plugin validation, API tests, and GUI/config round-trip tests.
-- Focused execution run on 2026-04-02:
-  - 31 selected validation-related tests passed.
-  - `validation_harness_smoke` produced 2/3 passing benchmarks.
-  - The failing smoke benchmark was the HPOP leg, blocked by a local NumPy 2 / Matplotlib binary-compatibility issue (`numpy.core.multiarray failed to import`), not by a simulation tolerance failure.
+- Focused execution runs on 2026-04-02 and 2026-04-03:
+  - 31 selected validation-related tests passed during the initial repository review.
+  - The MATLAB HPOP bridge was repaired and exercised across isolated and combined perturbation cases.
+  - The simulator now matches HPOP-aligned constants for Earth, Moon, Sun, and planetary gravitational parameters.
+  - The simulator now supports a native HPOP-style DE440 ephemeris backend for Sun/Moon/planet positions.
+  - Short-horizon cross-validation results now exist for two-body, spherical harmonics, drag, SRP, Sun, and Moon perturbation cases.
+  - A full-up `8x8` spherical harmonics plus drag/SRP/Sun/Moon case was run for both `600 s` and `6000 s`.
+
+Recent Orbit Cross-Validation Results Against MATLAB HPOP
+- Two-body baseline after matching central-body constants, solver behavior, and output precision:
+  - `Pos RMS m: 0.000000`
+  - `Pos Max m: 0.000000`
+  - `Vel RMS mm/s: 0.000001`
+  - `Vel Max mm/s: 0.000001`
+- Drag-only with NRLMSISE-00 over `600 s`:
+  - `Pos RMS m: 0.001873`
+  - `Pos Max m: 0.003949`
+  - `Vel RMS mm/s: 0.007326`
+  - `Vel Max mm/s: 0.010762`
+- Drag-only with JB2008 over `600 s`:
+  - `Pos RMS m: 0.002104`
+  - `Pos Max m: 0.004540`
+  - `Vel RMS mm/s: 0.008549`
+  - `Vel Max mm/s: 0.013547`
+- SRP-only over `600 s`:
+  - `Pos RMS m: 0.000009`
+  - `Pos Max m: 0.000020`
+  - `Vel RMS mm/s: 0.000039`
+  - `Vel Max mm/s: 0.000070`
+- Moon-only over `600 s` at the initial LEO-like case:
+  - `Pos RMS m: 0.000793`
+  - `Pos Max m: 0.001749`
+  - `Vel RMS mm/s: 0.003348`
+  - `Vel Max mm/s: 0.005585`
+- Full supported perturbation stack (`8x8` spherical harmonics, drag, SRP, Sun, Moon) over `600 s`:
+  - `Pos RMS m: 0.002106`
+  - `Pos Max m: 0.004548`
+  - `Vel RMS mm/s: 0.008565`
+  - `Vel Max mm/s: 0.013591`
+- Full supported perturbation stack (`8x8` spherical harmonics, drag, SRP, Sun, Moon) over `6000 s`:
+  - `Pos RMS m: 0.292340`
+  - `Pos Max m: 0.560304`
+  - `Vel RMS mm/s: 0.307938`
+  - `Vel Max mm/s: 0.629158`
+
+Reproducibility Appendix: Validation Configs Used
+- Baseline config-driven HPOP bridge case:
+  - `validation/configs/validation_matlab_hpop_target.yaml`
+- Drag-only with NRLMSISE-00:
+  - `validation/configs/validation_matlab_hpop_target_drag.yaml`
+- Drag-only with JB2008:
+  - `validation/configs/validation_matlab_hpop_target_drag_jb2008.yaml`
+- SRP-only with HPOP-style DE440 ephemerides:
+  - `validation/configs/validation_matlab_hpop_target_srp.yaml`
+- Moon-only third-body:
+  - `validation/configs/validation_matlab_hpop_target_moon.yaml`
+- Moon-only third-body at GEO-like altitude:
+  - `validation/configs/validation_matlab_hpop_target_moon_geo.yaml`
+- Sun-only third-body:
+  - `validation/configs/validation_matlab_hpop_target_sun.yaml`
+- Combined Sun and Moon third-body:
+  - `validation/configs/validation_matlab_hpop_target_sun_moon.yaml`
+- Full supported perturbation stack with `8x8` spherical harmonics:
+  - `validation/configs/validation_matlab_hpop_target_full_8x8.yaml`
 
 Recommended Current Confidence Statement
 - Orbital Engagement Lab is suitable for internal engineering exploration, comparative controller evaluation, and repeatable closed-loop simulation studies.
-- The repository has meaningful internal verification and partial integrated validation support, but it is not yet decision-grade for real-world engagement claims without broader external truth comparison, environment-stable benchmark execution, and formal uncertainty calibration.
+- The repository now has meaningful internal verification and strong short-horizon orbit force-model validation evidence against MATLAB HPOP for a defined set of tested perturbation cases.
+- It is not yet decision-grade for real-world engagement claims without broader external truth comparison, longer-horizon regime coverage, rocket/ascent validation, and formal uncertainty calibration.
 
 Status Against the Earlier Plan
 
@@ -62,7 +123,8 @@ Phase B: Subsystem Validation (Physics Fidelity)
 4. Orbital truth-model validation (Partial)
 - `validation/hpop_compare.py` supports model-by-model parity checks for `two_body`, `drag`, `srp`, `j2`, `j3`, `j4`, `j2j3`, `j2j3j4`, and `sh8x8`.
 - The automated validation harness includes tolerance tables and HPOP-driven benchmarks.
-- Gap: broad regime-by-regime truth matrices are not yet documented, and the HPOP path is currently blocked in this local environment by a NumPy/Matplotlib ABI mismatch.
+- The MATLAB HPOP bridge now supports shared configuration-driven runs, HPOP-style DE440 ephemerides on the Python side, and direct cross-validation for isolated and combined perturbation cases.
+- Gap: broad regime-by-regime truth matrices are not yet documented, and the validated envelope is still concentrated around short-horizon single-object orbit propagation cases.
 
 5. Attitude and disturbance validation (Partial)
 - Disturbance torque modeling, substep behavior, cached environment use, and attitude controller variants are regression tested.
@@ -124,6 +186,9 @@ What Has Already Been Done Since the Older Draft
 - Smoke and default harness specs implemented.
 - Envelope-specific tolerance tables implemented.
 - HPOP parity tooling implemented for multiple orbit models.
+- MATLAB HPOP bridge implemented for config-driven simulator versus HPOP comparisons.
+- Native HPOP-style DE440 ephemeris backend implemented on the Python side.
+- HPOP-aligned gravitational constants adopted for Earth, Moon, Sun, and planets.
 - Integrated single-run and Monte Carlo validation configs implemented.
 - NIS/NEES-related knowledge consistency metrics wired into benchmark checks.
 - Monte Carlo baseline-comparison helpers and commander-brief summaries implemented.
@@ -132,7 +197,6 @@ What Has Already Been Done Since the Older Draft
 - Plugin/config/API/app validation coverage implemented.
 
 What Is Still Missing for Stronger Validation Claims
-- Stable external-truth execution environment for the HPOP comparison path.
 - Broader truth-model matrices across regimes, durations, and perturbation combinations.
 - Formal rocket/ascent reference comparisons.
 - Formal calibration of uncertain parameters against trusted data.
@@ -140,26 +204,25 @@ What Is Still Missing for Stronger Validation Claims
 - Documented change-control criteria that make validation reruns mandatory.
 
 Priority Next Steps
-1. Fix the local validation environment so the HPOP benchmark path runs cleanly again.
-- Current blocker: Matplotlib binary compatibility with NumPy 2 in the active environment.
-
-2. Expand orbit truth-model validation beyond the current smoke/default matrix.
+1. Expand orbit truth-model validation beyond the current short-horizon matrix.
 - Add documented regime tables for LEO, high-LEO, and cislunar cases.
 - Add broader force-model combinations and duration sweeps.
+- Add Sun-only, Sun+Moon, and higher-altitude third-body cases to the standing benchmark set.
 
-3. Add formal numerical verification campaigns.
+2. Add formal numerical verification campaigns.
 - Create automated dt/tolerance convergence sweeps and event-timing checks with stored reports.
 
-4. Promote estimation validation from internal metrics to explicit benchmark evidence.
+3. Promote estimation validation from internal metrics to explicit benchmark evidence.
 - Save Monte Carlo NIS/NEES summaries as first-class validation artifacts with pass/fail thresholds by scenario family.
 
-5. Add rocket/ascent external-reference validation.
+4. Add rocket/ascent external-reference validation.
 - Compare altitude, velocity, max-Q timing/value, and burnout conditions against trusted references for at least one representative vehicle profile.
 
-6. Produce a release-grade validation package.
+5. Produce a release-grade validation package.
 - Include commit hash, Python/package versions, assumptions, known limitations, benchmark matrix, and explicit envelope-of-validity statements.
 
 Decision-Oriented Bottom Line
 - The current repo is no longer at the "just build a harness" stage. That work is already substantially done.
-- The main gap has shifted from internal verification infrastructure to external truth anchoring, broader benchmark coverage, and formal governance.
+- The main gap has shifted from internal verification infrastructure to broader external truth anchoring, wider benchmark coverage, and formal governance.
+- The recent HPOP campaign materially improved the project’s V&V position by showing millimeter-level to sub-meter agreement across isolated and combined orbit perturbation cases within the tested envelope.
 - If this project remains focused on engagement analysis, the next V&V investment should be external benchmark depth and uncertainty calibration rather than more generic internal plumbing.

@@ -1,0 +1,115 @@
+scenario_name: "validation_matlab_hpop_target_srp"
+scenario_description: "Passive target-only SRP validation case for config-driven MATLAB HPOP comparison."
+
+metadata:
+  owner: "validation"
+  notes: "SRP-only parity case. Keeps gravity two-body and disables drag/third-body perturbations."
+
+rocket:
+  enabled: false
+  role: "rocket"
+
+chaser:
+  enabled: false
+  role: "chaser"
+
+target:
+  enabled: true
+  role: "target"
+  specs:
+    mass_kg: 300.0
+    drag_area_m2: 1.0
+    solar_area_m2: 1.0
+    cd: 2.2
+    cr: 1.2
+  initial_state:
+    coes:
+      a_km: 7000.0
+      ecc: 0.001
+      inc_deg: 45.0
+      raan_deg: 15.0
+      argp_deg: 25.0
+      true_anomaly_deg: 10.0
+    attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+    angular_rate_body_rad_s: [0.0, 0.0, 0.0]
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.zero_controller"
+    class_name: "ZeroController"
+    params: {}
+  attitude_control:
+    kind: "python"
+    module: "sim.control.attitude.zero_torque"
+    class_name: "ZeroTorqueController"
+    params: {}
+  mission_objectives: []
+
+simulator:
+  scenario_type: "auto"
+  duration_s: 600.0
+  dt_s: 1.0
+  initial_jd_utc: 2460400.5
+  dynamics:
+    orbit:
+      orbit_substep_s: 1.0
+      model: "two_body"
+      integrator: "rkf78"
+      adaptive_atol: 1.0e-12
+      adaptive_rtol: 1.0e-10
+      j2: false
+      j3: false
+      j4: false
+      drag: false
+      srp: true
+      third_body_sun: false
+      third_body_moon: false
+      spherical_harmonics:
+        enabled: false
+    attitude:
+      enabled: false
+    rocket:
+      enabled: false
+  environment:
+    ephemeris_mode: "de440_hpop"
+    de440_coeff_path: "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/DE440Coeff.mat"
+    de440_eop_path: "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/EOP-All.txt"
+    srp_shadow_model: "conical"
+    atmosphere_model: "exponential"
+    atmosphere_env: {}
+  plugin_validation:
+    strict: true
+  termination:
+    earth_impact_enabled: true
+    earth_radius_km: 6378.137
+
+outputs:
+  output_dir: "outputs/validation_matlab_hpop_target_srp"
+  mode: "save"
+  stats:
+    enabled: true
+    print_summary: false
+    save_json: false
+    save_csv: false
+    save_full_log: false
+  plots:
+    enabled: false
+    figure_ids: []
+  animations:
+    enabled: false
+    types: []
+  monte_carlo:
+    save_iteration_summaries: false
+    save_aggregate_summary: false
+    save_histograms: false
+    display_histograms: false
+    save_ops_dashboard: false
+    display_ops_dashboard: false
+    save_raw_runs: false
+
+monte_carlo:
+  enabled: false
+  iterations: 1
+  base_seed: 4100
+  parallel_enabled: false
+  parallel_workers: 1
+  variations: []

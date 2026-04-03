@@ -19,6 +19,7 @@ from sim.dynamics.orbit.atmosphere import density_from_model
 from sim.dynamics.orbit.eclipse import resolve_srp_geometry, srp_shadow_factor
 from sim.dynamics.orbit.epoch import resolve_body_position_eci_km, resolve_sun_moon_positions
 from sim.dynamics.orbit.environment import (
+    EARTH_RADIUS_KM,
     JUPITER_MU_KM3_S2,
     MARS_MU_KM3_S2,
     MERCURY_MU_KM3_S2,
@@ -121,6 +122,9 @@ def spherical_harmonics_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: Or
         return np.zeros(3)
     fd_step_km = float(env.get("spherical_harmonics_fd_step_km", 1e-3))
     jd_utc_start = env.get("jd_utc_start")
+    re_km = float(env.get("spherical_harmonics_reference_radius_km", EARTH_RADIUS_KM))
+    frame_model = str(env.get("spherical_harmonics_frame_model", "simple"))
+    eop_path = env.get("spherical_harmonics_eop_path")
     if jd_utc_start is None and "jd_utc" in env:
         jd_utc_start = float(env["jd_utc"]) - float(t_s) / 86400.0
     return accel_spherical_harmonics_terms(
@@ -128,8 +132,11 @@ def spherical_harmonics_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: Or
         t_s=t_s,
         terms=terms,
         mu_km3_s2=ctx.mu_km3_s2,
+        re_km=re_km,
         fd_step_km=fd_step_km,
         jd_utc_start=None if jd_utc_start is None else float(jd_utc_start),
+        frame_model=frame_model,
+        eop_path=None if eop_path is None else str(eop_path),
     )
 
 
@@ -153,6 +160,10 @@ def drag_plugin(t_s: float, x_eci: np.ndarray, env: dict, ctx: OrbitContext) -> 
         {
             "density_kg_m3": density,
             "drag_area_m2": env.get("drag_area_m2", ctx.area_m2),
+            "jd_utc_start": env.get("jd_utc_start"),
+            "drag_frame_model": env.get("drag_frame_model", "simple"),
+            "drag_eop_path": env.get("drag_eop_path"),
+            "drag_earth_rotation_rad_s": env.get("drag_earth_rotation_rad_s"),
         },
     )
 
@@ -220,6 +231,8 @@ class OrbitPropagator:
     plugins: list[AccelerationPlugin] = field(default_factory=list)
     adaptive_atol: float = 1e-9
     adaptive_rtol: float = 1e-7
+    _rkf78_h_next: float | None = field(default=None, init=False, repr=False)
+    _rkf78_last_t_s: float | None = field(default=None, init=False, repr=False)
 
     def propagate(
         self,
@@ -241,6 +254,22 @@ class OrbitPropagator:
 
         if self.integrator in ("rkf78", "dopri5", "adaptive"):
             adaptive_method = "rkf78" if self.integrator in ("rkf78", "adaptive") else "dopri5"
+            if adaptive_method == "rkf78":
+                if self._rkf78_last_t_s is None or float(t_s) < float(self._rkf78_last_t_s) - 1e-12:
+                    self._rkf78_h_next = None
+                from sim.dynamics.orbit.integrators import integrate_rkf78_hpop
+
+                x_next, h_next = integrate_rkf78_hpop(
+                    deriv_fn=deriv,
+                    t_s=t_s,
+                    x=x_eci,
+                    dt_s=dt_s,
+                    tolerance=self.adaptive_rtol,
+                    h_init=self._rkf78_h_next,
+                )
+                self._rkf78_h_next = float(h_next)
+                self._rkf78_last_t_s = float(t_s + dt_s)
+                return x_next
             return integrate_adaptive(
                 deriv_fn=deriv,
                 t_s=t_s,

@@ -13,6 +13,7 @@ from sim.config import SimulationScenarioConfig, scenario_config_from_dict
 from sim.core.models import Command, StateBelief, StateTruth
 from sim.dynamics.attitude.rigid_body import get_attitude_guardrail_stats, reset_attitude_guardrail_stats
 from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
+from sim.dynamics.orbit.spherical_harmonics import configure_spherical_harmonics_env
 from sim.master_outputs import animate_outputs as _animate_outputs_impl
 from sim.master_outputs import plot_outputs as _plot_outputs_impl
 from sim.runtime_support import (
@@ -169,7 +170,9 @@ class _SingleRunEngine:
         dynamics_cfg = dict(cfg.simulator.dynamics or {})
         orbit_cfg = dict(dynamics_cfg.get("orbit", {}) or {})
         att_cfg = dict(dynamics_cfg.get("attitude", {}) or {})
-        self.base_environment = dict(cfg.simulator.environment or {})
+        self.base_environment = configure_spherical_harmonics_env(dict(cfg.simulator.environment or {}), orbit_cfg)
+        if cfg.simulator.initial_jd_utc is not None and "jd_utc_start" not in self.base_environment:
+            self.base_environment["jd_utc_start"] = float(cfg.simulator.initial_jd_utc)
         self.attitude_enabled = bool(att_cfg.get("enabled", True))
         orbit_substep_s = float(max(float(orbit_cfg.get("orbit_substep_s", self.dt) or self.dt), 1e-9))
         attitude_substep_s = float(max(float(att_cfg.get("attitude_substep_s", self.dt) or self.dt), 1e-9))

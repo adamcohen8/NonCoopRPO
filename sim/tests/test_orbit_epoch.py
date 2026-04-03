@@ -72,6 +72,16 @@ class OrbitEpochTests(unittest.TestCase):
         self.assertTrue(np.allclose(sun, np.array([10.0, 20.0, 30.0])))
         self.assertTrue(np.allclose(moon, np.array([40.0, 50.0, 60.0])))
 
+    def test_explicit_ephemeris_history_interpolates_moon(self):
+        env = {
+            "sun_pos_eci_km": np.array([1.0, 2.0, 3.0]),
+            "moon_ephemeris_time_s": [0.0, 10.0],
+            "moon_ephemeris_eci_km": [[4.0, 5.0, 6.0], [14.0, 15.0, 16.0]],
+        }
+        sun, moon = resolve_sun_moon_positions(env, t_s=5.0)
+        self.assertTrue(np.allclose(sun, np.array([1.0, 2.0, 3.0])))
+        self.assertTrue(np.allclose(moon, np.array([9.0, 10.0, 11.0])))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ import numpy as np
 from sim.dynamics.orbit.environment import EARTH_RADIUS_KM
 from sim.dynamics.orbit.frames import eci_to_ecef
 from sim.dynamics.orbit.epoch import julian_date_to_datetime
+from sim.dynamics.orbit.jb2008_backend import jb2008_density
 from sim.utils.geodesy import ecef_to_geodetic_deg_km
 
 AtmosphereModelName = Literal["exponential", "ussa1976", "nrlmsise00", "jb2008"]
@@ -209,11 +210,7 @@ def density_jb2008(r_eci_km: np.ndarray, t_s: float, env: dict | None = None) ->
     custom_fn = env.get("jb2008_density_callable", None)
     if callable(custom_fn):
         return float(max(0.0, custom_fn(alt_km, lat_deg, lon_deg, dt_utc, env)))
-
-    raise RuntimeError(
-        "JB2008 model requested but backend is unavailable. "
-        "Provide env['jb2008_density_callable']."
-    )
+    return float(max(0.0, jb2008_density(alt_km, lat_deg, lon_deg, dt_utc, env)))
 
 
 def atmosphere_state_from_model(

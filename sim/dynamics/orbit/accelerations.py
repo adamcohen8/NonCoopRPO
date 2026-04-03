@@ -7,6 +7,7 @@ import numpy as np
 from sim.dynamics.orbit.atmosphere import density_exponential
 from sim.dynamics.orbit.eclipse import resolve_srp_geometry, srp_shadow_factor
 from sim.dynamics.orbit.environment import EARTH_J2, EARTH_J3, EARTH_J4, EARTH_RADIUS_KM, EARTH_ROT_RATE_RAD_S, SOLAR_PRESSURE_N_M2
+from sim.dynamics.orbit.frames import eci_to_ecef_rotation, eci_to_ecef_rotation_hpop_like
 
 _OMEGA_EARTH_RAD_S = np.array([0.0, 0.0, EARTH_ROT_RATE_RAD_S], dtype=float)
 
@@ -122,16 +123,45 @@ def accel_drag(
     area_eff_m2 = float(env.get("drag_area_m2", area_m2))
     if area_eff_m2 <= 0.0:
         return np.zeros(3)
-    # Atmosphere assumed corotating with Earth about inertial z-axis.
-    v_atm_eci_km_s = np.array(
-        [
-            -EARTH_ROT_RATE_RAD_S * float(r_eci_km[1]),
-            EARTH_ROT_RATE_RAD_S * float(r_eci_km[0]),
-            0.0,
-        ],
-        dtype=float,
-    )
-    v_rel_eci_km_s = v_eci_km_s - v_atm_eci_km_s
+    drag_frame_model = str(env.get("drag_frame_model", "simple")).strip().lower()
+    jd_utc_start = env.get("jd_utc_start")
+    drag_eop_path = env.get("drag_eop_path")
+    omega_raw = env.get("drag_earth_rotation_rad_s", EARTH_ROT_RATE_RAD_S)
+    omega_earth_rad_s = float(EARTH_ROT_RATE_RAD_S if omega_raw is None else omega_raw)
+    if drag_frame_model in {"hpop_like", "simple"}:
+        if drag_frame_model == "hpop_like":
+            rot = eci_to_ecef_rotation_hpop_like(
+                float(t_s),
+                jd_utc_start=None if jd_utc_start is None else float(jd_utc_start),
+                eop_path=None if drag_eop_path is None else str(drag_eop_path),
+            )
+        else:
+            rot = eci_to_ecef_rotation(
+                float(t_s),
+                jd_utc_start=None if jd_utc_start is None else float(jd_utc_start),
+            )
+        r_frame_km = rot @ np.array(r_eci_km, dtype=float)
+        v_frame_km_s = rot @ np.array(v_eci_km_s, dtype=float)
+        v_atm_frame_km_s = np.array(
+            [
+                -omega_earth_rad_s * float(r_frame_km[1]),
+                omega_earth_rad_s * float(r_frame_km[0]),
+                0.0,
+            ],
+            dtype=float,
+        )
+        v_rel_eci_km_s = rot.T @ (v_frame_km_s - v_atm_frame_km_s)
+    else:
+        # Atmosphere assumed corotating with Earth about inertial z-axis.
+        v_atm_eci_km_s = np.array(
+            [
+                -omega_earth_rad_s * float(r_eci_km[1]),
+                omega_earth_rad_s * float(r_eci_km[0]),
+                0.0,
+            ],
+            dtype=float,
+        )
+        v_rel_eci_km_s = v_eci_km_s - v_atm_eci_km_s
     v_rel_m_s = v_rel_eci_km_s * 1e3
     v_norm2 = float(np.dot(v_rel_m_s, v_rel_m_s))
     if v_norm2 == 0.0:

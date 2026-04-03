@@ -9,7 +9,12 @@ import urllib.request
 import numpy as np
 
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
-from sim.dynamics.orbit.frames import ecef_to_eci, eci_to_ecef
+from sim.dynamics.orbit.frames import (
+    ecef_to_eci_harmonic,
+    eci_to_ecef_harmonic,
+    eci_to_ecef_rotation,
+    eci_to_ecef_rotation_hpop_like,
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,137 @@ def _term_potential_ecef_km2_s2(
     return float(mu_km3_s2 / r * (re_km / r) ** term.n * p_nm * amp)
 
 
+def _legendre_normalized_hpop(n_max: int, m_max: int, lat_gc_rad: float) -> tuple[np.ndarray, np.ndarray]:
+    pnm = np.zeros((n_max + 1, m_max + 1), dtype=float)
+    dpnm = np.zeros((n_max + 1, m_max + 1), dtype=float)
+
+    sin_f = float(np.sin(lat_gc_rad))
+    cos_f = float(np.cos(lat_gc_rad))
+    pnm[0, 0] = 1.0
+    dpnm[0, 0] = 0.0
+    if n_max >= 1 and m_max >= 1:
+        pnm[1, 1] = math.sqrt(3.0) * cos_f
+        dpnm[1, 1] = -math.sqrt(3.0) * sin_f
+
+    for i in range(2, n_max + 1):
+        if i <= m_max:
+            scale = math.sqrt((2.0 * i + 1.0) / (2.0 * i))
+            pnm[i, i] = scale * cos_f * pnm[i - 1, i - 1]
+            dpnm[i, i] = scale * (cos_f * dpnm[i - 1, i - 1] - sin_f * pnm[i - 1, i - 1])
+
+    for i in range(1, n_max + 1):
+        m = i - 1
+        if m <= m_max:
+            scale = math.sqrt(2.0 * i + 1.0)
+            pnm[i, m] = scale * sin_f * pnm[i - 1, m]
+            dpnm[i, m] = scale * (cos_f * pnm[i - 1, m] + sin_f * dpnm[i - 1, m])
+
+    j = 0
+    k = 2
+    while j <= m_max:
+        for i in range(k, n_max + 1):
+            a = math.sqrt((2.0 * i + 1.0) / ((i - j) * (i + j)))
+            b = math.sqrt(2.0 * i - 1.0) * sin_f * pnm[i - 1, j]
+            c = math.sqrt(((i + j - 1.0) * (i - j - 1.0)) / (2.0 * i - 3.0)) * pnm[i - 2, j]
+            pnm[i, j] = a * (b - c)
+            db = math.sqrt(2.0 * i - 1.0) * sin_f * dpnm[i - 1, j]
+            dc = math.sqrt(2.0 * i - 1.0) * cos_f * pnm[i - 1, j]
+            dd = math.sqrt(((i + j - 1.0) * (i - j - 1.0)) / (2.0 * i - 3.0)) * dpnm[i - 2, j]
+            dpnm[i, j] = a * (db + dc - dd)
+        j += 1
+        k += 1
+    return pnm, dpnm
+
+
+def _two_body_accel_km_s2(r_eci_km: np.ndarray, mu_km3_s2: float) -> np.ndarray:
+    r2 = float(np.dot(r_eci_km, r_eci_km))
+    if r2 <= 0.0:
+        return np.zeros(3, dtype=float)
+    r = math.sqrt(r2)
+    return (-mu_km3_s2 / (r * r2)) * np.array(r_eci_km, dtype=float)
+
+
+def _harmonic_rotation_matrix(
+    t_s: float,
+    jd_utc_start: float | None,
+    frame_model: str,
+    eop_path: str | None,
+) -> np.ndarray:
+    model = str(frame_model).strip().lower()
+    if model == "hpop_like":
+        return eci_to_ecef_rotation_hpop_like(t_s, jd_utc_start=jd_utc_start, eop_path=eop_path)
+    return eci_to_ecef_rotation(t_s, jd_utc_start=jd_utc_start)
+
+
+def _analytic_harmonic_accel_hpop_eci_km_s2(
+    *,
+    r_eci_km: np.ndarray,
+    t_s: float,
+    terms: list[SphericalHarmonicTerm],
+    mu_km3_s2: float,
+    re_km: float,
+    jd_utc_start: float | None,
+    frame_model: str,
+    eop_path: str | None,
+) -> np.ndarray:
+    n_max = max(term.n for term in terms)
+    m_max = max(term.m for term in terms)
+    c_nm = np.zeros((n_max + 1, m_max + 1), dtype=float)
+    s_nm = np.zeros((n_max + 1, m_max + 1), dtype=float)
+    c_nm[0, 0] = 1.0
+    for term in terms:
+        c_nm[term.n, term.m] = float(term.c_nm)
+        s_nm[term.n, term.m] = float(term.s_nm)
+
+    e_mat = _harmonic_rotation_matrix(
+        t_s=float(t_s),
+        jd_utc_start=jd_utc_start,
+        frame_model=frame_model,
+        eop_path=eop_path,
+    )
+    r_eci = np.array(r_eci_km, dtype=float).reshape(3)
+    r_bf = e_mat @ r_eci
+    d = float(np.linalg.norm(r_bf))
+    if d <= 0.0:
+        return np.zeros(3, dtype=float)
+    lat_gc = math.asin(float(r_bf[2]) / d)
+    lon = math.atan2(float(r_bf[1]), float(r_bf[0]))
+    pnm, dpnm = _legendre_normalized_hpop(n_max=n_max, m_max=m_max, lat_gc_rad=lat_gc)
+
+    dUdr = 0.0
+    dUdlatgc = 0.0
+    dUdlon = 0.0
+    for n in range(0, n_max + 1):
+        b1 = (-mu_km3_s2 / (d * d)) * (re_km / d) ** n * (n + 1.0)
+        b2 = (mu_km3_s2 / d) * (re_km / d) ** n
+        b3 = b2
+        q1 = 0.0
+        q2 = 0.0
+        q3 = 0.0
+        for m in range(0, min(m_max, n) + 1):
+            cos_ml = math.cos(m * lon)
+            sin_ml = math.sin(m * lon)
+            amp = c_nm[n, m] * cos_ml + s_nm[n, m] * sin_ml
+            q1 += pnm[n, m] * amp
+            q2 += dpnm[n, m] * amp
+            q3 += m * pnm[n, m] * (s_nm[n, m] * cos_ml - c_nm[n, m] * sin_ml)
+        dUdr += q1 * b1
+        dUdlatgc += q2 * b2
+        dUdlon += q3 * b3
+
+    r2xy = float(r_bf[0] * r_bf[0] + r_bf[1] * r_bf[1])
+    if r2xy <= 0.0:
+        r2xy = np.finfo(float).eps
+    sqrt_r2xy = math.sqrt(r2xy)
+    common = (1.0 / d) * dUdr - (float(r_bf[2]) / (d * d * sqrt_r2xy)) * dUdlatgc
+    ax = common * float(r_bf[0]) - (1.0 / r2xy) * dUdlon * float(r_bf[1])
+    ay = common * float(r_bf[1]) + (1.0 / r2xy) * dUdlon * float(r_bf[0])
+    az = (1.0 / d) * dUdr * float(r_bf[2]) + (sqrt_r2xy / (d * d)) * dUdlatgc
+    a_bf = np.array([ax, ay, az], dtype=float)
+    a_eci_full = e_mat.T @ a_bf
+    return a_eci_full - _two_body_accel_km_s2(r_eci, mu_km3_s2)
+
+
 def accel_spherical_harmonics_terms(
     r_eci_km: np.ndarray,
     t_s: float,
@@ -93,6 +229,8 @@ def accel_spherical_harmonics_terms(
     re_km: float = EARTH_RADIUS_KM,
     fd_step_km: float = 1e-3,
     jd_utc_start: float | None = None,
+    frame_model: str = "simple",
+    eop_path: str | None = None,
 ) -> np.ndarray:
     """
     Acceleration in ECI from arbitrary spherical-harmonic terms (n,m).
@@ -101,10 +239,27 @@ def accel_spherical_harmonics_terms(
     """
     if not terms:
         return np.zeros(3)
+    if all(bool(term.normalized) for term in terms):
+        return _analytic_harmonic_accel_hpop_eci_km_s2(
+            r_eci_km=r_eci_km,
+            t_s=t_s,
+            terms=terms,
+            mu_km3_s2=mu_km3_s2,
+            re_km=re_km,
+            jd_utc_start=jd_utc_start,
+            frame_model=frame_model,
+            eop_path=eop_path,
+        )
+    r_ecef = eci_to_ecef_harmonic(
+        np.array(r_eci_km, dtype=float),
+        float(t_s),
+        jd_utc_start=jd_utc_start,
+        frame_model=frame_model,
+        eop_path=eop_path,
+    )
+
     if fd_step_km <= 0.0:
         raise ValueError("fd_step_km must be positive.")
-
-    r_ecef = eci_to_ecef(np.array(r_eci_km, dtype=float), float(t_s), jd_utc_start=jd_utc_start)
 
     def _u_at(pos_ecef_km: np.ndarray) -> float:
         u = 0.0
@@ -122,7 +277,88 @@ def accel_spherical_harmonics_terms(
         grad_ecef[i] = (up - um) / (2.0 * h)
 
     # Gravity acceleration equals gradient of potential.
-    return ecef_to_eci(grad_ecef, float(t_s), jd_utc_start=jd_utc_start)
+    return ecef_to_eci_harmonic(
+        grad_ecef,
+        float(t_s),
+        jd_utc_start=jd_utc_start,
+        frame_model=frame_model,
+        eop_path=eop_path,
+    )
+
+
+def default_hpop_ggm03_coeff_path() -> Path:
+    return Path(__file__).resolve().parents[3] / "validation" / "High Precision Orbit Propagator_4-2" / "High Precision Orbit Propagator_4.2.2" / "GGM03C.txt"
+
+
+def configure_spherical_harmonics_env(base_env: dict | None, orbit_cfg: dict | None) -> dict:
+    env = dict(base_env or {})
+    orbit = dict(orbit_cfg or {})
+    sh = dict(orbit.get("spherical_harmonics", {}) or {})
+    drag_frame_model = orbit.get("drag_frame_model")
+    if drag_frame_model is not None:
+        env["drag_frame_model"] = str(drag_frame_model)
+    drag_eop_path_raw = orbit.get("drag_eop_path")
+    if drag_eop_path_raw is not None:
+        drag_eop_path = Path(str(drag_eop_path_raw)).expanduser()
+        if not drag_eop_path.is_absolute():
+            drag_eop_path = Path(__file__).resolve().parents[3] / drag_eop_path
+        env["drag_eop_path"] = str(drag_eop_path.resolve())
+    if orbit.get("drag_earth_rotation_rad_s") is not None:
+        env["drag_earth_rotation_rad_s"] = float(orbit["drag_earth_rotation_rad_s"])
+    if not bool(sh.get("enabled", False)):
+        if str(env.get("drag_frame_model", "")).strip().lower() == "hpop_like" and env.get("drag_eop_path") is None:
+            default_eop = Path(__file__).resolve().parents[3] / "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/EOP-All.txt"
+            env["drag_eop_path"] = str(default_eop.resolve())
+        return env
+
+    degree = int(max(int(sh.get("degree", 0) or 0), 0))
+    if degree < 2:
+        return env
+    order_raw = sh.get("order", degree)
+    order = int(max(min(int(degree if order_raw is None else order_raw), degree), 0))
+    source = str(sh.get("source", sh.get("model", "")) or "").strip().lower()
+
+    if source in {"hpop", "hpop_ggm03", "ggm03"}:
+        coeff_path_raw = sh.get("coeff_path") or sh.get("source_path")
+        coeff_path = default_hpop_ggm03_coeff_path() if coeff_path_raw in (None, "") else Path(str(coeff_path_raw)).expanduser()
+        if not coeff_path.is_absolute():
+            coeff_path = Path(__file__).resolve().parents[3] / coeff_path
+        terms = load_hpop_ggm03_terms(
+            coeff_path=coeff_path,
+            max_degree=degree,
+            max_order=order,
+            normalized=bool(sh.get("normalized", True)),
+        )
+        env["spherical_harmonics_terms"] = terms
+        env["spherical_harmonics_source"] = str(coeff_path.resolve())
+        env["spherical_harmonics_reference_radius_km"] = float(sh.get("reference_radius_km", 6378.1363))
+        env["spherical_harmonics_frame_model"] = str(sh.get("frame_model", "hpop_like"))
+        eop_path_raw = sh.get("eop_path") or "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/EOP-All.txt"
+        eop_path = Path(str(eop_path_raw)).expanduser()
+        if not eop_path.is_absolute():
+            eop_path = Path(__file__).resolve().parents[3] / eop_path
+        env["spherical_harmonics_eop_path"] = str(eop_path.resolve())
+    elif "terms" in sh:
+        env["spherical_harmonics_terms"] = parse_spherical_harmonic_terms(sh.get("terms"))
+        if sh.get("reference_radius_km") is not None:
+            env["spherical_harmonics_reference_radius_km"] = float(sh["reference_radius_km"])
+        if sh.get("frame_model") is not None:
+            env["spherical_harmonics_frame_model"] = str(sh["frame_model"])
+        if sh.get("eop_path") is not None:
+            eop_path = Path(str(sh["eop_path"])).expanduser()
+            if not eop_path.is_absolute():
+                eop_path = Path(__file__).resolve().parents[3] / eop_path
+            env["spherical_harmonics_eop_path"] = str(eop_path.resolve())
+
+    if sh.get("fd_step_km") is not None:
+        env["spherical_harmonics_fd_step_km"] = float(sh["fd_step_km"])
+    if str(env.get("drag_frame_model", "")).strip().lower() == "hpop_like" and env.get("drag_eop_path") is None:
+        if env.get("spherical_harmonics_eop_path") is not None:
+            env["drag_eop_path"] = str(env["spherical_harmonics_eop_path"])
+        else:
+            default_eop = Path(__file__).resolve().parents[3] / "validation/High Precision Orbit Propagator_4-2/High Precision Orbit Propagator_4.2.2/EOP-All.txt"
+            env["drag_eop_path"] = str(default_eop.resolve())
+    return env
 
 
 def _fully_normalized_legendre_scale(n: int, m: int) -> float:

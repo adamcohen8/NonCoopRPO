@@ -194,6 +194,40 @@ class TestValidationHarnessExecution(unittest.TestCase):
             self.assertEqual(bench["baseline_path"], str(baseline_path.resolve()))
             self.assertTrue(all(row["passed"] for row in bench["baseline_evaluations"]))
 
+    @patch("validation.matlab_hpop_bridge.run_matlab_hpop_validation")
+    def test_run_harness_matlab_hpop_benchmark(self, mock_run_matlab_hpop_validation):
+        mock_run_matlab_hpop_validation.return_value = {
+            "pos_err_rms_m": 1.0,
+            "pos_err_max_m": 2.0,
+            "vel_err_rms_mm_s": 3.0,
+            "vel_err_max_mm_s": 4.0,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "case.yaml"
+            cfg_path.write_text("scenario_name: demo\nsimulator:\n  duration_s: 10.0\n  dt_s: 1.0\n", encoding="utf-8")
+            spec_path = Path(tmpdir) / "spec.yaml"
+            spec_path.write_text(
+                "\n".join(
+                    [
+                        'suite_name: "matlab_hpop_only"',
+                        'output_dir: "outputs/matlab_hpop_only"',
+                        "benchmarks:",
+                        '  - name: "matlab_hpop_case"',
+                        '    kind: "matlab_hpop"',
+                        f'    config_path: "{cfg_path.name}"',
+                        "    checks:",
+                        "      pos_err_max_m:",
+                        "        max: 10.0",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            spec = load_harness_spec(spec_path)
+            report = run_harness(spec, base_dir=spec_path.parent)
+            self.assertTrue(report["passed"])
+            self.assertEqual(report["benchmarks"][0]["kind"], "matlab_hpop")
+            self.assertTrue(report["benchmarks"][0]["evaluations"][0]["passed"])
+
     def test_markdown_report_contains_baseline_table(self):
         md = _build_markdown_report(
             {

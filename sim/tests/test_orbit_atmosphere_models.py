@@ -70,10 +70,11 @@ class TestOrbitAtmosphereModels(unittest.TestCase):
         self.assertAlmostEqual(rho, 4.56e-12)
         self.assertEqual(len(calls), 1)
 
-    def test_density_jb2008_without_backend_raises(self):
+    def test_density_jb2008_builtin_backend_returns_finite_density(self):
         r = np.array([7000.0, 0.0, 0.0], dtype=float)
-        with self.assertRaises(RuntimeError):
-            _ = density_from_model("jb2008", r, t_s=60.0, env={})
+        rho = density_from_model("jb2008", r, t_s=60.0, env={"jd_utc_start": 2460400.5, "geodetic_model": "wgs84"})
+        self.assertTrue(np.isfinite(rho))
+        self.assertGreaterEqual(rho, 0.0)
 
     def test_drag_uses_rotating_atmosphere_relative_velocity(self):
         r = np.array([7000.0, 0.0, 0.0], dtype=float)
