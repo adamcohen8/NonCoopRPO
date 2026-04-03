@@ -16,6 +16,7 @@ examples/outputs/
 examples/Academic/
 **/lightning_logs/
 configs/inactive/
+sim/tests/test_hcw_paper_analysis.py
 
 # OS/editor noise
 .DS_Store
