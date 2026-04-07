@@ -102,6 +102,16 @@ chaser:
       design_dt_s: 10.0
       ric_curv_state_slice: [0, 6]
       chief_eci_state_slice: [6, 12]
+      # Optional no-radial-burn variant:
+      # module: "sim.control.orbit.lqr_no_radial"
+      # class_name: "HCWNoRadialLQRController"
+      # params:
+      #   mean_motion_rad_s: 0.001078
+      #   max_accel_km_s2: 2.0e-6
+      #   design_dt_s: 10.0
+      #   ric_curv_state_slice: [0, 6]
+      #   chief_eci_state_slice: [6, 12]
+      #   r_weights: [1.94e13, 1.94e13]
   attitude_control:
     kind: "python"
     module: "sim.control.attitude.surrogate_snap"
@@ -155,6 +165,8 @@ chaser:
 target:
   enabled: true
   role: "target"
+  reference_orbit:
+    enabled: false
   specs:
     preset_satellite: "BASIC_SATELLITE"
     mass_kg: 400.0
@@ -169,6 +181,8 @@ target:
       true_anomaly_deg: 0.0
     attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
     angular_rate_body_rad_s: [0.0, 0.0, 0.0]
+    # When target.reference_orbit.enabled is true, a passive reference orbit is propagated
+    # from this same initial position/velocity for RIC-frame plotting.
   orbit_control:
     kind: "python"
     module: "sim.control.orbit.zero_controller"
@@ -336,6 +350,32 @@ outputs:
     types:
       - "ground_track_multi"
       - "ground_track"
+      # - "attitude_ric_thruster"
+      # - "battlespace_dashboard"
+      # - "target_reference_ric_curv_3d"
+      # - "target_reference_ric_curv_2d"
+      # - "target_reference_ric_curv_2d_ri"
+      # - "target_reference_ric_curv_2d_ic"
+      # - "target_reference_ric_curv_2d_rc"
+    # attitude_ric_thruster_object_ids: ["target", "chaser"]
+    # attitude_ric_thruster_dims_m:
+    #   target: [1.0, 1.0, 1.0]
+    #   chaser: [1.0, 1.0, 1.0]
+    # attitude_ric_thruster_active_threshold_km_s2: 1.0e-15
+    # battlespace_dashboard_target_object_id: "target"
+    # battlespace_dashboard_chaser_object_id: "chaser"
+    # battlespace_dashboard_show_trajectory: true
+    # battlespace_dashboard_attitude_dims_m:
+    #   target: [1.0, 1.0, 1.0]
+    #   chaser: [1.0, 1.0, 1.0]
+    # battlespace_dashboard_thruster_active_threshold_km_s2: 1.0e-15
+    # target_reference_ric_curv_object_ids: ["target", "chaser"]
+    # target_reference_ric_curv_3d_show_trajectory: true
+    # target_reference_ric_curv_2d_show_trajectory: true
+    # target_reference_ric_curv_2d_planes: ["ri", "ic", "rc"]
+    # target_reference_ric_curv_2d_ri_show_trajectory: true
+    # target_reference_ric_curv_2d_ic_show_trajectory: true
+    # target_reference_ric_curv_2d_rc_show_trajectory: true
     fps: 30
     speed_multiple: 5.0
     frame_stride: 2

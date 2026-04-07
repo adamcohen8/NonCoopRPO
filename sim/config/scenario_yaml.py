@@ -31,6 +31,7 @@ class AgentSection:
     role: str = "agent"
     specs: dict[str, Any] = field(default_factory=dict)
     initial_state: dict[str, Any] = field(default_factory=dict)
+    reference_orbit: dict[str, Any] = field(default_factory=dict)
     guidance: AlgorithmPointer | None = None
     base_guidance: AlgorithmPointer | None = None
     guidance_modifiers: list[AlgorithmPointer] = field(default_factory=list)
@@ -166,6 +167,8 @@ def _parse_algorithm_pointer(value: Any) -> AlgorithmPointer | None:
     if isinstance(value, str):
         return AlgorithmPointer(module=value)
     d = _as_dict(value, "algorithm_pointer")
+    if d.get("file") not in (None, ""):
+        raise ValueError("Algorithm pointers do not support 'file'; use importable 'module' paths instead.")
     return AlgorithmPointer(
         kind=str(d.get("kind", "python")),
         module=d.get("module"),
@@ -218,6 +221,7 @@ def _parse_agent_section(value: Any, role: str) -> AgentSection:
         role=str(d.get("role", role)),
         specs=dict(d.get("specs", {}) or {}),
         initial_state=dict(d.get("initial_state", {}) or {}),
+        reference_orbit=dict(d.get("reference_orbit", {}) or {}),
         guidance=_parse_algorithm_pointer(legacy_guidance),
         base_guidance=_parse_algorithm_pointer(base_guidance),
         guidance_modifiers=[p for p in (_parse_algorithm_pointer(x) for x in guidance_modifiers) if p is not None],
@@ -460,7 +464,7 @@ def scenario_config_from_dict(data: dict[str, Any]) -> SimulationScenarioConfig:
     legacy_mc = _parse_monte_carlo_section(root.get("monte_carlo"))
     analysis = _parse_analysis_section(root.get("analysis"), legacy_mc=legacy_mc)
     normalized_mc, normalized_analysis = _normalize_analysis_and_monte_carlo(legacy_mc, analysis)
-    return SimulationScenarioConfig(
+    cfg = SimulationScenarioConfig(
         scenario_name=str(root.get("scenario_name", "unnamed_scenario")),
         scenario_description=str(root.get("scenario_description", "") or ""),
         rocket=_parse_agent_section(root.get("rocket"), role="rocket"),
@@ -472,6 +476,9 @@ def scenario_config_from_dict(data: dict[str, Any]) -> SimulationScenarioConfig:
         analysis=normalized_analysis,
         metadata=dict(root.get("metadata", {}) or {}),
     )
+    if bool(dict(cfg.target.reference_orbit or {}).get("enabled", False)) and (not bool(cfg.target.enabled)):
+        raise ValueError("target.reference_orbit.enabled requires target.enabled to be true.")
+    return cfg
 
 
 def load_simulation_yaml(path: str | Path) -> SimulationScenarioConfig:

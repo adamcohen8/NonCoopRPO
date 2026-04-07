@@ -6,6 +6,7 @@ from typing import Any, Callable
 import numpy as np
 
 from sim.presets.rockets import RocketStackPreset
+from sim.presets.thrusters import resolve_thruster_mount_from_specs
 from sim.config import SimulationScenarioConfig
 from sim.dynamics.orbit.environment import EARTH_MU_KM3_S2, EARTH_RADIUS_KM
 from sim.utils.figure_size import cap_figsize
@@ -48,16 +49,27 @@ AVAILABLE_FIGURE_IDS = [
 AVAILABLE_ANIMATION_TYPES = [
     "ground_track",
     "ground_track_multi",
+    "attitude_ric_thruster",
+    "battlespace_dashboard",
     "ric_curv_prism_multi",
     "ric_prism_side_by_side",
+    "target_reference_ric_curv_3d",
+    "target_reference_ric_curv_2d",
+    "target_reference_ric_curv_2d_ri",
+    "target_reference_ric_curv_2d_ic",
+    "target_reference_ric_curv_2d_rc",
 ]
 
 
 def _load_plotting_functions() -> dict[str, Any]:
     from sim.utils.plotting import plot_attitude_tumble, plot_orbit_eci
     from sim.utils.plotting_capabilities import (
+        animate_battlespace_dashboard,
+        animate_rectangular_prism_attitude,
         animate_ground_track,
+        animate_multi_ric_2d_projections,
         animate_multi_ground_track,
+        animate_multi_trajectory_frame,
         animate_multi_rectangular_prism_ric_curv,
         animate_side_by_side_rectangular_prism_ric_attitude,
         plot_body_rates,
@@ -73,9 +85,13 @@ def _load_plotting_functions() -> dict[str, Any]:
     return {
         "plot_orbit_eci": plot_orbit_eci,
         "plot_attitude_tumble": plot_attitude_tumble,
+        "animate_battlespace_dashboard": animate_battlespace_dashboard,
+        "animate_rectangular_prism_attitude": animate_rectangular_prism_attitude,
+        "animate_multi_ric_2d_projections": animate_multi_ric_2d_projections,
         "plot_body_rates": plot_body_rates,
         "plot_control_commands": plot_control_commands,
         "plot_multi_control_commands": plot_multi_control_commands,
+        "animate_multi_trajectory_frame": animate_multi_trajectory_frame,
         "plot_multi_ric_2d_projections": plot_multi_ric_2d_projections,
         "plot_multi_trajectory_frame": plot_multi_trajectory_frame,
         "plot_quaternion_components": plot_quaternion_components,
@@ -120,11 +136,65 @@ def _orbital_elements_basic(
     return a, e
 
 
+def _compute_satellite_delta_v_remaining(
+    *,
+    cfg: SimulationScenarioConfig,
+    truth_hist: dict[str, np.ndarray],
+    resolve_satellite_isp_s: Callable[[dict[str, Any]], float],
+) -> dict[str, dict[str, Any]]:
+    g0_m_s2 = 9.80665
+    section_by_id = {"chaser": cfg.chaser, "target": cfg.target}
+    out: dict[str, dict[str, Any]] = {}
+    for oid in ("chaser", "target"):
+        hist = truth_hist.get(oid)
+        sec = section_by_id.get(oid)
+        if hist is None or sec is None or hist.shape[0] == 0:
+            continue
+        specs = dict(getattr(sec, "specs", {}) or {})
+        dry_mass_kg = float(specs.get("dry_mass_kg", np.nan))
+        fuel_mass_kg = float(specs.get("fuel_mass_kg", np.nan))
+        if not (np.isfinite(dry_mass_kg) and np.isfinite(fuel_mass_kg)):
+            continue
+        if dry_mass_kg <= 0.0 or fuel_mass_kg < 0.0:
+            continue
+        m0 = dry_mass_kg + fuel_mass_kg
+        if m0 <= dry_mass_kg:
+            continue
+        isp_s = resolve_satellite_isp_s(specs)
+        if isp_s <= 0.0:
+            continue
+        dv0_m_s = float(isp_s * g0_m_s2 * np.log(m0 / dry_mass_kg))
+        if dv0_m_s <= 0.0:
+            continue
+        m_hist = np.clip(np.array(hist[:, 13], dtype=float), dry_mass_kg, m0)
+        dv_rem_m_s = isp_s * g0_m_s2 * np.log(m_hist / dry_mass_kg)
+        out[oid] = {
+            "initial_m_s": dv0_m_s,
+            "remaining_m_s": dv_rem_m_s,
+        }
+    return out
+
+
+def _thruster_mounts_by_object(cfg: SimulationScenarioConfig) -> dict[str, dict[str, np.ndarray] | None]:
+    out: dict[str, dict[str, np.ndarray] | None] = {}
+    for oid, sec in (("target", cfg.target), ("chaser", cfg.chaser)):
+        mount = resolve_thruster_mount_from_specs(getattr(sec, "specs", None) if sec is not None else None)
+        if mount is None:
+            out[oid] = None
+            continue
+        out[oid] = {
+            "position_body_m": np.array(mount.position_body_m, dtype=float),
+            "direction_body": np.array(mount.thrust_direction_body, dtype=float),
+        }
+    return out
+
+
 def plot_outputs(
     *,
     cfg: SimulationScenarioConfig,
     t_s: np.ndarray,
     truth_hist: dict[str, np.ndarray],
+    target_reference_orbit_truth: np.ndarray | None,
     thrust_hist: dict[str, np.ndarray],
     desired_attitude_hist: dict[str, np.ndarray] | None,
     knowledge_hist: dict[str, dict[str, np.ndarray]],
@@ -140,18 +210,28 @@ def plot_outputs(
     figure_ids = list(cfg.outputs.plots.get("figure_ids", []) or [])
     ric_2d_planes = list(cfg.outputs.plots.get("ric_2d_planes", ["ri", "ic", "rc"]) or ["ri", "ic", "rc"])
     reference_object_id = str(cfg.outputs.plots.get("reference_object_id", "")).strip()
-    if reference_object_id and reference_object_id not in truth_hist:
+    reference_truth_override = None
+    if target_reference_orbit_truth is not None:
+        ref_arr = np.array(target_reference_orbit_truth, dtype=float)
+        if ref_arr.ndim == 2 and ref_arr.shape[1] >= 6 and np.any(np.isfinite(ref_arr[:, 0])):
+            reference_truth_override = ref_arr
+    if reference_truth_override is not None:
+        reference_truth = reference_truth_override
+        ric_truth_hist = dict(truth_hist)
         reference_object_id = ""
-    if not reference_object_id and "target" in truth_hist:
-        reference_object_id = "target"
-    if not reference_object_id and truth_hist:
-        reference_object_id = sorted(truth_hist.keys())[0]
-    reference_truth = truth_hist.get(reference_object_id) if reference_object_id else None
-    ric_truth_hist = (
-        {oid: hist for oid, hist in truth_hist.items() if oid != reference_object_id}
-        if reference_object_id
-        else dict(truth_hist)
-    )
+    else:
+        if reference_object_id and reference_object_id not in truth_hist:
+            reference_object_id = ""
+        if not reference_object_id and "target" in truth_hist:
+            reference_object_id = "target"
+        if not reference_object_id and truth_hist:
+            reference_object_id = sorted(truth_hist.keys())[0]
+        reference_truth = truth_hist.get(reference_object_id) if reference_object_id else None
+        ric_truth_hist = (
+            {oid: hist for oid, hist in truth_hist.items() if oid != reference_object_id}
+            if reference_object_id
+            else dict(truth_hist)
+        )
     if not figure_ids:
         return out
     plot_fns = _load_plotting_functions()
@@ -512,36 +592,23 @@ def plot_outputs(
         if mode == "save":
             plt.close(fig)
 
+    satellite_dv_by_object = _compute_satellite_delta_v_remaining(
+        cfg=cfg,
+        truth_hist=truth_hist,
+        resolve_satellite_isp_s=resolve_satellite_isp_s,
+    )
+
     if "satellite_delta_v_remaining" in figure_ids:
         import matplotlib.pyplot as plt
 
-        g0_m_s2 = 9.80665
-        section_by_id = {"chaser": cfg.chaser, "target": cfg.target}
         fig, ax = plt.subplots(figsize=cap_figsize(10, 5))
         plotted = False
         for oid in ("chaser", "target"):
-            hist = truth_hist.get(oid)
-            sec = section_by_id.get(oid)
-            if hist is None or sec is None or hist.shape[0] == 0:
+            dv_entry = satellite_dv_by_object.get(oid)
+            if dv_entry is None:
                 continue
-            specs = dict(getattr(sec, "specs", {}) or {})
-            dry_mass_kg = float(specs.get("dry_mass_kg", np.nan))
-            fuel_mass_kg = float(specs.get("fuel_mass_kg", np.nan))
-            if not (np.isfinite(dry_mass_kg) and np.isfinite(fuel_mass_kg)):
-                continue
-            if dry_mass_kg <= 0.0 or fuel_mass_kg < 0.0:
-                continue
-            m0 = dry_mass_kg + fuel_mass_kg
-            if m0 <= dry_mass_kg:
-                continue
-            isp_s = resolve_satellite_isp_s(specs)
-            if isp_s <= 0.0:
-                continue
-            dv0_m_s = float(isp_s * g0_m_s2 * np.log(m0 / dry_mass_kg))
-            if dv0_m_s <= 0.0:
-                continue
-            m_hist = np.clip(np.array(hist[:, 13], dtype=float), dry_mass_kg, m0)
-            dv_rem_m_s = isp_s * g0_m_s2 * np.log(m_hist / dry_mass_kg)
+            dv0_m_s = float(dv_entry["initial_m_s"])
+            dv_rem_m_s = np.array(dv_entry["remaining_m_s"], dtype=float)
             pct = np.clip(100.0 * dv_rem_m_s / dv0_m_s, 0.0, 100.0)
             ax.plot(t_s[: pct.size], pct, label=f"{oid}")
             plotted = True
@@ -744,7 +811,10 @@ def animate_outputs(
     cfg: SimulationScenarioConfig,
     t_s: np.ndarray,
     truth_hist: dict[str, np.ndarray],
+    thrust_hist: dict[str, np.ndarray],
+    target_reference_orbit_truth: np.ndarray | None,
     outdir: Path,
+    resolve_satellite_isp_s: Callable[[dict[str, Any]], float],
 ) -> dict[str, str]:
     out: dict[str, str] = {}
     anim_cfg = dict(cfg.outputs.animations or {})
@@ -760,10 +830,63 @@ def animate_outputs(
     if not types:
         return out
     plot_fns = _load_plotting_functions()
+    animate_battlespace_dashboard = plot_fns["animate_battlespace_dashboard"]
+    animate_rectangular_prism_attitude = plot_fns["animate_rectangular_prism_attitude"]
     animate_ground_track = plot_fns["animate_ground_track"]
+    animate_multi_ric_2d_projections = plot_fns["animate_multi_ric_2d_projections"]
     animate_multi_ground_track = plot_fns["animate_multi_ground_track"]
+    animate_multi_trajectory_frame = plot_fns["animate_multi_trajectory_frame"]
     animate_multi_rectangular_prism_ric_curv = plot_fns["animate_multi_rectangular_prism_ric_curv"]
     animate_side_by_side_rectangular_prism_ric_attitude = plot_fns["animate_side_by_side_rectangular_prism_ric_attitude"]
+    satellite_dv_by_object = _compute_satellite_delta_v_remaining(
+        cfg=cfg,
+        truth_hist=truth_hist,
+        resolve_satellite_isp_s=resolve_satellite_isp_s,
+    )
+
+    if "attitude_ric_thruster" in types:
+        dims_map_raw = anim_cfg.get("attitude_ric_thruster_dims_m", {})
+        dims_map = dict(dims_map_raw) if isinstance(dims_map_raw, dict) else {}
+        thruster_mounts = _thruster_mounts_by_object(cfg)
+        object_ids = anim_cfg.get("attitude_ric_thruster_object_ids")
+        if isinstance(object_ids, list):
+            attitude_object_ids = [str(oid) for oid in object_ids if str(oid) in truth_hist]
+        else:
+            attitude_object_ids = sorted(truth_hist.keys())
+        active_threshold = float(anim_cfg.get("attitude_ric_thruster_active_threshold_km_s2", 1e-15))
+        default_dims_m = np.array([4.0, 2.0, 2.0], dtype=float)
+        for oid in attitude_object_ids:
+            hist = np.array(truth_hist.get(oid, np.array([])), dtype=float)
+            if hist.ndim != 2 or hist.shape[0] == 0 or not np.any(np.isfinite(hist[:, 0])):
+                continue
+            dims = np.array(dims_map.get(oid, default_dims_m), dtype=float).reshape(-1)
+            if dims.size != 3:
+                dims = default_dims_m.copy()
+            thrust = np.array(thrust_hist.get(oid, np.zeros((hist.shape[0], 3))), dtype=float)
+            thrust_norm = (
+                np.linalg.norm(np.nan_to_num(thrust, nan=0.0), axis=1)
+                if thrust.ndim == 2
+                else np.zeros(hist.shape[0], dtype=float)
+            )
+            active_mask = thrust_norm > active_threshold
+            p = outdir / f"{oid}_attitude_ric_thruster.mp4"
+            animate_rectangular_prism_attitude(
+                t_s=t_s[: hist.shape[0]],
+                truth_hist=hist,
+                lx_m=float(dims[0]),
+                ly_m=float(dims[1]),
+                lz_m=float(dims[2]),
+                frame="ric",
+                thruster_active_mask=active_mask,
+                thruster_position_body_m=None if thruster_mounts.get(oid) is None else thruster_mounts[oid]["position_body_m"],
+                thruster_direction_body=None if thruster_mounts.get(oid) is None else thruster_mounts[oid]["direction_body"],
+                mode=mode,
+                out_path=str(p),
+                fps=fps,
+                speed_multiple=speed_multiple,
+            )
+            if mode in ("save", "both"):
+                out[f"{oid}_attitude_ric_thruster"] = str(p)
 
     if "ground_track_multi" in types:
         p = outdir / "ground_track_multi.mp4"
@@ -849,5 +972,113 @@ def animate_outputs(
         )
         if mode in ("save", "both"):
             out["ric_prism_side_by_side"] = str(p)
+
+    reference_truth = None
+    if target_reference_orbit_truth is not None:
+        ref_arr = np.array(target_reference_orbit_truth, dtype=float)
+        if ref_arr.ndim == 2 and ref_arr.shape[1] >= 6 and np.any(np.isfinite(ref_arr[:, 0])):
+            reference_truth = ref_arr
+    if reference_truth is not None:
+        object_ids = anim_cfg.get("target_reference_ric_curv_object_ids")
+        if isinstance(object_ids, list):
+            ref_object_ids = [str(oid) for oid in object_ids if str(oid) in truth_hist]
+        else:
+            ref_object_ids = [oid for oid in ("target", "chaser") if oid in truth_hist]
+            if not ref_object_ids:
+                ref_object_ids = sorted(truth_hist.keys())
+        ref_truth_hist = {oid: truth_hist[oid] for oid in ref_object_ids}
+
+        if "target_reference_ric_curv_3d" in types and ref_truth_hist:
+            p = outdir / "target_reference_ric_curv_3d.mp4"
+            animate_multi_trajectory_frame(
+                t_s=t_s,
+                truth_hist_by_object=ref_truth_hist,
+                frame="ric_curv",
+                reference_truth_hist=reference_truth,
+                mode=mode,
+                out_path=str(p),
+                fps=fps,
+                speed_multiple=speed_multiple,
+                frame_stride=frame_stride,
+                show_trajectory=bool(anim_cfg.get("target_reference_ric_curv_3d_show_trajectory", True)),
+            )
+            if mode in ("save", "both"):
+                out["target_reference_ric_curv_3d"] = str(p)
+
+        if "battlespace_dashboard" in types and ref_truth_hist:
+            target_object_id = str(anim_cfg.get("battlespace_dashboard_target_object_id", "target"))
+            chaser_object_id = str(anim_cfg.get("battlespace_dashboard_chaser_object_id", "chaser"))
+            if target_object_id in truth_hist and chaser_object_id in truth_hist:
+                p = outdir / "battlespace_dashboard.mp4"
+                dims_map_raw = anim_cfg.get("battlespace_dashboard_attitude_dims_m", {})
+                dims_map = dict(dims_map_raw) if isinstance(dims_map_raw, dict) else {}
+                thruster_mounts = _thruster_mounts_by_object(cfg)
+                animate_battlespace_dashboard(
+                    t_s=t_s,
+                    truth_hist_by_object=truth_hist,
+                    reference_truth_hist=reference_truth,
+                    target_object_id=target_object_id,
+                    chaser_object_id=chaser_object_id,
+                    thrust_hist_by_object=thrust_hist,
+                    delta_v_remaining_m_s_by_object={
+                        oid: np.array(entry["remaining_m_s"], dtype=float) for oid, entry in satellite_dv_by_object.items()
+                    },
+                    prism_dims_m_by_object=dims_map,
+                    thruster_mounts_by_object=thruster_mounts,
+                    thruster_active_threshold_km_s2=float(
+                        anim_cfg.get("battlespace_dashboard_thruster_active_threshold_km_s2", 1e-15)
+                    ),
+                    show_trajectory=bool(anim_cfg.get("battlespace_dashboard_show_trajectory", True)),
+                    mode=mode,
+                    out_path=str(p),
+                    fps=fps,
+                    speed_multiple=speed_multiple,
+                    frame_stride=frame_stride,
+                )
+                if mode in ("save", "both"):
+                    out["battlespace_dashboard"] = str(p)
+
+        if "target_reference_ric_curv_2d" in types and ref_truth_hist:
+            p = outdir / "target_reference_ric_curv_2d.mp4"
+            animate_multi_ric_2d_projections(
+                t_s=t_s,
+                truth_hist_by_object=ref_truth_hist,
+                frame="ric_curv",
+                reference_truth_hist=reference_truth,
+                planes=list(anim_cfg.get("target_reference_ric_curv_2d_planes", ["ri", "ic", "rc"]) or ["ri", "ic", "rc"]),
+                mode=mode,
+                out_path=str(p),
+                fps=fps,
+                speed_multiple=speed_multiple,
+                frame_stride=frame_stride,
+                show_trajectory=bool(anim_cfg.get("target_reference_ric_curv_2d_show_trajectory", True)),
+            )
+            if mode in ("save", "both"):
+                out["target_reference_ric_curv_2d"] = str(p)
+
+        per_plane_types = {
+            "target_reference_ric_curv_2d_ri": "ri",
+            "target_reference_ric_curv_2d_ic": "ic",
+            "target_reference_ric_curv_2d_rc": "rc",
+        }
+        for anim_type, plane in per_plane_types.items():
+            if anim_type not in types or not ref_truth_hist:
+                continue
+            p = outdir / f"{anim_type}.mp4"
+            animate_multi_ric_2d_projections(
+                t_s=t_s,
+                truth_hist_by_object=ref_truth_hist,
+                frame="ric_curv",
+                reference_truth_hist=reference_truth,
+                planes=[plane],
+                mode=mode,
+                out_path=str(p),
+                fps=fps,
+                speed_multiple=speed_multiple,
+                frame_stride=frame_stride,
+                show_trajectory=bool(anim_cfg.get(f"{anim_type}_show_trajectory", True)),
+            )
+            if mode in ("save", "both"):
+                out[anim_type] = str(p)
 
     return out

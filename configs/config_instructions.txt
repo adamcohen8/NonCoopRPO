@@ -35,13 +35,13 @@ Algorithm Pointer Format
   module: "python.module.path"
   class_name: "ClassName"
   function: "optional_function_name"
-  file: "optional/path/to/file.py"
   params:
     key: value
 
 Notes:
 - Use module + class_name for class-based controllers, rocket guidance, mission strategies, mission executions, or legacy mission modules.
 - Use module + function for function-based handlers.
+- File-path plugin loading is not supported; custom extensions must live on the Python import path and be referenced by `module`.
 - params is a freeform dict passed later by scenario wiring code.
 
 Mission Architecture
@@ -51,6 +51,65 @@ Mission Architecture
   - `MissionExecutiveStrategy` can sequence multiple strategy/execution pairs and switch modes on triggers
 - Legacy path:
   - mission_objectives are executed each master_sim step when provided.
+
+Target Reference Orbit
+- Optional target-only setting:
+  reference_orbit:
+    enabled: true|false
+- When enabled, the simulator propagates a passive reference orbit from the target's initial position/velocity.
+- The reference orbit uses the same orbital environment settings, but it does not run controllers, attitude propagation, knowledge, or actuator logic.
+- RIC trajectory plots automatically use this passive reference when it is enabled, so you can compare both the target and chaser against the target's nominal orbit.
+- Target-reference curvilinear RIC animations:
+  outputs:
+    animations:
+      enabled: true
+      types: ["target_reference_ric_curv_3d", "target_reference_ric_curv_2d"]
+      # or individual plane files:
+      # types: ["target_reference_ric_curv_2d_ri", "target_reference_ric_curv_2d_ic", "target_reference_ric_curv_2d_rc"]
+      target_reference_ric_curv_object_ids: ["target", "chaser"]   # optional
+      target_reference_ric_curv_3d_show_trajectory: true|false
+      target_reference_ric_curv_2d_show_trajectory: true|false
+      target_reference_ric_curv_2d_planes: ["ri", "ic", "rc"]
+      target_reference_ric_curv_2d_ri_show_trajectory: true|false
+      target_reference_ric_curv_2d_ic_show_trajectory: true|false
+      target_reference_ric_curv_2d_rc_show_trajectory: true|false
+
+Attitude Animation With Thruster Activity
+- Per-object RIC-frame rectangular-prism animation with a color change when thrust is active:
+  outputs:
+    animations:
+      enabled: true
+      types: ["attitude_ric_thruster"]
+      attitude_ric_thruster_object_ids: ["target", "chaser"]   # optional
+      attitude_ric_thruster_dims_m:
+        target: [1.0, 1.0, 1.0]
+        chaser: [1.0, 1.0, 1.0]
+      attitude_ric_thruster_active_threshold_km_s2: 1.0e-15
+- The prism uses the normal satellite color when not firing and switches to a highlight color when the applied thrust magnitude exceeds the threshold for that time step.
+
+Battlespace Visualization Dashboard
+- Composite 2x2 time-synchronized dashboard animation:
+  - top-left: RI cut of target and chaser relative to the target reference orbit
+  - top-right: RC cut of target and chaser relative to the target reference orbit
+  - bottom-left: chaser attitude + thrust in the chaser RIC frame
+  - bottom-right: target attitude + thrust in the target RIC frame
+- Updating telemetry text shows:
+  - relative range
+  - relative speed
+  - chaser delta-v remaining
+  - target delta-v remaining
+- Example:
+  outputs:
+    animations:
+      enabled: true
+      types: ["battlespace_dashboard"]
+      battlespace_dashboard_target_object_id: "target"
+      battlespace_dashboard_chaser_object_id: "chaser"
+      battlespace_dashboard_show_trajectory: true|false
+      battlespace_dashboard_attitude_dims_m:
+        target: [1.0, 1.0, 1.0]
+        chaser: [1.0, 1.0, 1.0]
+      battlespace_dashboard_thruster_active_threshold_km_s2: 1.0e-15
 
 Mission Strategy Pointers
 - Mission executive strategy:
@@ -144,6 +203,33 @@ Mission Strategy Pointers
   params:
     predef_target_alt_km: <float>
     predef_target_ecc: <float>
+
+Orbit Controller Pointers
+- HCW LQR:
+  module: "sim.control.orbit.lqr"
+  class_name: "HCWLQRController"
+  params:
+    mean_motion_rad_s: <float>
+    max_accel_km_s2: <float>
+    design_dt_s: <float>
+    ric_curv_state_slice: [start, end]
+    chief_eci_state_slice: [start, end]
+    state_signs: [s1, s2, s3, s4, s5, s6]
+    q_weights: [q1, q2, q3, q4, q5, q6]
+    r_weights: [rR, rI, rC]
+- HCW LQR without radial burn:
+  module: "sim.control.orbit.lqr_no_radial"
+  class_name: "HCWNoRadialLQRController"
+  params:
+    mean_motion_rad_s: <float>
+    max_accel_km_s2: <float>
+    design_dt_s: <float>
+    ric_curv_state_slice: [start, end]
+    chief_eci_state_slice: [start, end]
+    state_signs: [s1, s2, s3, s4, s5, s6]
+    q_weights: [q1, q2, q3, q4, q5, q6]
+    r_weights: [rI, rC]
+- The no-radial variant still regulates all six HCW states, but its commanded RIC acceleration is always constrained to `[0, a_I, a_C]`.
 
 Mission Execution Pointers
 - Controller-pointing execution:
@@ -419,6 +505,13 @@ Outputs Section
   Supported types currently:
   - ground_track: one animation per object
   - ground_track_multi: all objects on one ground-track animation
+  - attitude_ric_thruster: per-object RIC attitude prism that highlights active thrust
+  - battlespace_dashboard: synchronized 2x2 target/chaser dashboard with relative telemetry
+  - target_reference_ric_curv_3d: target/chaser relative to target reference orbit in 3D curvilinear RIC
+  - target_reference_ric_curv_2d: combined RI/IC/RC target-reference curvilinear RIC cuts
+  - target_reference_ric_curv_2d_ri
+  - target_reference_ric_curv_2d_ic
+  - target_reference_ric_curv_2d_rc
 - monte_carlo: Monte Carlo output options.
   Example keys:
   - save_iteration_summaries: save per-run summary JSON files.

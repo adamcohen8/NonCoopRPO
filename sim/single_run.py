@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import logging
 import os
@@ -61,6 +62,7 @@ def _plot_outputs(
     cfg: SimulationScenarioConfig,
     t_s: np.ndarray,
     truth_hist: dict[str, np.ndarray],
+    target_reference_orbit_truth: np.ndarray | None,
     thrust_hist: dict[str, np.ndarray],
     desired_attitude_hist: dict[str, np.ndarray] | None,
     knowledge_hist: dict[str, dict[str, np.ndarray]],
@@ -71,6 +73,7 @@ def _plot_outputs(
         cfg=cfg,
         t_s=t_s,
         truth_hist=truth_hist,
+        target_reference_orbit_truth=target_reference_orbit_truth,
         thrust_hist=thrust_hist,
         desired_attitude_hist=desired_attitude_hist,
         knowledge_hist=knowledge_hist,
@@ -86,9 +89,19 @@ def _animate_outputs(
     cfg: SimulationScenarioConfig,
     t_s: np.ndarray,
     truth_hist: dict[str, np.ndarray],
+    thrust_hist: dict[str, np.ndarray],
+    target_reference_orbit_truth: np.ndarray | None,
     outdir: Path,
 ) -> dict[str, str]:
-    return _animate_outputs_impl(cfg=cfg, t_s=t_s, truth_hist=truth_hist, outdir=outdir)
+    return _animate_outputs_impl(
+        cfg=cfg,
+        t_s=t_s,
+        truth_hist=truth_hist,
+        thrust_hist=thrust_hist,
+        target_reference_orbit_truth=target_reference_orbit_truth,
+        outdir=outdir,
+        resolve_satellite_isp_s=_resolve_satellite_isp_s,
+    )
 
 
 def _fmt_float(x: float, digits: int = 3) -> str:
@@ -211,6 +224,23 @@ class _SingleRunEngine:
                 initial_state=dict(cfg.chaser.initial_state or {}),
             )
 
+        target_reference_cfg = dict(cfg.target.reference_orbit or {})
+        self.target_reference_truth = None
+        self.target_reference_dynamics = None
+        self.target_reference_orbit_hist = None
+        if bool(target_reference_cfg.get("enabled", False)) and self.target is not None and self.target.truth is not None:
+            self.target_reference_truth = self.target.truth.copy()
+            self.target_reference_dynamics = replace(
+                self.target.dynamics,
+                disturbance_model=None,
+                propagate_attitude=False,
+                use_rectangular_prism_for_aero_srp=False,
+                rectangular_prism_dims_m=None,
+            )
+            self.target_reference_orbit_hist = np.full((self.n, 6), np.nan)
+            self.target_reference_orbit_hist[0, 0:3] = self.target_reference_truth.position_eci_km
+            self.target_reference_orbit_hist[0, 3:6] = self.target_reference_truth.velocity_eci_km_s
+
         for aid, agent in self.agents.items():
             cfg_src = cfg.rocket if aid == "rocket" else (cfg.chaser if aid == "chaser" else cfg.target)
             agent.knowledge_base = _build_knowledge_base(
@@ -331,6 +361,18 @@ class _SingleRunEngine:
             if agent.active
         }
         world_truth_live = dict(world_truth)
+
+        if self.target_reference_truth is not None and self.target_reference_dynamics is not None:
+            env_ref = {**self.base_environment, "world_truth": world_truth_live, "attitude_disabled": True}
+            self.target_reference_truth = self.target_reference_dynamics.step(
+                state=self.target_reference_truth,
+                command=Command.zero(),
+                env=env_ref,
+                dt_s=self.dt,
+            )
+            assert self.target_reference_orbit_hist is not None
+            self.target_reference_orbit_hist[k + 1, 0:3] = self.target_reference_truth.position_eci_km
+            self.target_reference_orbit_hist[k + 1, 3:6] = self.target_reference_truth.velocity_eci_km_s
 
         for aid, agent in self.agents.items():
             if not agent.active:
@@ -709,6 +751,9 @@ class _SingleRunEngine:
         n_used = self.current_index + 1
         t_out = self.t_s[:n_used].copy()
         truth_out = {k: v[:n_used, :].copy() for k, v in self.truth_hist.items()}
+        target_reference_orbit_out = (
+            None if self.target_reference_orbit_hist is None else self.target_reference_orbit_hist[:n_used, :].copy()
+        )
         belief_out = {k: v[:n_used, :].copy() for k, v in self.belief_hist.items()}
         thrust_out = {k: v[:n_used, :].copy() for k, v in self.thrust_hist.items()}
         torque_out = {k: v[:n_used, :].copy() for k, v in self.torque_hist.items()}
@@ -729,13 +774,21 @@ class _SingleRunEngine:
             cfg=self.cfg,
             t_s=t_out,
             truth_hist=truth_out,
+            target_reference_orbit_truth=target_reference_orbit_out,
             thrust_hist=thrust_out,
             desired_attitude_hist=desired_attitude_out,
             knowledge_hist=knowledge_out,
             rocket_metrics=rocket_metrics_out if rocket_metrics_out else None,
             outdir=self.outdir,
         )
-        animation_outputs = _animate_outputs(cfg=self.cfg, t_s=t_out, truth_hist=truth_out, outdir=self.outdir)
+        animation_outputs = _animate_outputs(
+            cfg=self.cfg,
+            t_s=t_out,
+            truth_hist=truth_out,
+            thrust_hist=thrust_out,
+            target_reference_orbit_truth=target_reference_orbit_out,
+            outdir=self.outdir,
+        )
 
         thrust_stats = {
             oid: {
@@ -758,6 +811,7 @@ class _SingleRunEngine:
             "termination_object_id": self.termination_object_id,
             "rocket_insertion_achieved": bool(self.rocket_inserted),
             "rocket_insertion_time_s": self.rocket_insertion_time_s,
+            "target_reference_orbit_enabled": bool(target_reference_orbit_out is not None),
             "thrust_stats": thrust_stats,
             "attitude_guardrail_stats": get_attitude_guardrail_stats(),
             "knowledge_detection_by_observer": {
@@ -777,6 +831,7 @@ class _SingleRunEngine:
             "summary": summary,
             "time_s": t_out.tolist(),
             "truth_by_object": {k: v.tolist() for k, v in truth_out.items()},
+            "target_reference_orbit_truth": ([] if target_reference_orbit_out is None else target_reference_orbit_out.tolist()),
             "belief_by_object": {k: v.tolist() for k, v in belief_out.items()},
             "applied_thrust_by_object": {k: v.tolist() for k, v in thrust_out.items()},
             "applied_torque_by_object": {k: v.tolist() for k, v in torque_out.items()},

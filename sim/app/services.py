@@ -76,6 +76,16 @@ PARAMETER_FORM_SCHEMAS: dict[str, list[dict[str, Any]]] = {
         {"key": "riccati_max_iter", "label": "Riccati Max Iter", "kind": "int"},
         {"key": "riccati_tol", "label": "Riccati Tolerance", "kind": "float"},
     ],
+    "HCWNoRadialLQRController": [
+        {"key": "mean_motion_rad_s", "label": "Mean Motion (rad/s)", "kind": "float"},
+        {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
+        {"key": "design_dt_s", "label": "Design dt (s)", "kind": "float"},
+        {"key": "state_signs", "label": "State Signs", "kind": "vector", "length": 6},
+        {"key": "q_weights", "label": "Q Weights", "kind": "vector", "length": 6},
+        {"key": "r_weights", "label": "R Weights", "kind": "vector", "length": 2},
+        {"key": "riccati_max_iter", "label": "Riccati Max Iter", "kind": "int"},
+        {"key": "riccati_tol", "label": "Riccati Tolerance", "kind": "float"},
+    ],
     "RelativeOrbitMPCController": [
         {"key": "max_accel_km_s2", "label": "Max Accel (km/s^2)", "kind": "float"},
         {"key": "horizon_steps", "label": "Horizon Steps", "kind": "int"},
@@ -477,6 +487,7 @@ def get_gui_capabilities() -> GuiCapabilities:
                 [
                     ("Zero Controller", "sim.control.orbit.zero_controller", "ZeroController"),
                     ("HCW LQR", "sim.control.orbit.lqr", "HCWLQRController"),
+                    ("HCW LQR (No Radial Burn)", "sim.control.orbit.lqr_no_radial", "HCWNoRadialLQRController"),
                     ("Relative Orbit MPC", "sim.control.orbit.relative_mpc", "RelativeOrbitMPCController"),
                     ("HCW Relative MPC", "sim.control.orbit.hcw_mpc", "HCWRelativeOrbitMPCController"),
                     ("Stationkeeping", "sim.control.orbit.baseline", "StationkeepingController"),

@@ -15,6 +15,7 @@ from sim.control.orbit.impulsive import (
 )
 from sim.control.orbit.lqr_curv_variant import HCWCurvInputRectOutputController
 from sim.control.orbit.lqr import HCWLQRController
+from sim.control.orbit.lqr_no_radial import HCWNoRadialLQRController
 from sim.control.orbit.hcw_mpc import HCWRelativeOrbitMPCController
 from sim.control.orbit.hcw_transfer import (
     HCWEvasionOptimizationResult,
@@ -42,6 +43,7 @@ __all__ = [
     "IntegratedManeuverDecision",
     "OrbitalAttitudeManeuverCoordinator",
     "HCWLQRController",
+    "HCWNoRadialLQRController",
     "HCWCurvInputRectOutputController",
     "HCWRelativeOrbitMPCController",
     "hcw_state_transition_matrix",

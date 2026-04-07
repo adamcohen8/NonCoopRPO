@@ -40,13 +40,25 @@ def test_gui_capabilities_reflect_backend_catalog() -> None:
     assert "One-at-a-time sensitivity" in caps.analysis_ui_profiles["sensitivity_one_at_a_time"].help_text
     assert "rocket_fuel_remaining" in caps.figure_ids
     assert "ground_track_multi" in caps.animation_types
+    assert "attitude_ric_thruster" in caps.animation_types
+    assert "battlespace_dashboard" in caps.animation_types
+    assert "target_reference_ric_curv_3d" in caps.animation_types
+    assert "target_reference_ric_curv_2d" in caps.animation_types
+    assert "target_reference_ric_curv_2d_ri" in caps.animation_types
+    assert "target_reference_ric_curv_2d_ic" in caps.animation_types
+    assert "target_reference_ric_curv_2d_rc" in caps.animation_types
     assert any(label == "Open Loop Pitch Program" for label, _ in caps.base_guidance_options["rocket"])
     assert any(label == "Relative Orbit MPC" for label, _ in caps.orbit_control_options["chaser"])
+    assert any(label == "HCW LQR (No Radial Burn)" for label, _ in caps.orbit_control_options["chaser"])
     assert caps.monte_carlo_parameter_categories["Environment"][0][1] == "simulator.environment.atmosphere_env.solar_flux_f107"
     assert any(path == "target.initial_state.coes.true_anomaly_deg" for _, path in caps.monte_carlo_parameter_categories["Target Orbit"])
     schema = caps.parameter_form_schemas["RelativeOrbitMPCController"]
     assert any(field["key"] == "gradient_method" and field["kind"] == "choice" for field in schema)
     assert caps.parameter_form_schemas["MissionExecutiveStrategy"][1]["kind"] == "yaml"
+    assert any(
+        field["key"] == "r_weights" and field.get("length") == 2
+        for field in caps.parameter_form_schemas["HCWNoRadialLQRController"]
+    )
 
 
 def test_run_config_via_api_executes_single_run() -> None:

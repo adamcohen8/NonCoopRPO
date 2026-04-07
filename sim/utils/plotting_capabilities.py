@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Literal
 
 import matplotlib.pyplot as plt
@@ -50,6 +51,35 @@ def _show_save_close(fig: plt.Figure, *, mode: PlotMode, out_path: str | None, d
         plt.show(block=False)
     else:
         plt.close(fig)
+
+
+def _play_interactive_animation(
+    fig: plt.Figure,
+    *,
+    update: Any,
+    frame_count: int,
+    interval_ms: float,
+) -> None:
+    if frame_count <= 0:
+        return
+    dt_s = max(float(interval_ms) / 1000.0, 1e-4)
+    plt.ion()
+    fig.show()
+    t0 = perf_counter()
+    i = 0
+    while i < frame_count:
+        if not plt.fignum_exists(fig.number):
+            break
+        elapsed_s = perf_counter() - t0
+        target_i = min(int(elapsed_s / dt_s), frame_count - 1)
+        if target_i < i:
+            target_i = i
+        update(target_i)
+        fig.canvas.draw_idle()
+        plt.pause(0.001)
+        i = target_i + 1
+    plt.ioff()
+    plt.show()
 
 
 def _draw_stylized_earth_map(ax: plt.Axes) -> None:
@@ -440,6 +470,106 @@ def plot_multi_ric_2d_projections(
     _show_save_close(fig, mode=mode, out_path=out_path)
 
 
+def animate_multi_ric_2d_projections(
+    t_s: np.ndarray,
+    truth_hist_by_object: dict[str, np.ndarray],
+    *,
+    frame: Literal["ric_rect", "ric_curv"] = "ric_curv",
+    reference_truth_hist: np.ndarray,
+    planes: list[str] | None = None,
+    mode: PlotMode = "interactive",
+    out_path: str | None = None,
+    fps: float = 30.0,
+    speed_multiple: float = 10.0,
+    frame_stride: int = 1,
+    show_trajectory: bool = True,
+) -> None:
+    if frame not in ("ric_rect", "ric_curv"):
+        raise ValueError("frame must be 'ric_rect' or 'ric_curv'.")
+    trajectories: dict[str, np.ndarray] = {}
+    for oid, hist in truth_hist_by_object.items():
+        if hist.size == 0 or not np.any(np.isfinite(hist[:, 0])):
+            continue
+        trajectories[oid] = _trajectory_in_frame(
+            t_s=t_s,
+            truth_hist=hist,
+            frame=frame,
+            reference_truth_hist=reference_truth_hist,
+        )
+    if not trajectories:
+        return
+
+    p_list = planes if planes is not None and len(planes) > 0 else ["ri", "ic", "rc"]
+    fig, axes = plt.subplots(1, len(p_list), figsize=cap_figsize(5.0 * len(p_list), 4.5))
+    if len(p_list) == 1:
+        axes = [axes]
+
+    line_by_plane_obj: dict[tuple[str, str], Any] = {}
+    dot_by_plane_obj: dict[tuple[str, str], Any] = {}
+    ax_by_plane: dict[str, Any] = {}
+    for ax, p in zip(axes, p_list):
+        _, _, xlbl, ylbl = _ric_2d_plane_axes(p)
+        ax.set_xlim(-1.0, 1.0)
+        ax.set_ylim(-1.0, 1.0)
+        ax.set_xlabel(xlbl)
+        ax.set_ylabel(ylbl)
+        ax.set_title(f"{xlbl}-{ylbl}")
+        ax.grid(True, alpha=0.3)
+        ax_by_plane[p] = ax
+        for oid in sorted(trajectories.keys()):
+            line, = ax.plot([], [], linewidth=1.2, label=oid)
+            dot, = ax.plot([], [], marker="o", markersize=4)
+            line_by_plane_obj[(p, oid)] = line
+            dot_by_plane_obj[(p, oid)] = dot
+    axes[0].legend(loc="best")
+
+    stride = int(max(frame_stride, 1))
+    max_frames = max(arr.shape[0] for arr in trajectories.values())
+    frame_ids = np.arange(0, max_frames, stride, dtype=int)
+    if frame_ids.size == 0 or frame_ids[-1] != (max_frames - 1):
+        frame_ids = np.append(frame_ids, max_frames - 1)
+
+    def update(i: int):
+        artists = []
+        frame_i = int(frame_ids[i])
+        for p in p_list:
+            ix, iy, _, _ = _ric_2d_plane_axes(p)
+            plane_arrays: list[np.ndarray] = []
+            for oid, arr in trajectories.items():
+                idx = min(frame_i, arr.shape[0] - 1)
+                start = 0 if show_trajectory else idx
+                seg = arr[start : idx + 1, :]
+                line_by_plane_obj[(p, oid)].set_data(seg[:, ix], seg[:, iy])
+                dot_by_plane_obj[(p, oid)].set_data([arr[idx, ix]], [arr[idx, iy]])
+                plane_arrays.extend([arr[: idx + 1, ix], arr[: idx + 1, iy]])
+                artists.extend([line_by_plane_obj[(p, oid)], dot_by_plane_obj[(p, oid)]])
+            lim = _symmetric_limit_from_arrays(plane_arrays, min_lim=1.0, margin=1.15)
+            ax_by_plane[p].set_xlim(-lim, lim)
+            ax_by_plane[p].set_ylim(-lim, lim)
+        t_now = float(t_s[min(frame_i, t_s.size - 1)]) if t_s.size else 0.0
+        fig.suptitle(
+            f"RIC 2D Projections Animation ({'Curvilinear' if frame == 'ric_curv' else 'Rect'})  t={t_now:.1f}s"
+        )
+        return artists
+
+    dt = float(np.median(np.diff(t_s))) if t_s.size > 1 else 1.0
+    interval_ms = 1000.0 * dt * float(stride) / max(speed_multiple, 1e-6)
+    if mode in ("interactive", "both"):
+        _play_interactive_animation(fig, update=update, frame_count=int(frame_ids.size), interval_ms=interval_ms)
+    if mode in ("save", "both"):
+        ani = animation.FuncAnimation(fig, update, frames=int(frame_ids.size), interval=interval_ms, blit=False)
+        if out_path is None:
+            raise ValueError("out_path is required when mode is 'save' or 'both'.")
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ani.save(str(p), fps=max(float(fps), 1.0))
+        except Exception as exc:
+            print(f"Warning: failed to save animation ({exc}).")
+        del ani
+    plt.close(fig)
+
+
 def plot_control_commands(
     t_s: np.ndarray,
     u_hist: np.ndarray,
@@ -506,20 +636,8 @@ def plot_multi_control_commands(
     _show_save_close(fig, mode=mode, out_path=out_path)
 
 
-def animate_rectangular_prism_attitude(
-    t_s: np.ndarray,
-    truth_hist: np.ndarray,
-    *,
-    lx_m: float,
-    ly_m: float,
-    lz_m: float,
-    frame: AttitudeFrame = "eci",
-    mode: PlotMode = "interactive",
-    out_path: str | None = None,
-    fps: float = 30.0,
-    speed_multiple: float = 10.0,
-) -> None:
-    verts_body = np.array(
+def _rectangular_prism_vertices_body(lx_m: float, ly_m: float, lz_m: float) -> np.ndarray:
+    return np.array(
         [
             [-0.5 * lx_m, -0.5 * ly_m, -0.5 * lz_m],
             [-0.5 * lx_m, -0.5 * ly_m, +0.5 * lz_m],
@@ -532,7 +650,10 @@ def animate_rectangular_prism_attitude(
         ],
         dtype=float,
     )
-    faces = [
+
+
+def _rectangular_prism_faces() -> list[list[int]]:
+    return [
         [0, 1, 3, 2],
         [4, 5, 7, 6],
         [0, 1, 5, 4],
@@ -541,17 +662,222 @@ def animate_rectangular_prism_attitude(
         [1, 3, 7, 5],
     ]
 
+
+def _attitude_rotation_history(truth_hist: np.ndarray, frame: AttitudeFrame) -> np.ndarray:
     q_bn = np.array(truth_hist[:, 6:10], dtype=float)
-    c_anim = np.zeros((truth_hist.shape[0], 3, 3))
+    c_anim = np.zeros((truth_hist.shape[0], 3, 3), dtype=float)
     for k in range(truth_hist.shape[0]):
         c_bn = quaternion_to_dcm_bn(q_bn[k, :])
         if frame == "eci":
-            c_anim[k, :, :] = c_bn.T  # body -> ECI
+            c_anim[k, :, :] = c_bn.T
         else:
             r = truth_hist[k, 0:3]
             v = truth_hist[k, 3:6]
             c_ir = ric_dcm_ir_from_rv(r, v)
-            c_anim[k, :, :] = c_ir.T @ c_bn.T  # body -> RIC
+            c_anim[k, :, :] = c_ir.T @ c_bn.T
+    return c_anim
+
+
+def _rectangular_prism_frame_vertices(
+    body_vertices: np.ndarray,
+    rotation_history: np.ndarray,
+    faces: list[list[int]],
+    frame_idx: int,
+) -> list[np.ndarray]:
+    verts = (rotation_history[frame_idx, :, :] @ body_vertices.T).T
+    return [verts[idx, :] for idx in faces]
+
+
+def _default_thruster_mount_position_body(
+    *,
+    lx_m: float,
+    ly_m: float,
+    lz_m: float,
+    outward_normal_body: np.ndarray,
+) -> np.ndarray:
+    dims = np.array([lx_m, ly_m, lz_m], dtype=float)
+    axis = np.array(outward_normal_body, dtype=float).reshape(3)
+    norm = float(np.linalg.norm(axis))
+    if norm <= 1e-12:
+        return np.array([0.0, 0.0, -0.5 * lz_m], dtype=float)
+    axis /= norm
+    idx = int(np.argmax(np.abs(axis)))
+    pos = np.zeros(3, dtype=float)
+    pos[idx] = 0.5 * dims[idx] * float(np.sign(axis[idx]) if abs(axis[idx]) > 1e-12 else 1.0)
+    return pos
+
+
+def _orthonormal_basis_from_axis(axis: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    a = np.array(axis, dtype=float).reshape(3)
+    n = float(np.linalg.norm(a))
+    if n <= 1e-12:
+        a = np.array([0.0, 0.0, 1.0], dtype=float)
+    else:
+        a /= n
+    basis = np.eye(3)
+    ref = basis[:, int(np.argmin(np.abs(a)))]
+    s = ref - np.dot(ref, a) * a
+    s_norm = float(np.linalg.norm(s))
+    if s_norm <= 1e-12:
+        ref = basis[:, (int(np.argmin(np.abs(a))) + 1) % 3]
+        s = ref - np.dot(ref, a) * a
+        s_norm = float(np.linalg.norm(s))
+    s /= max(s_norm, 1e-12)
+    u = np.cross(a, s)
+    u /= max(float(np.linalg.norm(u)), 1e-12)
+    return a, s, u
+
+
+def _thruster_face_mount_body(
+    *,
+    lx_m: float,
+    ly_m: float,
+    lz_m: float,
+    thruster_position_body_m: np.ndarray | None,
+    outward_normal_body: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    half_dims = 0.5 * np.array([lx_m, ly_m, lz_m], dtype=float)
+    axis = np.array(outward_normal_body, dtype=float).reshape(3)
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm <= 1e-12:
+        axis = np.array([0.0, 0.0, -1.0], dtype=float)
+    else:
+        axis /= axis_norm
+
+    if thruster_position_body_m is None:
+        mount = _default_thruster_mount_position_body(
+            lx_m=lx_m,
+            ly_m=ly_m,
+            lz_m=lz_m,
+            outward_normal_body=axis,
+        )
+        return mount, axis
+
+    raw_mount = np.array(thruster_position_body_m, dtype=float).reshape(3)
+    raw_mount = np.clip(raw_mount, -half_dims, half_dims)
+    if float(np.linalg.norm(raw_mount)) > 1e-12:
+        scaled = np.abs(raw_mount) / np.maximum(half_dims, 1e-12)
+        idx = int(np.argmax(scaled))
+        sign = float(np.sign(raw_mount[idx])) if abs(raw_mount[idx]) > 1e-12 else float(np.sign(axis[idx]))
+    else:
+        idx = int(np.argmax(np.abs(axis)))
+        sign = float(np.sign(axis[idx]))
+    if abs(sign) <= 1e-12:
+        sign = 1.0
+    face_axis = np.zeros(3, dtype=float)
+    face_axis[idx] = sign
+    mount = raw_mount.copy()
+    mount[idx] = sign * half_dims[idx]
+    return mount, face_axis
+
+
+def _thruster_marker_geometry_body(
+    *,
+    lx_m: float,
+    ly_m: float,
+    lz_m: float,
+    thruster_position_body_m: np.ndarray | None = None,
+    thruster_direction_body: np.ndarray | None = None,
+) -> tuple[np.ndarray, list[list[int]]]:
+    dims = np.array([lx_m, ly_m, lz_m], dtype=float)
+    marker_scale = float(max(np.min(dims), 1e-6))
+    axis_raw = (
+        np.array(thruster_direction_body, dtype=float).reshape(3)
+        if thruster_direction_body is not None
+        else np.array([0.0, 0.0, 1.0], dtype=float)
+    )
+    # Render the nozzle on the exterior face indicated by the mount location.
+    outward_axis_hint = -axis_raw
+    mount, outward_axis = _thruster_face_mount_body(
+        lx_m=lx_m,
+        ly_m=ly_m,
+        lz_m=lz_m,
+        thruster_position_body_m=thruster_position_body_m,
+        outward_normal_body=outward_axis_hint,
+    )
+    axis, side, up = _orthonormal_basis_from_axis(outward_axis)
+
+    base_half_width = 0.10 * marker_scale
+    neck_offset = 0.01 * marker_scale
+    face_offset = 0.16 * marker_scale
+    tip = mount + axis * neck_offset
+    base_center = mount + axis * face_offset
+    base = np.vstack(
+        [
+            base_center - base_half_width * side - base_half_width * up,
+            base_center - base_half_width * side + base_half_width * up,
+            base_center + base_half_width * side + base_half_width * up,
+            base_center + base_half_width * side - base_half_width * up,
+        ]
+    )
+    points = np.vstack([base, tip.reshape(1, 3)])
+    faces = [
+        [0, 1, 4],
+        [1, 2, 4],
+        [2, 3, 4],
+        [3, 0, 4],
+        [0, 1, 2, 3],
+    ]
+    return points, faces
+
+
+def _marker_frame_faces(
+    marker_points_body: np.ndarray,
+    rotation_history: np.ndarray,
+    faces: list[list[int]],
+    frame_idx: int,
+) -> list[np.ndarray]:
+    pts = (rotation_history[frame_idx, :, :] @ marker_points_body.T).T
+    return [pts[idx, :] for idx in faces]
+
+
+def _symmetric_limit_from_arrays(
+    arrays: list[np.ndarray],
+    *,
+    min_lim: float = 1.0,
+    margin: float = 1.15,
+) -> float:
+    lim = 0.0
+    for arr in arrays:
+        a = np.array(arr, dtype=float)
+        finite = a[np.isfinite(a)]
+        if finite.size > 0:
+            lim = max(lim, float(np.max(np.abs(finite))))
+    return float(max(min_lim, margin * lim))
+
+
+def animate_rectangular_prism_attitude(
+    t_s: np.ndarray,
+    truth_hist: np.ndarray,
+    *,
+    lx_m: float,
+    ly_m: float,
+    lz_m: float,
+    frame: AttitudeFrame = "eci",
+    thruster_active_mask: np.ndarray | None = None,
+    thruster_position_body_m: np.ndarray | None = None,
+    thruster_direction_body: np.ndarray | None = None,
+    mode: PlotMode = "interactive",
+    out_path: str | None = None,
+    fps: float = 30.0,
+    speed_multiple: float = 10.0,
+) -> None:
+    verts_body = _rectangular_prism_vertices_body(lx_m=lx_m, ly_m=ly_m, lz_m=lz_m)
+    faces = _rectangular_prism_faces()
+    c_anim = _attitude_rotation_history(truth_hist=truth_hist, frame=frame)
+    marker_points_body, marker_faces = _thruster_marker_geometry_body(
+        lx_m=lx_m,
+        ly_m=ly_m,
+        lz_m=lz_m,
+        thruster_position_body_m=thruster_position_body_m,
+        thruster_direction_body=thruster_direction_body,
+    )
+
+    active_mask = np.zeros(truth_hist.shape[0], dtype=bool)
+    if thruster_active_mask is not None:
+        mask_arr = np.array(thruster_active_mask, dtype=bool).reshape(-1)
+        n_copy = min(mask_arr.size, active_mask.size)
+        active_mask[:n_copy] = mask_arr[:n_copy]
 
     max_dim = 0.7 * max(lx_m, ly_m, lz_m)
     fig = plt.figure(figsize=cap_figsize(7, 7))
@@ -561,17 +887,34 @@ def animate_rectangular_prism_attitude(
     ax.set_zlim(-max_dim, max_dim)
     ax.set_box_aspect((1, 1, 1))
     ax.set_title(f"Rectangular Prism Attitude Animation ({frame.upper()})")
-    poly = Poly3DCollection([], alpha=0.35, facecolor="#4C9F70", edgecolor="k", linewidth=0.7)
+    inactive_facecolor = "#4C9F70"
+    active_facecolor = "#D95F02"
+    poly = Poly3DCollection([], alpha=0.35, facecolor=inactive_facecolor, edgecolor="k", linewidth=0.7)
     ax.add_collection3d(poly)
+    thruster_poly = Poly3DCollection([], alpha=0.85, facecolor="#5C4033", edgecolor="#2F241E", linewidth=0.6)
+    ax.add_collection3d(thruster_poly)
 
     def _frame_verts(i: int) -> list[np.ndarray]:
-        v = (c_anim[i, :, :] @ verts_body.T).T
-        return [v[idx, :] for idx in faces]
+        return _rectangular_prism_frame_vertices(
+            body_vertices=verts_body,
+            rotation_history=c_anim,
+            faces=faces,
+            frame_idx=i,
+        )
 
     def update(i: int):
         poly.set_verts(_frame_verts(i))
+        poly.set_facecolor(active_facecolor if bool(active_mask[i]) else inactive_facecolor)
+        thruster_poly.set_verts(
+            _marker_frame_faces(
+                marker_points_body=marker_points_body,
+                rotation_history=c_anim,
+                faces=marker_faces,
+                frame_idx=i,
+            )
+        )
         ax.set_xlabel(f"t={t_s[i]:.1f}s")
-        return [poly]
+        return [poly, thruster_poly]
 
     dt = float(np.median(np.diff(t_s))) if t_s.size > 1 else 1.0
     interval_ms = 1000.0 * dt / max(speed_multiple, 1e-6)
@@ -588,6 +931,292 @@ def animate_rectangular_prism_attitude(
             print(f"Warning: failed to save animation ({exc}).")
     if mode in ("interactive", "both"):
         plt.show()
+    plt.close(fig)
+
+
+def animate_battlespace_dashboard(
+    t_s: np.ndarray,
+    truth_hist_by_object: dict[str, np.ndarray],
+    *,
+    reference_truth_hist: np.ndarray,
+    target_object_id: str = "target",
+    chaser_object_id: str = "chaser",
+    thrust_hist_by_object: dict[str, np.ndarray] | None = None,
+    delta_v_remaining_m_s_by_object: dict[str, np.ndarray] | None = None,
+    prism_dims_m_by_object: dict[str, list[float] | np.ndarray] | None = None,
+    thruster_mounts_by_object: dict[str, dict[str, np.ndarray] | None] | None = None,
+    thruster_active_threshold_km_s2: float = 1e-15,
+    show_trajectory: bool = True,
+    mode: PlotMode = "interactive",
+    out_path: str | None = None,
+    fps: float = 30.0,
+    speed_multiple: float = 10.0,
+    frame_stride: int = 1,
+) -> None:
+    target_hist_raw = np.array(truth_hist_by_object.get(target_object_id, np.array([])), dtype=float)
+    chaser_hist_raw = np.array(truth_hist_by_object.get(chaser_object_id, np.array([])), dtype=float)
+    ref_hist_raw = np.array(reference_truth_hist, dtype=float)
+    if target_hist_raw.ndim != 2 or chaser_hist_raw.ndim != 2 or ref_hist_raw.ndim != 2:
+        return
+    if target_hist_raw.shape[0] == 0 or chaser_hist_raw.shape[0] == 0 or ref_hist_raw.shape[0] == 0:
+        return
+
+    n_frames = min(t_s.size, target_hist_raw.shape[0], chaser_hist_raw.shape[0], ref_hist_raw.shape[0])
+    if n_frames <= 0:
+        return
+
+    t_plot = np.array(t_s[:n_frames], dtype=float)
+    target_hist = target_hist_raw[:n_frames, :]
+    chaser_hist = chaser_hist_raw[:n_frames, :]
+    ref_hist = ref_hist_raw[:n_frames, :]
+
+    rel_truth_by_object = {
+        target_object_id: target_hist,
+        chaser_object_id: chaser_hist,
+    }
+    curv_traj_by_object = {
+        oid: _trajectory_in_frame(
+            t_s=t_plot,
+            truth_hist=hist,
+            frame="ric_curv",
+            reference_truth_hist=ref_hist,
+        )
+        for oid, hist in rel_truth_by_object.items()
+    }
+
+    default_dims = np.array([4.0, 2.0, 2.0], dtype=float)
+    dims_map = prism_dims_m_by_object or {}
+    mount_map = thruster_mounts_by_object or {}
+    body_vertices_by_object: dict[str, np.ndarray] = {}
+    marker_points_by_object: dict[str, np.ndarray] = {}
+    marker_faces_by_object: dict[str, list[list[int]]] = {}
+    rotations_by_object: dict[str, np.ndarray] = {}
+    active_by_object: dict[str, np.ndarray] = {}
+    faces = _rectangular_prism_faces()
+    for oid, hist in rel_truth_by_object.items():
+        dims = np.array(dims_map.get(oid, default_dims), dtype=float).reshape(-1)
+        if dims.size != 3 or not np.all(np.isfinite(dims)) or np.any(dims <= 0.0):
+            dims = default_dims.copy()
+        body_vertices_by_object[oid] = _rectangular_prism_vertices_body(
+            lx_m=float(dims[0]),
+            ly_m=float(dims[1]),
+            lz_m=float(dims[2]),
+        )
+        mount = mount_map.get(oid) if isinstance(mount_map.get(oid), dict) else {}
+        marker_points_by_object[oid], marker_faces_by_object[oid] = _thruster_marker_geometry_body(
+            lx_m=float(dims[0]),
+            ly_m=float(dims[1]),
+            lz_m=float(dims[2]),
+            thruster_position_body_m=None if not isinstance(mount, dict) else mount.get("position_body_m"),
+            thruster_direction_body=None if not isinstance(mount, dict) else mount.get("direction_body"),
+        )
+        rotations_by_object[oid] = _attitude_rotation_history(truth_hist=hist, frame="ric")
+        thrust_hist = np.array((thrust_hist_by_object or {}).get(oid, np.zeros((n_frames, 3))), dtype=float)
+        thrust_local = thrust_hist[:n_frames, :] if thrust_hist.ndim == 2 else np.zeros((n_frames, 3), dtype=float)
+        active_by_object[oid] = np.linalg.norm(np.nan_to_num(thrust_local, nan=0.0), axis=1) > float(
+            thruster_active_threshold_km_s2
+        )
+
+    dv_remaining_by_object: dict[str, np.ndarray] = {}
+    for oid in (target_object_id, chaser_object_id):
+        arr = np.array((delta_v_remaining_m_s_by_object or {}).get(oid, np.full(n_frames, np.nan)), dtype=float).reshape(-1)
+        dv_remaining_by_object[oid] = arr[:n_frames] if arr.size >= n_frames else np.pad(arr, (0, n_frames - arr.size), constant_values=np.nan)
+
+    rel_r_km = chaser_hist[:, 0:3] - target_hist[:, 0:3]
+    rel_v_km_s = chaser_hist[:, 3:6] - target_hist[:, 3:6]
+    rel_range_km = np.linalg.norm(rel_r_km, axis=1)
+    rel_speed_km_s = np.linalg.norm(rel_v_km_s, axis=1)
+
+    fig = plt.figure(figsize=cap_figsize(14, 10))
+    ax_ri = fig.add_subplot(2, 2, 1)
+    ax_rc = fig.add_subplot(2, 2, 2)
+    ax_chaser = fig.add_subplot(2, 2, 3, projection="3d")
+    ax_target = fig.add_subplot(2, 2, 4, projection="3d")
+
+    color_by_object = {
+        target_object_id: "#D95F02",
+        chaser_object_id: "#1F77B4",
+    }
+
+    for ax, plane, lim, title in (
+        (ax_ri, "ri", 1.0, "RI Relative Motion"),
+        (ax_rc, "rc", 1.0, "RC Relative Motion"),
+    ):
+        _, _, xlbl, ylbl = _ric_2d_plane_axes(plane)
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        ax.set_xlabel(f"{xlbl} (km)")
+        ax.set_ylabel(f"{ylbl} (km)")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+
+    inactive_facecolor = "#4C9F70"
+    active_facecolor = "#D95F02"
+    prism_poly_by_object: dict[str, Poly3DCollection] = {}
+    thruster_poly_by_object: dict[str, Poly3DCollection] = {}
+    for oid, ax, title in (
+        (chaser_object_id, ax_chaser, "Chaser Attitude + Thrust (RIC)"),
+        (target_object_id, ax_target, "Target Attitude + Thrust (RIC)"),
+    ):
+        body_vertices = body_vertices_by_object[oid]
+        body_span = np.ptp(body_vertices, axis=0)
+        lim = 0.7 * float(max(np.max(body_span), 1.0))
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        ax.set_zlim(-lim, lim)
+        ax.set_box_aspect((1, 1, 1))
+        ax.view_init(elev=22.0, azim=35.0)
+        ax.set_xlabel("R (m)")
+        ax.set_ylabel("I (m)")
+        ax.set_zlabel("C (m)")
+        ax.set_title(title)
+        poly = Poly3DCollection([], alpha=0.35, facecolor=inactive_facecolor, edgecolor="k", linewidth=0.7)
+        ax.add_collection3d(poly)
+        prism_poly_by_object[oid] = poly
+        thruster_poly = Poly3DCollection([], alpha=0.85, facecolor="#5C4033", edgecolor="#2F241E", linewidth=0.6)
+        ax.add_collection3d(thruster_poly)
+        thruster_poly_by_object[oid] = thruster_poly
+
+    ri_line_by_object: dict[str, Any] = {}
+    ri_dot_by_object: dict[str, Any] = {}
+    rc_line_by_object: dict[str, Any] = {}
+    rc_dot_by_object: dict[str, Any] = {}
+    ri_ix, ri_iy, _, _ = _ric_2d_plane_axes("ri")
+    rc_ix, rc_iy, _, _ = _ric_2d_plane_axes("rc")
+    for oid in (target_object_id, chaser_object_id):
+        color = color_by_object[oid]
+        ri_line, = ax_ri.plot([], [], linewidth=1.5, color=color, label=oid)
+        ri_dot, = ax_ri.plot([], [], marker="o", markersize=5, color=color)
+        rc_line, = ax_rc.plot([], [], linewidth=1.5, color=color, label=oid)
+        rc_dot, = ax_rc.plot([], [], marker="o", markersize=5, color=color)
+        ri_line_by_object[oid] = ri_line
+        ri_dot_by_object[oid] = ri_dot
+        rc_line_by_object[oid] = rc_line
+        rc_dot_by_object[oid] = rc_dot
+    ax_ri.legend(loc="best")
+    ax_rc.legend(loc="best")
+
+    fig.suptitle("Battlespace Visualization Dashboard", fontsize=14)
+    status_text = fig.text(
+        0.5,
+        0.015,
+        "",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        family="monospace",
+        bbox={"facecolor": "white", "alpha": 0.9, "edgecolor": "#cccccc"},
+    )
+    fig.tight_layout(rect=[0.0, 0.06, 1.0, 0.95])
+
+    stride = int(max(frame_stride, 1))
+    frame_ids = np.arange(0, n_frames, stride, dtype=int)
+    if frame_ids.size == 0 or frame_ids[-1] != (n_frames - 1):
+        frame_ids = np.append(frame_ids, n_frames - 1)
+
+    def _dv_text(oid: str, idx: int) -> str:
+        dv_val = float(dv_remaining_by_object[oid][idx])
+        if np.isfinite(dv_val):
+            return f"{dv_val:7.2f} m/s"
+        return "   n/a  "
+
+    def update(i: int):
+        artists: list[Any] = []
+        frame_i = int(frame_ids[i])
+        for oid, traj in curv_traj_by_object.items():
+            start = 0 if show_trajectory else frame_i
+            seg = traj[start : frame_i + 1, :]
+            ri_line_by_object[oid].set_data(seg[:, ri_ix], seg[:, ri_iy])
+            ri_dot_by_object[oid].set_data([traj[frame_i, ri_ix]], [traj[frame_i, ri_iy]])
+            rc_line_by_object[oid].set_data(seg[:, rc_ix], seg[:, rc_iy])
+            rc_dot_by_object[oid].set_data([traj[frame_i, rc_ix]], [traj[frame_i, rc_iy]])
+            artists.extend(
+                [
+                    ri_line_by_object[oid],
+                    ri_dot_by_object[oid],
+                    rc_line_by_object[oid],
+                    rc_dot_by_object[oid],
+                ]
+            )
+
+        ri_lim = _symmetric_limit_from_arrays(
+            [
+                traj[: frame_i + 1, ri_ix]
+                for traj in curv_traj_by_object.values()
+            ]
+            + [
+                traj[: frame_i + 1, ri_iy]
+                for traj in curv_traj_by_object.values()
+            ],
+            min_lim=1.0,
+            margin=1.15,
+        )
+        rc_lim = _symmetric_limit_from_arrays(
+            [
+                traj[: frame_i + 1, rc_ix]
+                for traj in curv_traj_by_object.values()
+            ]
+            + [
+                traj[: frame_i + 1, rc_iy]
+                for traj in curv_traj_by_object.values()
+            ],
+            min_lim=1.0,
+            margin=1.15,
+        )
+        ax_ri.set_xlim(-ri_lim, ri_lim)
+        ax_ri.set_ylim(-ri_lim, ri_lim)
+        ax_rc.set_xlim(-rc_lim, rc_lim)
+        ax_rc.set_ylim(-rc_lim, rc_lim)
+
+        for oid in (chaser_object_id, target_object_id):
+            prism_poly_by_object[oid].set_verts(
+                _rectangular_prism_frame_vertices(
+                    body_vertices=body_vertices_by_object[oid],
+                    rotation_history=rotations_by_object[oid],
+                    faces=faces,
+                    frame_idx=frame_i,
+                )
+            )
+            prism_poly_by_object[oid].set_facecolor(
+                active_facecolor if bool(active_by_object[oid][frame_i]) else inactive_facecolor
+            )
+            thruster_poly_by_object[oid].set_verts(
+                _marker_frame_faces(
+                    marker_points_body=marker_points_by_object[oid],
+                    rotation_history=rotations_by_object[oid],
+                    faces=marker_faces_by_object[oid],
+                    frame_idx=frame_i,
+                )
+            )
+            artists.append(prism_poly_by_object[oid])
+            artists.append(thruster_poly_by_object[oid])
+
+        status_text.set_text(
+            "\n".join(
+                [
+                    f"t = {t_plot[frame_i]:7.1f} s   Relative Range = {rel_range_km[frame_i]:8.3f} km   Relative Speed = {rel_speed_km_s[frame_i]:8.5f} km/s",
+                    f"Chaser dV Remaining = {_dv_text(chaser_object_id, frame_i)}   Target dV Remaining = {_dv_text(target_object_id, frame_i)}",
+                ]
+            )
+        )
+        artists.append(status_text)
+        return artists
+
+    dt = float(np.median(np.diff(t_plot))) if t_plot.size > 1 else 1.0
+    interval_ms = 1000.0 * dt * float(stride) / max(speed_multiple, 1e-6)
+    if mode in ("interactive", "both"):
+        _play_interactive_animation(fig, update=update, frame_count=int(frame_ids.size), interval_ms=interval_ms)
+    if mode in ("save", "both"):
+        ani = animation.FuncAnimation(fig, update, frames=int(frame_ids.size), interval=interval_ms, blit=False)
+        if out_path is None:
+            raise ValueError("out_path is required when mode is 'save' or 'both'.")
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ani.save(str(p), fps=max(float(fps), 1.0))
+        except Exception as exc:
+            print(f"Warning: failed to save animation ({exc}).")
+        del ani
     plt.close(fig)
 
 
@@ -610,13 +1239,13 @@ def animate_trajectory_frame(
         jd_utc_start=jd_utc_start,
         reference_truth_hist=reference_truth_hist,
     )
-    lim = np.nanmax(np.abs(r))
-    lim = float(max(lim, 1.0))
+    lim = _symmetric_limit_from_arrays([r[:, 0], r[:, 1], r[:, 2]], min_lim=1.0, margin=1.0)
     fig = plt.figure(figsize=cap_figsize(8, 6))
     ax = fig.add_subplot(111, projection="3d")
-    ax.set_xlim(-lim, lim)
-    ax.set_ylim(-lim, lim)
-    ax.set_zlim(-lim, lim)
+    init_lim = 1.0 if frame in ("ric_rect", "ric_curv") else lim
+    ax.set_xlim(-init_lim, init_lim)
+    ax.set_ylim(-init_lim, init_lim)
+    ax.set_zlim(-init_lim, init_lim)
     ax.set_box_aspect((1, 1, 1))
     ax.set_title(f"Trajectory Animation ({frame.upper()})")
     line, = ax.plot([], [], [], linewidth=1.4)
@@ -627,14 +1256,24 @@ def animate_trajectory_frame(
         line.set_3d_properties(r[: i + 1, 2])
         dot.set_data([r[i, 0]], [r[i, 1]])
         dot.set_3d_properties([r[i, 2]])
+        if frame in ("ric_rect", "ric_curv"):
+            lim = _symmetric_limit_from_arrays(
+                [r[: i + 1, 0], r[: i + 1, 1], r[: i + 1, 2]],
+                min_lim=1.0,
+                margin=1.15,
+            )
+            ax.set_xlim(-lim, lim)
+            ax.set_ylim(-lim, lim)
+            ax.set_zlim(-lim, lim)
         ax.set_xlabel(f"t={t_s[i]:.1f}s")
         return [line, dot]
 
     dt = float(np.median(np.diff(t_s))) if t_s.size > 1 else 1.0
     interval_ms = 1000.0 * dt / max(speed_multiple, 1e-6)
-    ani = animation.FuncAnimation(fig, update, frames=t_s.size, interval=interval_ms, blit=False)
-
+    if mode in ("interactive", "both"):
+        _play_interactive_animation(fig, update=update, frame_count=int(t_s.size), interval_ms=interval_ms)
     if mode in ("save", "both"):
+        ani = animation.FuncAnimation(fig, update, frames=t_s.size, interval=interval_ms, blit=False)
         if out_path is None:
             raise ValueError("out_path is required when mode is 'save' or 'both'.")
         p = Path(out_path)
@@ -643,8 +1282,117 @@ def animate_trajectory_frame(
             ani.save(str(p), fps=max(float(fps), 1.0))
         except Exception as exc:
             print(f"Warning: failed to save animation ({exc}).")
+        del ani
+    plt.close(fig)
+
+
+def animate_multi_trajectory_frame(
+    t_s: np.ndarray,
+    truth_hist_by_object: dict[str, np.ndarray],
+    *,
+    frame: FrameName = "eci",
+    jd_utc_start: float | None = None,
+    reference_truth_hist: np.ndarray | None = None,
+    mode: PlotMode = "interactive",
+    out_path: str | None = None,
+    fps: float = 30.0,
+    speed_multiple: float = 10.0,
+    frame_stride: int = 1,
+    show_trajectory: bool = True,
+) -> None:
+    trajectories: dict[str, np.ndarray] = {}
+    for oid, hist in truth_hist_by_object.items():
+        arr = np.array(hist, dtype=float)
+        if arr.ndim != 2 or arr.shape[0] == 0 or not np.any(np.isfinite(arr[:, 0])):
+            continue
+        trajectories[oid] = _trajectory_in_frame(
+            t_s=t_s,
+            truth_hist=arr,
+            frame=frame,
+            jd_utc_start=jd_utc_start,
+            reference_truth_hist=reference_truth_hist,
+        )
+    if not trajectories:
+        return
+
+    lim = 0.0
+    for arr in trajectories.values():
+        lim = max(lim, _symmetric_limit_from_arrays([arr[:, 0], arr[:, 1], arr[:, 2]], min_lim=1.0, margin=1.0))
+
+    fig = plt.figure(figsize=cap_figsize(9, 7))
+    ax = fig.add_subplot(111, projection="3d")
+    if frame in ("ric_rect", "ric_curv"):
+        ix, iy, iz = 1, 0, 2
+        xlbl, ylbl, zlbl = "I", "R", "C"
+    else:
+        ix, iy, iz = 0, 1, 2
+        xlbl, ylbl, zlbl = "x", "y", "z"
+        if frame in ("eci", "ecef"):
+            _draw_earth_sphere_3d(ax)
+    init_lim = 1.0 if frame in ("ric_rect", "ric_curv") else lim
+    ax.set_xlim(-init_lim, init_lim)
+    ax.set_ylim(-init_lim, init_lim)
+    ax.set_zlim(-init_lim, init_lim)
+    ax.set_box_aspect((1, 1, 1))
+    ax.set_title(f"Trajectories Animation ({frame.upper()})")
+    ax.set_xlabel(xlbl)
+    ax.set_ylabel(ylbl)
+    ax.set_zlabel(zlbl)
+
+    line_by_obj: dict[str, Any] = {}
+    dot_by_obj: dict[str, Any] = {}
+    for oid in sorted(trajectories.keys()):
+        line, = ax.plot([], [], [], linewidth=1.4, label=oid)
+        dot, = ax.plot([], [], [], marker="o", markersize=4)
+        line_by_obj[oid] = line
+        dot_by_obj[oid] = dot
+    ax.legend(loc="best")
+
+    stride = int(max(frame_stride, 1))
+    max_frames = max(arr.shape[0] for arr in trajectories.values())
+    frame_ids = np.arange(0, max_frames, stride, dtype=int)
+    if frame_ids.size == 0 or frame_ids[-1] != (max_frames - 1):
+        frame_ids = np.append(frame_ids, max_frames - 1)
+
+    def update(i: int):
+        artists = []
+        frame_i = int(frame_ids[i])
+        scale_arrays: list[np.ndarray] = []
+        for oid, arr in trajectories.items():
+            idx = min(frame_i, arr.shape[0] - 1)
+            start = 0 if show_trajectory else idx
+            seg = arr[start : idx + 1, :]
+            line_by_obj[oid].set_data(seg[:, ix], seg[:, iy])
+            line_by_obj[oid].set_3d_properties(seg[:, iz])
+            dot_by_obj[oid].set_data([arr[idx, ix]], [arr[idx, iy]])
+            dot_by_obj[oid].set_3d_properties([arr[idx, iz]])
+            if frame in ("ric_rect", "ric_curv"):
+                scale_arrays.extend([arr[: idx + 1, ix], arr[: idx + 1, iy], arr[: idx + 1, iz]])
+            artists.extend([line_by_obj[oid], dot_by_obj[oid]])
+        if frame in ("ric_rect", "ric_curv"):
+            lim = _symmetric_limit_from_arrays(scale_arrays, min_lim=1.0, margin=1.15)
+            ax.set_xlim(-lim, lim)
+            ax.set_ylim(-lim, lim)
+            ax.set_zlim(-lim, lim)
+        t_now = float(t_s[min(frame_i, t_s.size - 1)]) if t_s.size else 0.0
+        ax.set_title(f"Trajectories Animation ({frame.upper()})  t={t_now:.1f}s")
+        return artists
+
+    dt = float(np.median(np.diff(t_s))) if t_s.size > 1 else 1.0
+    interval_ms = 1000.0 * dt * float(stride) / max(speed_multiple, 1e-6)
     if mode in ("interactive", "both"):
-        plt.show()
+        _play_interactive_animation(fig, update=update, frame_count=int(frame_ids.size), interval_ms=interval_ms)
+    if mode in ("save", "both"):
+        ani = animation.FuncAnimation(fig, update, frames=int(frame_ids.size), interval=interval_ms, blit=False)
+        if out_path is None:
+            raise ValueError("out_path is required when mode is 'save' or 'both'.")
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            ani.save(str(p), fps=max(float(fps), 1.0))
+        except Exception as exc:
+            print(f"Warning: failed to save animation ({exc}).")
+        del ani
     plt.close(fig)
 
 

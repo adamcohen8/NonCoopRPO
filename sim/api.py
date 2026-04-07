@@ -153,6 +153,15 @@ class SimulationResult:
         return _as_array_map(self.payload.get("truth_by_object", {}))
 
     @property
+    def target_reference_orbit(self) -> np.ndarray:
+        arr = np.array(self.payload.get("target_reference_orbit_truth", []), dtype=float)
+        if arr.size == 0:
+            return np.empty((0, 6), dtype=float)
+        if arr.ndim == 1:
+            return arr.reshape(-1, 6)
+        return arr
+
+    @property
     def belief(self) -> dict[str, np.ndarray]:
         return _as_array_map(self.payload.get("belief_by_object", {}))
 

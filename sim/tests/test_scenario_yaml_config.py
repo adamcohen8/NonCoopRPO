@@ -41,6 +41,7 @@ class TestScenarioYamlConfig(unittest.TestCase):
         self.assertEqual(len(cfg.monte_carlo.variations), 1)
         self.assertEqual(cfg.outputs.mode, "both")
         self.assertEqual(cfg.outputs.output_dir, "outputs/test")
+        self.assertEqual(cfg.target.reference_orbit, {})
 
     def test_invalid_outputs_mode_raises(self):
         with self.assertRaises(ValueError):
@@ -167,6 +168,23 @@ class TestScenarioYamlConfig(unittest.TestCase):
                 }
             )
 
+    def test_algorithm_pointer_file_field_is_rejected(self):
+        with self.assertRaises(ValueError):
+            scenario_config_from_dict(
+                {
+                    "scenario_name": "file_pointer_rejected",
+                    "target": {
+                        "enabled": True,
+                        "orbit_control": {
+                            "module": "sim.control.orbit.zero_controller",
+                            "class_name": "ZeroController",
+                            "file": "plugins/custom_controller.py",
+                        },
+                    },
+                    "simulator": {"duration_s": 10.0, "dt_s": 1.0},
+                }
+            )
+
     def test_simulator_nested_defaults_are_preserved(self):
         cfg = scenario_config_from_dict(
             {
@@ -179,6 +197,32 @@ class TestScenarioYamlConfig(unittest.TestCase):
         self.assertEqual(cfg.simulator.plugin_validation.get("strict"), True)
         self.assertEqual(cfg.simulator.termination.get("earth_impact_enabled"), True)
         self.assertAlmostEqual(float(cfg.simulator.termination.get("earth_radius_km")), 6378.137, places=6)
+
+    def test_target_reference_orbit_config_parses(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "target_reference_orbit",
+                "target": {
+                    "enabled": True,
+                    "reference_orbit": {"enabled": True},
+                },
+                "simulator": {"duration_s": 10.0, "dt_s": 1.0},
+            }
+        )
+        self.assertEqual(cfg.target.reference_orbit, {"enabled": True})
+
+    def test_target_reference_orbit_requires_target_enabled(self):
+        with self.assertRaises(ValueError):
+            scenario_config_from_dict(
+                {
+                    "scenario_name": "target_reference_orbit_invalid",
+                    "target": {
+                        "enabled": False,
+                        "reference_orbit": {"enabled": True},
+                    },
+                    "simulator": {"duration_s": 10.0, "dt_s": 1.0},
+                }
+            )
 
 
 if __name__ == "__main__":

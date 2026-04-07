@@ -1,0 +1,218 @@
+scenario_name: "battlespace_dashboard_hcw_lqr_pursuit_target_evade"
+
+metadata:
+  owner: "codex"
+  notes: "Battlespace dashboard test case: HCW LQR chaser pursuit against a coasting target."
+
+rocket:
+  enabled: false
+  role: "rocket"
+
+chaser:
+  enabled: true
+  role: "chaser"
+  specs:
+    preset_satellite: "BASIC_SATELLITE"
+    dry_mass_kg: 180.0
+    fuel_mass_kg: 20.0
+    thruster: "BASIC_CHEMICAL_Z_BOTTOM"
+    attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
+  initial_state:
+    relative_to_target_ric:
+      frame: "curv"
+      state: [0.0, -5.0, 0.0, 0.0, 0.0, 0.0]
+    attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+    angular_rate_body_rad_s: [0.0, 0.0, 0.0]
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.lqr_no_radial"
+    class_name: "HCWNoRadialLQRController"
+    params:
+      mean_motion_rad_s: 0.001078
+      max_accel_km_s2: 2.0e-5
+      design_dt_s: 1.0
+      ric_curv_state_slice: [0, 6]
+      chief_eci_state_slice: [6, 12]
+      q_weights: [8600.0, 8660.0, 8660.0, 60000.0, 60000.0, 60000.0]
+      r_weights: [1.94e14, 1.94e14]
+  attitude_control:
+    kind: "python"
+    module: "sim.control.attitude.baseline"
+    class_name: "ReactionWheelPDController"
+    params:
+      wheel_axes_body:
+        - [1.0, 0.0, 0.0]
+        - [0.0, 1.0, 0.0]
+        - [0.0, 0.0, 1.0]
+      wheel_torque_limits_nm: [0.05, 0.05, 0.05]
+      desired_attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+      desired_rate_body_rad_s: [0.0, 0.0, 0.0]
+      kp: [0.25, 0.25, 0.25]
+      kd: [3.0, 3.0, 3.0]
+  mission_strategy:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "PursuitMissionStrategy"
+    params:
+      target_id: "target"
+      use_knowledge_for_targeting: false
+      max_accel_km_s2: 2.0e-6
+      align_to_thrust: true
+  mission_execution:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "ControllerPointingExecution"
+    params:
+      thruster_direction_body: [0.0, 0.0, 1.0]
+      alignment_tolerance_deg: 10.0
+      require_attitude_alignment: true
+  mission_objectives: []
+  knowledge:
+    refresh_rate_s: 1.0
+    targets: ["target"]
+    conditions:
+      require_line_of_sight: false
+      max_range_km: 10000.0
+    sensor_error:
+      pos_sigma_km: [0.0, 0.0, 0.0]
+      vel_sigma_km_s: [0.0, 0.0, 0.0]
+    estimation:
+      type: "ekf"
+
+target:
+  enabled: true
+  role: "target"
+  reference_orbit:
+    enabled: true
+  specs:
+    preset_satellite: "BASIC_SATELLITE"
+    dry_mass_kg: 1800.0
+    fuel_mass_kg: 0.0
+    thruster: "BASIC_CHEMICAL_Z_BOTTOM"
+    attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
+  initial_state:
+    coes:
+      a_km: 7000.0
+      ecc: 0.0
+      inc_deg: 45.0
+      raan_deg: 0.0
+      argp_deg: 0.0
+      true_anomaly_deg: 0.0
+    attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+    angular_rate_body_rad_s: [0.0, 0.0, 0.0]
+  orbit_control:
+    kind: "python"
+    module: "sim.control.orbit.zero_controller"
+    class_name: "ZeroController"
+    params: {}
+  attitude_control:
+    kind: "python"
+    module: "sim.control.attitude.baseline"
+    class_name: "ReactionWheelPDController"
+    params:
+      wheel_axes_body:
+        - [1.0, 0.0, 0.0]
+        - [0.0, 1.0, 0.0]
+        - [0.0, 0.0, 1.0]
+      wheel_torque_limits_nm: [0.05, 0.05, 0.05]
+      desired_attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
+      desired_rate_body_rad_s: [0.0, 0.0, 0.0]
+      kp: [0.25, 0.25, 0.25]
+      kd: [3.0, 3.0, 3.0]
+  mission_strategy:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "HoldMissionStrategy"
+    params:
+      attitude_mode: "hold_eci"
+      hold_quat_bn: [1.0, 0.0, 0.0, 0.0]
+  mission_execution:
+    kind: "python"
+    module: "sim.mission.modules"
+    class_name: "ControllerPointingExecution"
+    params:
+      thruster_direction_body: [0.0, 0.0, 1.0]
+      alignment_tolerance_deg: 10.0
+      require_attitude_alignment: false
+  mission_objectives: []
+  knowledge:
+    refresh_rate_s: 1.0
+    targets: ["chaser"]
+    conditions:
+      require_line_of_sight: false
+      max_range_km: 10000.0
+    sensor_error:
+      pos_sigma_km: [0.0, 0.0, 0.0]
+      vel_sigma_km_s: [0.0, 0.0, 0.0]
+    estimation:
+      type: "ekf"
+
+simulator:
+  scenario_type: "auto"
+  duration_s: 1000.0
+  dt_s: 1.0
+  dynamics:
+    orbit:
+      model: "two_body"
+      orbit_substep_s: 1.0
+      j2: false
+      j3: false
+      j4: false
+      drag: false
+      srp: false
+      third_body_sun: false
+      third_body_moon: false
+    attitude:
+      enabled: true
+      attitude_substep_s: 0.1
+      disturbance_torques:
+        gravity_gradient: false
+        magnetic: false
+        drag: false
+        srp: false
+    rocket:
+      enabled: false
+  environment:
+    ephemeris_mode: "analytic_simple"
+    atmosphere_env: {}
+  plugin_validation:
+    strict: true
+  termination:
+    earth_impact_enabled: false
+    earth_radius_km: 6378.137
+
+outputs:
+  output_dir: "outputs/battlespace_dashboard_hcw_lqr_pursuit_target_evade"
+  mode: "interactive"
+  stats:
+    enabled: true
+    print_summary: true
+    save_json: true
+    save_csv: false
+    save_full_log: false
+  plots:
+    enabled: false
+    figure_ids: []
+  animations:
+    enabled: true
+    types:
+      - "battlespace_dashboard"
+    battlespace_dashboard_target_object_id: "target"
+    battlespace_dashboard_chaser_object_id: "chaser"
+    battlespace_dashboard_show_trajectory: true
+    battlespace_dashboard_attitude_dims_m:
+      target: [2.0, 1.5, 1.5]
+      chaser: [2.0, 1.5, 1.5]
+    battlespace_dashboard_thruster_active_threshold_km_s2: 1.0e-15
+    fps: 30
+    speed_multiple: 60.0
+    frame_stride: 1
+
+monte_carlo:
+  enabled: false
+  iterations: 1
+  base_seed: 123
+  variations: []
+
+analysis:
+  enabled: false

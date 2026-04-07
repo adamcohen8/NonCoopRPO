@@ -12,6 +12,17 @@ from sim import SimulationConfig, SimulationResult, SimulationSession, Simulatio
 from sim.master_simulator import run_master_simulation
 
 
+class ConstantIntegratedThrustMission:
+    def __init__(self, thrust_eci_km_s2: list[float]):
+        self.thrust_eci_km_s2 = np.array(thrust_eci_km_s2, dtype=float)
+
+    def update(self, **_: object) -> dict[str, object]:
+        return {
+            "mission_use_integrated_command": True,
+            "thrust_eci_km_s2": self.thrust_eci_km_s2.copy(),
+        }
+
+
 def _api_config(output_dir: Path, *, monte_carlo: bool = False) -> dict:
     return {
         "scenario_name": "api_smoke",
@@ -130,6 +141,23 @@ def _attitude_api_config(output_dir: Path) -> dict:
     )
     cfg["target"]["specs"]["inertia_kg_m2"] = [[10.0, 0.0, 0.0], [0.0, 12.0, 0.0], [0.0, 0.0, 8.0]]
     cfg["simulator"]["dynamics"]["attitude"] = {"enabled": True}
+    return cfg
+
+
+def _target_reference_orbit_api_config(output_dir: Path) -> dict:
+    cfg = _api_config(output_dir, monte_carlo=False)
+    cfg["target"]["reference_orbit"] = {"enabled": True}
+    cfg["target"]["initial_state"] = {
+        "position_eci_km": [7000.0, 0.0, 0.0],
+        "velocity_eci_km_s": [0.0, 0.0, 0.0],
+    }
+    cfg["target"]["mission_objectives"] = [
+        {
+            "module": "sim.tests.test_api",
+            "class_name": "ConstantIntegratedThrustMission",
+            "params": {"thrust_eci_km_s2": [1.0, 0.0, 0.0]},
+        }
+    ]
     return cfg
 
 
@@ -289,3 +317,16 @@ class TestSimulationApi:
 
             assert result.truth["target"].shape[1] == 14
             assert result.belief["target"].shape[1] == 13
+
+    def test_session_exposes_target_reference_orbit_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SimulationConfig.from_dict(_target_reference_orbit_api_config(Path(tmpdir)))
+
+            with patch("sim.runtime_support.EARTH_MU_KM3_S2", 0.0):
+                result = SimulationSession.from_config(cfg).run()
+
+            assert result.summary["target_reference_orbit_enabled"] is True
+            assert result.target_reference_orbit.shape == (3, 6)
+            assert np.allclose(result.target_reference_orbit[0, :3], [7000.0, 0.0, 0.0])
+            assert np.allclose(result.target_reference_orbit[-1, :3], [7000.0, 0.0, 0.0])
+            assert not np.allclose(result.truth["target"][-1, :3], result.target_reference_orbit[-1, :3])

@@ -1693,6 +1693,7 @@ def _plot_outputs(
     cfg: SimulationScenarioConfig,
     t_s: np.ndarray,
     truth_hist: dict[str, np.ndarray],
+    target_reference_orbit_truth: np.ndarray | None,
     thrust_hist: dict[str, np.ndarray],
     desired_attitude_hist: dict[str, np.ndarray] | None,
     knowledge_hist: dict[str, dict[str, np.ndarray]],
@@ -1703,6 +1704,7 @@ def _plot_outputs(
         cfg=cfg,
         t_s=t_s,
         truth_hist=truth_hist,
+        target_reference_orbit_truth=target_reference_orbit_truth,
         thrust_hist=thrust_hist,
         desired_attitude_hist=desired_attitude_hist,
         knowledge_hist=knowledge_hist,
@@ -1718,13 +1720,18 @@ def _animate_outputs(
     cfg: SimulationScenarioConfig,
     t_s: np.ndarray,
     truth_hist: dict[str, np.ndarray],
+    thrust_hist: dict[str, np.ndarray],
+    target_reference_orbit_truth: np.ndarray | None,
     outdir: Path,
 ) -> dict[str, str]:
     return _animate_outputs_impl(
         cfg=cfg,
         t_s=t_s,
         truth_hist=truth_hist,
+        thrust_hist=thrust_hist,
+        target_reference_orbit_truth=target_reference_orbit_truth,
         outdir=outdir,
+        resolve_satellite_isp_s=_resolve_satellite_isp_s,
     )
 
 
@@ -2781,6 +2788,7 @@ class _SingleRunEngine:
             cfg=self.cfg,
             t_s=t_out,
             truth_hist=truth_out,
+            target_reference_orbit_truth=None,
             thrust_hist=thrust_out,
             desired_attitude_hist=desired_attitude_out,
             knowledge_hist=knowledge_out,
@@ -2798,6 +2806,8 @@ class _SingleRunEngine:
             cfg=self.cfg,
             t_s=t_out,
             truth_hist=truth_out,
+            thrust_hist=thrust_out,
+            target_reference_orbit_truth=None,
             outdir=self.outdir,
         )
 
