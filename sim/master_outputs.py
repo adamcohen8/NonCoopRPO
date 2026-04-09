@@ -870,6 +870,7 @@ def animate_outputs(
             )
             active_mask = thrust_norm > active_threshold
             p = outdir / f"{oid}_attitude_ric_thruster.mp4"
+            body_facecolor = "#1F77B4" if oid == "target" else "#D62728"
             animate_rectangular_prism_attitude(
                 t_s=t_s[: hist.shape[0]],
                 truth_hist=hist,
@@ -880,6 +881,9 @@ def animate_outputs(
                 thruster_active_mask=active_mask,
                 thruster_position_body_m=None if thruster_mounts.get(oid) is None else thruster_mounts[oid]["position_body_m"],
                 thruster_direction_body=None if thruster_mounts.get(oid) is None else thruster_mounts[oid]["direction_body"],
+                body_facecolor=body_facecolor,
+                thruster_inactive_facecolor="#808080",
+                thruster_active_facecolor="#D95F02",
                 mode=mode,
                 out_path=str(p),
                 fps=fps,

@@ -1,6 +1,7 @@
 suite_name: hcw_lqr_initial_condition_bench
 description: Compare HCW LQR variants across a small set of two-body rendezvous initial conditions.
 output_dir: outputs/controller_bench_hcw_lqr_initial_conditions
+plot_mode: save
 
 controller_target:
   object_id: chaser
@@ -51,6 +52,19 @@ variants:
         chief_eci_state_slice: [6, 12]
         q_weights: [15000.0, 15000.0, 15000.0, 2500.0, 2500.0, 2500.0]
         r_weights: [1.0e13, 1.0e13, 1.0e13]
+
+  - name: hcw_lqr_no_radial
+    description: Compare against a no-radial-burn HCW LQR family across the same initial-condition set.
+    controller:
+      module: sim.control.orbit.lqr_no_radial
+      class_name: HCWNoRadialLQRController
+      params:
+        mean_motion_rad_s: 0.001078
+        max_accel_km_s2: 2.0e-5
+        design_dt_s: 1.0
+        ric_curv_state_slice: [0, 6]
+        chief_eci_state_slice: [6, 12]
+        r_weights: [1.94e13, 1.94e13]
 
 objectives:
   - kind: relative_rendezvous

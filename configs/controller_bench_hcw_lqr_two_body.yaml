@@ -1,6 +1,7 @@
 suite_name: hcw_lqr_two_body_bench
 description: Compare HCW LQR controller variants on a two-body rendezvous baseline with direct actuation.
 output_dir: outputs/controller_bench_hcw_lqr_two_body
+plot_mode: save
 
 controller_target:
   object_id: chaser
@@ -51,6 +52,35 @@ variants:
         chief_eci_state_slice: [6, 12]
         q_weights: [15000.0, 15000.0, 15000.0, 2500.0, 2500.0, 2500.0]
         r_weights: [1.0e13, 1.0e13, 1.0e13]
+
+  - name: hcw_lqr_no_radial
+    description: HCW LQR variant with only in-track and cross-track control authority.
+    controller:
+      module: sim.control.orbit.lqr_no_radial
+      class_name: HCWNoRadialLQRController
+      params:
+        mean_motion_rad_s: 0.001078
+        max_accel_km_s2: 2.0e-5
+        design_dt_s: 1.0
+        ric_curv_state_slice: [0, 6]
+        chief_eci_state_slice: [6, 12]
+        r_weights: [1.94e13, 1.94e13]
+
+  - name: hcw_lqr_r_sweep
+    description: Sweep the full-actuation LQR control penalty without duplicating the base controller block.
+    controller:
+      module: sim.control.orbit.lqr
+      class_name: HCWLQRController
+      params:
+        mean_motion_rad_s: 0.001078
+        max_accel_km_s2: 2.0e-5
+        design_dt_s: 1.0
+        ric_curv_state_slice: [0, 6]
+        chief_eci_state_slice: [6, 12]
+    sweep:
+      controller.params.r_weights:
+        - [1.0e13, 1.0e13, 1.0e13]
+        - [1.94e13, 1.94e13, 1.94e13]
 
 objectives:
   - kind: relative_rendezvous

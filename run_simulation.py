@@ -203,45 +203,6 @@ def _print_monte_carlo_summary(out: dict) -> None:
     ]
     print("")
     print("=" * 102)
-
-
-def _print_sensitivity_summary(out: dict) -> None:
-    analysis = dict(out.get("analysis", {}) or {})
-    baseline = dict(out.get("baseline", {}) or {})
-    rankings = list(out.get("parameter_rankings", []) or [])
-    scenario_description = str(out.get("scenario_description", "") or "").strip()
-    print("")
-    print("=" * 102)
-    print("MASTER ANALYSIS COMPLETED")
-    print("=" * 102)
-    _print_field("Config", str(out.get("config_path", "")))
-    _print_field("Scenario", str(out.get("scenario_name", "unknown")))
-    if scenario_description:
-        _print_field("Desc", scenario_description)
-    _print_field("Study", "Sensitivity")
-    _print_field("Method", str(analysis.get("method", "one_at_a_time")))
-    _print_field("Runs", str(int(analysis.get("run_count", len(out.get("runs", []) or [])))))
-    _print_field("Parameters", str(int(analysis.get("parameter_count", len(out.get("parameter_summaries", []) or [])))))
-    if baseline:
-        _print_field("Baseline", str(baseline.get("source", "available")))
-    if rankings:
-        top = rankings[0]
-        driver_score = None
-        if top.get("max_abs_delta_from_baseline") is not None:
-            try:
-                driver_score = f"|delta|={float(top.get('max_abs_delta_from_baseline', 0.0)):.3g}"
-            except (TypeError, ValueError):
-                driver_score = None
-        if driver_score is None and top.get("max_abs_correlation") is not None:
-            try:
-                driver_score = f"|corr|={float(top.get('max_abs_correlation', 0.0)):.3g}"
-            except (TypeError, ValueError):
-                driver_score = None
-        _print_field(
-            "Top Driver",
-            f"{top.get('parameter_path', 'unknown')}" + (f" ({driver_score})" if driver_score else ""),
-        )
-    print("=" * 102)
     print("MASTER MONTE CARLO COMPLETED")
     print("=" * 102)
     _print_field("Config", str(out.get("config_path", "")))
@@ -339,14 +300,57 @@ def _print_sensitivity_summary(out: dict) -> None:
             print("Top Failure Modes")
             for row in top_fail:
                 try:
-                    print(f"{str(row.get('reason', 'unknown')):<40}{int(row.get('count', 0)):>8d}{100.0*float(row.get('rate', 0.0)):>10.1f}%")
+                    print(
+                        f"{str(row.get('reason', 'unknown')):<40}"
+                        f"{int(row.get('count', 0)):>8d}"
+                        f"{100.0 * float(row.get('rate', 0.0)):>10.1f}%"
+                    )
                 except (TypeError, ValueError):
                     continue
     elif runs:
         durations = [float(dict(r.get("summary", {}) or {}).get("duration_s", 0.0)) for r in runs]
         _print_field("Duration", f"min={min(durations):.1f}s  max={max(durations):.1f}s")
     if guardrail_event_totals:
-        _print_field("Guardrails", f"mean={sum(guardrail_event_totals)/len(guardrail_event_totals):.1f}  max={max(guardrail_event_totals)}")
+        _print_field("Guardrails", f"mean={sum(guardrail_event_totals) / len(guardrail_event_totals):.1f}  max={max(guardrail_event_totals)}")
+    print("=" * 102)
+
+
+def _print_sensitivity_summary(out: dict) -> None:
+    analysis = dict(out.get("analysis", {}) or {})
+    baseline = dict(out.get("baseline", {}) or {})
+    rankings = list(out.get("parameter_rankings", []) or [])
+    scenario_description = str(out.get("scenario_description", "") or "").strip()
+    print("")
+    print("=" * 102)
+    print("MASTER ANALYSIS COMPLETED")
+    print("=" * 102)
+    _print_field("Config", str(out.get("config_path", "")))
+    _print_field("Scenario", str(out.get("scenario_name", "unknown")))
+    if scenario_description:
+        _print_field("Desc", scenario_description)
+    _print_field("Study", "Sensitivity")
+    _print_field("Method", str(analysis.get("method", "one_at_a_time")))
+    _print_field("Runs", str(int(analysis.get("run_count", len(out.get("runs", []) or [])))))
+    _print_field("Parameters", str(int(analysis.get("parameter_count", len(out.get("parameter_summaries", []) or [])))))
+    if baseline:
+        _print_field("Baseline", str(baseline.get("source", "available")))
+    if rankings:
+        top = rankings[0]
+        driver_score = None
+        if top.get("max_abs_delta_from_baseline") is not None:
+            try:
+                driver_score = f"|delta|={float(top.get('max_abs_delta_from_baseline', 0.0)):.3g}"
+            except (TypeError, ValueError):
+                driver_score = None
+        if driver_score is None and top.get("max_abs_correlation") is not None:
+            try:
+                driver_score = f"|corr|={float(top.get('max_abs_correlation', 0.0)):.3g}"
+            except (TypeError, ValueError):
+                driver_score = None
+        _print_field(
+            "Top Driver",
+            f"{top.get('parameter_path', 'unknown')}" + (f" ({driver_score})" if driver_score else ""),
+        )
     print("=" * 102)
 
 
@@ -574,6 +578,21 @@ def _print_serial_benchmark(config_path: str, benchmark_runs: int) -> None:
 
 
 def _print_controller_bench_summary(out: dict) -> None:
+    def _format_complex_locations(items: list[dict]) -> str:
+        parts: list[str] = []
+        for item in items:
+            try:
+                real = float(dict(item or {}).get("real", 0.0))
+                imag = float(dict(item or {}).get("imag", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if abs(imag) < 1e-12:
+                parts.append(f"{real:.6g}")
+            else:
+                sign = "+" if imag >= 0.0 else "-"
+                parts.append(f"{real:.6g}{sign}{abs(imag):.6g}j")
+        return ", ".join(parts) if parts else "(none)"
+
     print("")
     print("=" * 102)
     print("CONTROLLER BENCH COMPLETED")
@@ -586,6 +605,7 @@ def _print_controller_bench_summary(out: dict) -> None:
     _print_field("Target", f"{target.get('object_id', 'target')}.{target.get('slot', 'attitude_control')}")
     _print_field("Cases", str(len(list(out.get("cases", []) or []))))
     _print_field("Variants", str(len(list(out.get("variants", []) or []))))
+    _print_field("Plot Mode", str(out.get("plot_mode", "save")))
     execution = dict(out.get("execution", {}) or {})
     if execution:
         if bool(execution.get("parallel_enabled", False)):
@@ -594,22 +614,36 @@ def _print_controller_bench_summary(out: dict) -> None:
             _print_field("Execution", "Serial (parallel fallback)")
     print("-" * 102)
     print("Variant Summary")
+    variant_info = {str(item.get("name", "")): dict(item) for item in list(out.get("variants", []) or [])}
     for summary in list(out.get("variant_summaries", []) or []):
         metric_means = dict(summary.get("metric_means", {}) or {})
         metric_txt = ", ".join(f"{k}={metric_means[k]:.3g}" for k in sorted(metric_means.keys())[:3])
         if metric_txt:
             metric_txt = f"  {metric_txt}"
+        variant_name = str(summary.get("variant_name", "unknown"))
         print(
-            f"{str(summary.get('variant_name', 'unknown')):<24} "
+            f"{variant_name:<24} "
             f"pass_rate={100.0 * float(summary.get('pass_rate', 0.0)):>6.1f}%  "
             f"runs={int(summary.get('run_count', 0)):>3d}{metric_txt}"
         )
+        linear_summary = dict(variant_info.get(variant_name, {}).get("linear_system_summary", {}) or {})
+        if linear_summary:
+            print(f"  poles(cl): {_format_complex_locations(list(linear_summary.get('closed_loop_poles', []) or []))}")
+            zero_rows = list(linear_summary.get("position_channel_zeros", []) or [])
+            if zero_rows:
+                zero_txt = " | ".join(
+                    f"{str(row.get('axis', '?'))}: {_format_complex_locations(list(dict(row or {}).get('zeros', []) or []))}"
+                    for row in zero_rows
+                )
+                print(f"  zeros: {zero_txt}")
     artifacts = dict(out.get("artifacts", {}) or {})
     if artifacts:
         print("-" * 102)
         _print_field("Summary JSON", str(artifacts.get("summary_json", "")))
         _print_field("Summary MD", str(artifacts.get("summary_md", "")))
         _print_field("Comparison CSV", str(artifacts.get("comparison_csv", "")))
+        if artifacts.get("pass_rate_plot_png"):
+            _print_field("Pass Rate Plot", str(artifacts.get("pass_rate_plot_png", "")))
     print("=" * 102)
 
 

@@ -71,6 +71,7 @@ class ControllerBenchConfig:
     suite_name: str
     description: str = ""
     output_dir: Path = Path("outputs/controller_bench")
+    plot_mode: str = "save"
     controller_target: ControllerBenchTarget = field(
         default_factory=lambda: ControllerBenchTarget(object_id="target", slot="attitude_control")
     )

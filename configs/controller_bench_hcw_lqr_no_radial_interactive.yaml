@@ -1,0 +1,47 @@
+suite_name: hcw_lqr_no_radial_interactive
+description: Interactive controller-bench suite for the HCW no-radial LQR controller on the baseline two-body rendezvous case.
+output_dir: outputs/controller_bench_hcw_lqr_no_radial_interactive
+plot_mode: interactive
+
+controller_target:
+  object_id: chaser
+  slot: orbit_control
+
+save_run_payloads: true
+disable_plots: true
+disable_animations: true
+print_individual_run_summaries: false
+parallel_enabled: false
+parallel_workers: 1
+
+variants:
+  - name: hcw_lqr_no_radial
+    description: HCW LQR variant with only in-track and cross-track control authority.
+    controller:
+      module: sim.control.orbit.lqr_no_radial
+      class_name: HCWNoRadialLQRController
+      params:
+        mean_motion_rad_s: 0.001078
+        max_accel_km_s2: 2.0e-5
+        design_dt_s: 1.0
+        ric_curv_state_slice: [0, 6]
+        chief_eci_state_slice: [6, 12]
+        q_weights: [80.0, 10, 1.0, 1.0, 2.0, 0.1]
+        r_weights: [1.0e12, 1.0e12]
+
+objectives:
+  - kind: relative_rendezvous
+    name: safe_rendezvous
+    object_id: chaser
+    reference_object_id: target
+    keepout_radius_km: 0.5
+    max_time_inside_keepout_s: 0.0
+    max_final_relative_distance_km: 2.0
+    max_final_relative_speed_km_s: 0.01
+    max_total_dv_m_s: 10.0
+    require_not_terminated_early: true
+
+cases:
+  - name: two_body_perfect
+    description: Two-body dynamics only, direct no-radial HCW LQR actuation, no attitude or knowledge complexity.
+    config_path: hcw_lqr_two_body_perfect.yaml

@@ -797,27 +797,35 @@ def _thruster_marker_geometry_body(
     )
     axis, side, up = _orthonormal_basis_from_axis(outward_axis)
 
-    base_half_width = 0.10 * marker_scale
-    neck_offset = 0.01 * marker_scale
-    face_offset = 0.16 * marker_scale
-    tip = mount + axis * neck_offset
-    base_center = mount + axis * face_offset
-    base = np.vstack(
-        [
-            base_center - base_half_width * side - base_half_width * up,
-            base_center - base_half_width * side + base_half_width * up,
-            base_center + base_half_width * side + base_half_width * up,
-            base_center + base_half_width * side - base_half_width * up,
-        ]
-    )
-    points = np.vstack([base, tip.reshape(1, 3)])
-    faces = [
-        [0, 1, 4],
-        [1, 2, 4],
-        [2, 3, 4],
-        [3, 0, 4],
-        [0, 1, 2, 3],
-    ]
+    inner_radius = 0.065 * marker_scale
+    outer_radius = 0.13 * marker_scale
+    collar_radius = 0.17 * marker_scale
+    nozzle_length = 0.26 * marker_scale
+    base_offset = 0.02 * marker_scale
+    exit_offset = base_offset + nozzle_length
+    collar_offset = 0.008 * marker_scale
+    segments = 24
+
+    theta = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False, dtype=float)
+    unit_ring = np.vstack([np.cos(theta), np.sin(theta)]).T
+    base_center = mount + axis * base_offset
+    exit_center = mount + axis * exit_offset
+    collar_center = mount + axis * collar_offset
+    base_ring = np.vstack([base_center + inner_radius * (c * side + s * up) for c, s in unit_ring])
+    exit_ring = np.vstack([exit_center + outer_radius * (c * side + s * up) for c, s in unit_ring])
+    collar_ring = np.vstack([collar_center + collar_radius * (c * side + s * up) for c, s in unit_ring])
+    points = np.vstack([base_ring, exit_ring, collar_ring])
+
+    faces: list[list[int]] = []
+    for idx in range(segments):
+        nxt = (idx + 1) % segments
+        faces.append([idx, nxt, segments + nxt, segments + idx])
+    for idx in range(segments):
+        nxt = (idx + 1) % segments
+        faces.append([2 * segments + idx, 2 * segments + nxt, nxt, idx])
+    faces.append(list(range(segments)))
+    faces.append(list(range(2 * segments - 1, segments - 1, -1)))
+    faces.append(list(range(3 * segments - 1, 2 * segments - 1, -1)))
     return points, faces
 
 
@@ -857,6 +865,9 @@ def animate_rectangular_prism_attitude(
     thruster_active_mask: np.ndarray | None = None,
     thruster_position_body_m: np.ndarray | None = None,
     thruster_direction_body: np.ndarray | None = None,
+    body_facecolor: str = "#1F77B4",
+    thruster_inactive_facecolor: str = "#808080",
+    thruster_active_facecolor: str = "#D95F02",
     mode: PlotMode = "interactive",
     out_path: str | None = None,
     fps: float = 30.0,
@@ -887,11 +898,15 @@ def animate_rectangular_prism_attitude(
     ax.set_zlim(-max_dim, max_dim)
     ax.set_box_aspect((1, 1, 1))
     ax.set_title(f"Rectangular Prism Attitude Animation ({frame.upper()})")
-    inactive_facecolor = "#4C9F70"
-    active_facecolor = "#D95F02"
-    poly = Poly3DCollection([], alpha=0.35, facecolor=inactive_facecolor, edgecolor="k", linewidth=0.7)
+    poly = Poly3DCollection([], alpha=0.35, facecolor=body_facecolor, edgecolor="k", linewidth=0.7)
     ax.add_collection3d(poly)
-    thruster_poly = Poly3DCollection([], alpha=0.85, facecolor="#5C4033", edgecolor="#2F241E", linewidth=0.6)
+    thruster_poly = Poly3DCollection(
+        [],
+        alpha=1.0,
+        facecolor=thruster_inactive_facecolor,
+        edgecolor="#2F241E",
+        linewidth=0.85,
+    )
     ax.add_collection3d(thruster_poly)
 
     def _frame_verts(i: int) -> list[np.ndarray]:
@@ -904,7 +919,7 @@ def animate_rectangular_prism_attitude(
 
     def update(i: int):
         poly.set_verts(_frame_verts(i))
-        poly.set_facecolor(active_facecolor if bool(active_mask[i]) else inactive_facecolor)
+        poly.set_facecolor(body_facecolor)
         thruster_poly.set_verts(
             _marker_frame_faces(
                 marker_points_body=marker_points_body,
@@ -913,6 +928,7 @@ def animate_rectangular_prism_attitude(
                 frame_idx=i,
             )
         )
+        thruster_poly.set_facecolor(thruster_active_facecolor if bool(active_mask[i]) else thruster_inactive_facecolor)
         ax.set_xlabel(f"t={t_s[i]:.1f}s")
         return [poly, thruster_poly]
 
@@ -1027,16 +1043,19 @@ def animate_battlespace_dashboard(
     rel_range_km = np.linalg.norm(rel_r_km, axis=1)
     rel_speed_km_s = np.linalg.norm(rel_v_km_s, axis=1)
 
-    fig = plt.figure(figsize=cap_figsize(14, 10))
-    ax_ri = fig.add_subplot(2, 2, 1)
-    ax_rc = fig.add_subplot(2, 2, 2)
-    ax_chaser = fig.add_subplot(2, 2, 3, projection="3d")
-    ax_target = fig.add_subplot(2, 2, 4, projection="3d")
+    fig = plt.figure(figsize=cap_figsize(12, 10))
+    gs = fig.add_gridspec(2, 2, width_ratios=[1.2, 0.85])
+    ax_ri = fig.add_subplot(gs[0, 0])
+    ax_chaser = fig.add_subplot(gs[0, 1], projection="3d")
+    ax_rc = fig.add_subplot(gs[1, 0])
+    ax_target = fig.add_subplot(gs[1, 1], projection="3d")
 
     color_by_object = {
-        target_object_id: "#D95F02",
-        chaser_object_id: "#1F77B4",
+        target_object_id: "#1F77B4",
+        chaser_object_id: "#D62728",
     }
+    thruster_inactive_facecolor = "#808080"
+    thruster_active_facecolor = "#D95F02"
 
     for ax, plane, lim, title in (
         (ax_ri, "ri", 1.0, "RI Relative Motion"),
@@ -1050,8 +1069,6 @@ def animate_battlespace_dashboard(
         ax.set_title(title)
         ax.grid(True, alpha=0.3)
 
-    inactive_facecolor = "#4C9F70"
-    active_facecolor = "#D95F02"
     prism_poly_by_object: dict[str, Poly3DCollection] = {}
     thruster_poly_by_object: dict[str, Poly3DCollection] = {}
     for oid, ax, title in (
@@ -1070,10 +1087,16 @@ def animate_battlespace_dashboard(
         ax.set_ylabel("I (m)")
         ax.set_zlabel("C (m)")
         ax.set_title(title)
-        poly = Poly3DCollection([], alpha=0.35, facecolor=inactive_facecolor, edgecolor="k", linewidth=0.7)
+        poly = Poly3DCollection([], alpha=0.35, facecolor=color_by_object[oid], edgecolor="k", linewidth=0.7)
         ax.add_collection3d(poly)
         prism_poly_by_object[oid] = poly
-        thruster_poly = Poly3DCollection([], alpha=0.85, facecolor="#5C4033", edgecolor="#2F241E", linewidth=0.6)
+        thruster_poly = Poly3DCollection(
+            [],
+            alpha=1.0,
+            facecolor=thruster_inactive_facecolor,
+            edgecolor="#2F241E",
+            linewidth=0.85,
+        )
         ax.add_collection3d(thruster_poly)
         thruster_poly_by_object[oid] = thruster_poly
 
@@ -1177,9 +1200,7 @@ def animate_battlespace_dashboard(
                     frame_idx=frame_i,
                 )
             )
-            prism_poly_by_object[oid].set_facecolor(
-                active_facecolor if bool(active_by_object[oid][frame_i]) else inactive_facecolor
-            )
+            prism_poly_by_object[oid].set_facecolor(color_by_object[oid])
             thruster_poly_by_object[oid].set_verts(
                 _marker_frame_faces(
                     marker_points_body=marker_points_by_object[oid],
@@ -1187,6 +1208,9 @@ def animate_battlespace_dashboard(
                     faces=marker_faces_by_object[oid],
                     frame_idx=frame_i,
                 )
+            )
+            thruster_poly_by_object[oid].set_facecolor(
+                thruster_active_facecolor if bool(active_by_object[oid][frame_i]) else thruster_inactive_facecolor
             )
             artists.append(prism_poly_by_object[oid])
             artists.append(thruster_poly_by_object[oid])

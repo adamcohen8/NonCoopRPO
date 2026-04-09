@@ -59,6 +59,28 @@ class TestHCWNoRadialLQRController(unittest.TestCase):
         self.assertAlmostEqual(float(accel_ric[0]), 0.0, places=12)
         self.assertFalse(np.allclose(cmd.thrust_eci_km_s2, accel_ric))
 
+    def test_linear_feedback_debug_exposes_only_in_track_and_cross_track_axes(self):
+        ctrl = HCWNoRadialLQRController(mean_motion_rad_s=0.0011, max_accel_km_s2=1e-4, design_dt_s=10.0)
+        state = np.zeros(12)
+        state[0:6] = np.array([0.6, -0.5, 0.25, 0.01, -0.02, 0.03])
+        state[6:12] = np.array([7000.0, 0.0, 0.0, 0.0, 7.5, 0.0])
+        belief = StateBelief(state=state, covariance=np.eye(12), last_update_t_s=0.0)
+        cmd = ctrl.act(belief, t_s=0.0, budget_ms=1.0)
+        debug = dict(cmd.mode_flags["linear_feedback_debug"])
+        self.assertEqual(debug["control_axes"], ["I", "C"])
+        contrib = np.array(debug["term_contributions_post_limit"], dtype=float)
+        self.assertEqual(contrib.shape, (2, 6))
+        self.assertTrue(np.allclose(np.sum(contrib, axis=1), np.array(debug["control_post_limit"], dtype=float)))
+
+    def test_linear_system_summary_reports_closed_loop_poles_and_axis_zeros(self):
+        ctrl = HCWNoRadialLQRController(mean_motion_rad_s=0.0011, max_accel_km_s2=1e-4, design_dt_s=10.0)
+        summary = ctrl.linear_system_summary()
+        self.assertEqual(summary["system_type"], "discrete_state_feedback")
+        self.assertEqual(summary["control_axes"], ["I", "C"])
+        self.assertEqual(len(summary["closed_loop_poles"]), 6)
+        self.assertEqual(len(summary["position_channel_zeros"]), 2)
+        self.assertEqual(summary["position_channel_zeros"][0]["axis"], "I")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -281,6 +281,9 @@ def test_animate_outputs_marks_thruster_active_in_ric_attitude_animation(monkeyp
         thruster_active_mask: np.ndarray | None = None,
         thruster_position_body_m: np.ndarray | None = None,
         thruster_direction_body: np.ndarray | None = None,
+        body_facecolor: str = "#1F77B4",
+        thruster_inactive_facecolor: str = "#808080",
+        thruster_active_facecolor: str = "#D95F02",
         mode: str = "interactive",
         out_path: str | None = None,
         fps: float = 30.0,
@@ -295,6 +298,9 @@ def test_animate_outputs_marks_thruster_active_in_ric_attitude_animation(monkeyp
         captured["thruster_direction_body"] = (
             None if thruster_direction_body is None else np.array(thruster_direction_body, dtype=float)
         )
+        captured["body_facecolor"] = body_facecolor
+        captured["thruster_inactive_facecolor"] = thruster_inactive_facecolor
+        captured["thruster_active_facecolor"] = thruster_active_facecolor
         captured["out_path"] = out_path
 
     def _noop(*args, **kwargs) -> None:

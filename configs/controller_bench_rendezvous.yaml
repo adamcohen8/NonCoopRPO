@@ -1,6 +1,7 @@
 suite_name: rendezvous_hcw_bench
 description: Compare orbit controllers on short safe-rendezvous benchmark cases.
 output_dir: outputs/controller_bench_rendezvous
+plot_mode: save
 controller_target:
   object_id: chaser
   slot: orbit_control

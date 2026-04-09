@@ -21,7 +21,134 @@ class HCWLQRController(Controller):
     r_weights: np.ndarray = field(default_factory=lambda: np.ones(3) * 1.94e13)
     riccati_max_iter: int = 500
     riccati_tol: float = 1e-8
+    _ad: np.ndarray = field(init=False, repr=False)
+    _bd: np.ndarray = field(init=False, repr=False)
     _k_gain: np.ndarray = field(init=False, repr=False)
+
+    @staticmethod
+    def _control_law_label(state_signs: np.ndarray) -> str:
+        signs = np.array(state_signs, dtype=float).reshape(-1)
+        if signs.size > 0 and np.all(signs < 0.0):
+            return "Kx"
+        if signs.size > 0 and np.all(signs > 0.0):
+            return "-Kx"
+        return "-K(state_signs .* x)"
+
+    @staticmethod
+    def _linear_feedback_debug_payload(
+        *,
+        control_axes: list[str],
+        k_gain: np.ndarray,
+        x_rect: np.ndarray,
+        x_effective: np.ndarray,
+        control_pre_limit: np.ndarray,
+        control_post_limit: np.ndarray,
+        limit_scale: float,
+        state_signs: np.ndarray,
+    ) -> dict[str, object]:
+        term_contributions_pre_limit = -(np.array(k_gain, dtype=float) * np.array(x_effective, dtype=float)[None, :])
+        term_contributions_post_limit = float(limit_scale) * term_contributions_pre_limit
+        return {
+            "law_label": HCWLQRController._control_law_label(state_signs),
+            "frame": "RIC",
+            "units": "km_s2",
+            "control_axes": list(control_axes),
+            "state_labels": ["R", "I", "C", "dR", "dI", "dC"],
+            "gain_matrix": np.array(k_gain, dtype=float).tolist(),
+            "state_rect": np.array(x_rect, dtype=float).tolist(),
+            "state_effective": np.array(x_effective, dtype=float).tolist(),
+            "control_pre_limit": np.array(control_pre_limit, dtype=float).tolist(),
+            "control_post_limit": np.array(control_post_limit, dtype=float).tolist(),
+            "limit_scale": float(limit_scale),
+            "term_contributions_pre_limit": term_contributions_pre_limit.tolist(),
+            "term_contributions_post_limit": term_contributions_post_limit.tolist(),
+        }
+
+    @staticmethod
+    def _complex_pairs(values: np.ndarray) -> list[dict[str, float]]:
+        arr = np.array(values, dtype=complex).reshape(-1)
+        ordered = sorted(arr.tolist(), key=lambda z: (float(np.real(z)), float(np.imag(z))))
+        return [{"real": float(np.real(z)), "imag": float(np.imag(z))} for z in ordered]
+
+    @staticmethod
+    def _position_channel_zeros(ad: np.ndarray, bd_col: np.ndarray, c_row: np.ndarray) -> np.ndarray:
+        ad = np.array(ad, dtype=float)
+        b = np.array(bd_col, dtype=float).reshape(-1)
+        c = np.array(c_row, dtype=float).reshape(-1)
+        n = int(ad.shape[0])
+        if ad.shape != (n, n) or b.size != n or c.size != n:
+            return np.array([], dtype=complex)
+
+        poles = np.linalg.eigvals(ad)
+        den = np.poly(poles)
+        eye = np.eye(n, dtype=complex)
+        sample_points: list[complex] = []
+        for radius in (0.2, 0.45, 0.7, 0.9, 1.15, 1.4, 1.7, 2.1):
+            sample_points.extend(
+                [
+                    complex(radius, 0.0),
+                    complex(-radius, 0.0),
+                    complex(0.0, radius),
+                    complex(0.0, -radius),
+                    complex(radius / np.sqrt(2.0), radius / np.sqrt(2.0)),
+                    complex(-radius / np.sqrt(2.0), radius / np.sqrt(2.0)),
+                ]
+            )
+
+        samples: list[tuple[complex, complex]] = []
+        for z in sample_points:
+            if min(abs(z - pole) for pole in poles) < 1e-6:
+                continue
+            try:
+                gain = complex(c @ np.linalg.solve(z * eye - ad, b))
+            except np.linalg.LinAlgError:
+                continue
+            num_val = gain * np.polyval(den, z)
+            samples.append((z, num_val))
+            if len(samples) >= n:
+                break
+        if len(samples) < n:
+            return np.array([], dtype=complex)
+
+        vand = np.array([[z ** (n - 1 - idx) for idx in range(n)] for z, _ in samples], dtype=complex)
+        vals = np.array([val for _, val in samples], dtype=complex)
+        try:
+            coeff = np.linalg.solve(vand, vals)
+        except np.linalg.LinAlgError:
+            return np.array([], dtype=complex)
+
+        scale = max(1.0, float(np.max(np.abs(coeff))))
+        coeff = coeff[np.argmax(np.abs(coeff) > 1e-10 * scale) :] if np.any(np.abs(coeff) > 1e-10 * scale) else coeff[-1:]
+        if coeff.size <= 1:
+            return np.array([], dtype=complex)
+        return np.roots(coeff)
+
+    @staticmethod
+    def _position_output_indices() -> list[int]:
+        return [0, 1, 2]
+
+    @staticmethod
+    def _control_axes() -> list[str]:
+        return ["R", "I", "C"]
+
+    def linear_system_summary(self) -> dict[str, object]:
+        closed_loop = self._ad - self._bd @ self._k_gain
+        zeros = []
+        for axis_idx, axis_label in enumerate(self._control_axes()):
+            out_idx = self._position_output_indices()[axis_idx]
+            c_row = np.zeros(self._ad.shape[0], dtype=float)
+            c_row[out_idx] = 1.0
+            z = self._position_channel_zeros(self._ad, self._bd[:, axis_idx], c_row)
+            zeros.append({"axis": axis_label, "zeros": self._complex_pairs(z)})
+        return {
+            "system_type": "discrete_state_feedback",
+            "sample_time_s": float(self.design_dt_s),
+            "law_label": self._control_law_label(self.state_signs),
+            "control_axes": self._control_axes(),
+            "open_loop_poles": self._complex_pairs(np.linalg.eigvals(self._ad)),
+            "closed_loop_poles": self._complex_pairs(np.linalg.eigvals(closed_loop)),
+            "position_channel_zeros": zeros,
+        }
 
     def __post_init__(self) -> None:
         if self.mean_motion_rad_s <= 0.0:
@@ -81,6 +208,8 @@ class HCWLQRController(Controller):
             dtype=float,
         )
         ad, bd = self._discretize_zoh_series(A, B, self.design_dt_s)
+        self._ad = ad
+        self._bd = bd
         Q = np.diag(q)
         R = np.diag(r)
         self._k_gain = self._solve_discrete_lqr(ad, bd, Q, R, self.riccati_max_iter, self.riccati_tol)
@@ -101,11 +230,14 @@ class HCWLQRController(Controller):
 
         # HCW/LQR operates on rectangular RIC relative states.
         x_rect = ric_curv_to_rect(x_curv, r0_km=r0)
-        x_rect = self.state_signs * x_rect
-        a_cmd_ric = -self._k_gain @ x_rect
-        nrm = float(np.linalg.norm(a_cmd_ric))
+        x_effective = self.state_signs * x_rect
+        a_cmd_ric_pre_limit = -self._k_gain @ x_effective
+        a_cmd_ric = np.array(a_cmd_ric_pre_limit, dtype=float)
+        nrm = float(np.linalg.norm(a_cmd_ric_pre_limit))
+        limit_scale = 1.0
         if nrm > self.max_accel_km_s2 > 0.0:
-            a_cmd_ric *= self.max_accel_km_s2 / nrm
+            limit_scale = float(self.max_accel_km_s2 / nrm)
+            a_cmd_ric *= limit_scale
 
         c_ir = ric_dcm_ir_from_rv(r_chief, v_chief)
         a_cmd_eci = c_ir @ a_cmd_ric
@@ -118,6 +250,16 @@ class HCWLQRController(Controller):
                 "chief_eci_state_slice": [j0, j1],
                 "state_signs": self.state_signs.tolist(),
                 "accel_ric_km_s2": a_cmd_ric.tolist(),
+                "linear_feedback_debug": self._linear_feedback_debug_payload(
+                    control_axes=["R", "I", "C"],
+                    k_gain=self._k_gain,
+                    x_rect=x_rect,
+                    x_effective=x_effective,
+                    control_pre_limit=a_cmd_ric_pre_limit,
+                    control_post_limit=a_cmd_ric,
+                    limit_scale=limit_scale,
+                    state_signs=self.state_signs,
+                ),
             },
         )
 

@@ -12,6 +12,15 @@ def write_controller_bench_reports(result: dict[str, Any], outdir: Path) -> dict
     summary_json = outdir / "controller_bench_summary.json"
     summary_md = outdir / "controller_bench_summary.md"
     comparison_csv = outdir / "controller_bench_comparison.csv"
+    leaderboard_csv = outdir / "controller_bench_leaderboard.csv"
+    artifact_paths = {
+        "summary_json": str(summary_json),
+        "summary_md": str(summary_md),
+        "comparison_csv": str(comparison_csv),
+        "leaderboard_csv": str(leaderboard_csv),
+    }
+    current_artifacts = dict(result.get("artifacts", {}) or {})
+    result["artifacts"] = {**current_artifacts, **artifact_paths}
 
     summary_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
@@ -38,6 +47,31 @@ def write_controller_bench_reports(result: dict[str, Any], outdir: Path) -> dict
             for name in metric_names:
                 row[name] = dict(run.get("metrics", {}) or {}).get(name)
             writer.writerow(row)
+
+    leaderboard_rows: list[dict[str, Any]] = []
+    relative_rendezvous = list(dict(result.get("leaderboards", {}) or {}).get("relative_rendezvous", []) or [])
+    with leaderboard_csv.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["objective", "metric", "label", "direction", "rank", "variant", "value", "samples"],
+        )
+        writer.writeheader()
+        for objective in relative_rendezvous:
+            objective_name = str(objective.get("objective_name", "") or "")
+            for ranking in list(objective.get("rankings", []) or []):
+                for entry in list(ranking.get("entries", []) or []):
+                    row = {
+                        "objective": objective_name,
+                        "metric": ranking.get("metric"),
+                        "label": ranking.get("label"),
+                        "direction": ranking.get("direction"),
+                        "rank": entry.get("rank"),
+                        "variant": entry.get("variant_name"),
+                        "value": entry.get("value"),
+                        "samples": entry.get("sample_count", entry.get("run_count")),
+                    }
+                    writer.writerow(row)
+                    leaderboard_rows.append(row)
 
     lines = [
         f"# {result.get('suite_name', 'controller_bench')}",
@@ -80,19 +114,59 @@ def write_controller_bench_reports(result: dict[str, Any], outdir: Path) -> dict
                     f"| {summary.get('variant_name')} | {name} | "
                     f"{100.0 * float(objective_pass_rates.get(name, 0.0)):.1f}% |"
                 )
+    if relative_rendezvous:
+        lines.extend(
+            [
+                "",
+                "## Rendezvous Leaderboards",
+                "",
+            ]
+        )
+        for objective in relative_rendezvous:
+            objective_name = str(objective.get("objective_name", "") or "").strip()
+            if not objective_name:
+                continue
+            lines.extend(
+                [
+                    f"### {objective_name}",
+                    "",
+                ]
+            )
+            for ranking in list(objective.get("rankings", []) or []):
+                label = str(ranking.get("label", ranking.get("metric", "metric")) or "metric")
+                lines.extend(
+                    [
+                        f"- {label}",
+                        "",
+                        "| Rank | Variant | Value | Samples |",
+                        "| ---: | --- | ---: | ---: |",
+                    ]
+                )
+                for entry in list(ranking.get("entries", []) or []):
+                    value = entry.get("value")
+                    if isinstance(value, float):
+                        value_text = f"{value:.6g}"
+                    else:
+                        value_text = str(value)
+                    sample_count = entry.get("sample_count", entry.get("run_count", ""))
+                    lines.append(
+                        f"| {entry.get('rank')} | {entry.get('variant_name')} | {value_text} | {sample_count} |"
+                    )
+                lines.append("")
     lines.extend(
         [
             "",
             "## Artifacts",
             "",
             f"- Summary JSON: `{summary_json}`",
+            f"- Summary MD: `{summary_md}`",
             f"- Comparison CSV: `{comparison_csv}`",
+            f"- Leaderboard CSV: `{leaderboard_csv}`",
         ]
     )
+    pass_rate_plot_png = current_artifacts.get("pass_rate_plot_png")
+    if pass_rate_plot_png:
+        lines.append(f"- Pass Rate Plot: `{pass_rate_plot_png}`")
     summary_md.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
-    return {
-        "summary_json": str(summary_json),
-        "summary_md": str(summary_md),
-        "comparison_csv": str(comparison_csv),
-    }
+    return artifact_paths

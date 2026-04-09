@@ -22,7 +22,36 @@ class HCWNoRadialLQRController(Controller):
     r_weights: np.ndarray = field(default_factory=lambda: np.ones(2) * 1.94e13)
     riccati_max_iter: int = 500
     riccati_tol: float = 1e-8
+    _ad: np.ndarray = field(init=False, repr=False)
+    _bd: np.ndarray = field(init=False, repr=False)
     _k_gain: np.ndarray = field(init=False, repr=False)
+
+    @staticmethod
+    def _position_output_indices() -> list[int]:
+        return [1, 2]
+
+    @staticmethod
+    def _control_axes() -> list[str]:
+        return ["I", "C"]
+
+    def linear_system_summary(self) -> dict[str, object]:
+        closed_loop = self._ad - self._bd @ self._k_gain
+        zeros = []
+        for axis_idx, axis_label in enumerate(self._control_axes()):
+            out_idx = self._position_output_indices()[axis_idx]
+            c_row = np.zeros(self._ad.shape[0], dtype=float)
+            c_row[out_idx] = 1.0
+            z = HCWLQRController._position_channel_zeros(self._ad, self._bd[:, axis_idx], c_row)
+            zeros.append({"axis": axis_label, "zeros": HCWLQRController._complex_pairs(z)})
+        return {
+            "system_type": "discrete_state_feedback",
+            "sample_time_s": float(self.design_dt_s),
+            "law_label": HCWLQRController._control_law_label(self.state_signs),
+            "control_axes": self._control_axes(),
+            "open_loop_poles": HCWLQRController._complex_pairs(np.linalg.eigvals(self._ad)),
+            "closed_loop_poles": HCWLQRController._complex_pairs(np.linalg.eigvals(closed_loop)),
+            "position_channel_zeros": zeros,
+        }
 
     def __post_init__(self) -> None:
         if self.mean_motion_rad_s <= 0.0:
@@ -83,6 +112,8 @@ class HCWNoRadialLQRController(Controller):
             dtype=float,
         )
         ad, bd = HCWLQRController._discretize_zoh_series(A, B, self.design_dt_s)
+        self._ad = ad
+        self._bd = bd
         Q = np.diag(q)
         R = np.diag(r)
         self._k_gain = HCWLQRController._solve_discrete_lqr(ad, bd, Q, R, self.riccati_max_iter, self.riccati_tol)
@@ -102,12 +133,16 @@ class HCWNoRadialLQRController(Controller):
             return Command.zero()
 
         x_rect = ric_curv_to_rect(x_curv, r0_km=r0)
-        x_rect = self.state_signs * x_rect
-        a_cmd_ic = -self._k_gain @ x_rect
+        x_effective = self.state_signs * x_rect
+        a_cmd_ic_pre_limit = -self._k_gain @ x_effective
+        a_cmd_ic = np.array(a_cmd_ic_pre_limit, dtype=float)
         a_cmd_ric = np.array([0.0, a_cmd_ic[0], a_cmd_ic[1]], dtype=float)
         nrm = float(np.linalg.norm(a_cmd_ric))
+        limit_scale = 1.0
         if nrm > self.max_accel_km_s2 > 0.0:
-            a_cmd_ric *= self.max_accel_km_s2 / nrm
+            limit_scale = float(self.max_accel_km_s2 / nrm)
+            a_cmd_ric *= limit_scale
+            a_cmd_ic *= limit_scale
 
         c_ir = ric_dcm_ir_from_rv(r_chief, v_chief)
         a_cmd_eci = c_ir @ a_cmd_ric
@@ -121,5 +156,15 @@ class HCWNoRadialLQRController(Controller):
                 "state_signs": self.state_signs.tolist(),
                 "accel_ric_km_s2": a_cmd_ric.tolist(),
                 "control_axes": ["I", "C"],
+                "linear_feedback_debug": HCWLQRController._linear_feedback_debug_payload(
+                    control_axes=["I", "C"],
+                    k_gain=self._k_gain,
+                    x_rect=x_rect,
+                    x_effective=x_effective,
+                    control_pre_limit=a_cmd_ic_pre_limit,
+                    control_post_limit=a_cmd_ic,
+                    limit_scale=limit_scale,
+                    state_signs=self.state_signs,
+                ),
             },
         )

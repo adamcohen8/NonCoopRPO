@@ -1,6 +1,7 @@
 suite_name: attitude_hold_bench
 description: Compare attitude controllers across a small set of hold/recovery cases.
 output_dir: outputs/controller_bench_attitude
+plot_mode: save
 controller_target:
   object_id: target
   slot: attitude_control

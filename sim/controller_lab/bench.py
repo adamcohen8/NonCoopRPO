@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from copy import deepcopy
+import importlib
+from itertools import product
+import math
 import os
 from pathlib import Path
 import re
@@ -20,6 +23,7 @@ from sim.controller_lab.models import (
     ControllerBenchTarget,
     ControllerVariant,
 )
+from sim.controller_lab.plotting import render_controller_bench_visualizations, write_linear_feedback_diagnostics
 from sim.controller_lab.reporting import write_controller_bench_reports
 from sim.master_simulator import _analysis_study_type, _restore_env_vars, _set_parallel_worker_thread_limits
 from sim.single_run import _run_single_config
@@ -46,6 +50,113 @@ def _as_dict(value: Any, section_name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Section '{section_name}' must be a mapping/object.")
     return dict(value)
+
+
+def _deep_set(root: dict[str, Any], path: str, value: Any) -> None:
+    tokens = [tok for tok in str(path).split(".") if tok]
+    if not tokens:
+        raise ValueError("Sweep path must be non-empty.")
+    cur: dict[str, Any] = root
+    for token in tokens[:-1]:
+        nxt = cur.get(token)
+        if nxt is None:
+            nxt = {}
+            cur[token] = nxt
+        if not isinstance(nxt, dict):
+            raise ValueError(f"Sweep path '{path}' cannot descend through non-mapping token '{token}'.")
+        cur = nxt
+    cur[tokens[-1]] = deepcopy(value)
+
+
+def _format_sweep_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_format_sweep_value(v) for v in value) + "]"
+    if value is None:
+        return "none"
+    return str(value)
+
+
+def _slug_token(text: str) -> str:
+    out = re.sub(r"[^A-Za-z0-9]+", "_", str(text or "").strip().lower()).strip("_")
+    return out or "value"
+
+
+def _sweep_labels(paths: list[str]) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    used: set[str] = set()
+    token_lists = {path: [tok for tok in str(path).split(".") if tok] for path in paths}
+    for path in paths:
+        tokens = token_lists[path]
+        candidate_parts = [tokens[-1]] if tokens else ["value"]
+        idx = 2
+        label = _slug_token("_".join(candidate_parts))
+        while label in used:
+            if idx <= len(tokens):
+                candidate_parts.insert(0, tokens[-idx])
+                idx += 1
+            else:
+                candidate_parts = tokens
+            label = _slug_token("_".join(candidate_parts))
+        used.add(label)
+        labels[path] = label
+    return labels
+
+
+def _expand_variant_entry(raw_variant: dict[str, Any]) -> list[ControllerVariant]:
+    d = _as_dict(raw_variant, "variants[*]")
+    name = str(d.get("name", "") or "").strip()
+    pointer = _as_dict(d.get("controller"), "variants[*].controller")
+    if not name:
+        raise ValueError("variants[*].name must be non-empty.")
+    description = str(d.get("description", "") or "")
+
+    raw_sweep = d.get("sweep")
+    if raw_sweep is None:
+        return [ControllerVariant(name=name, pointer=pointer, description=description)]
+    sweep = _as_dict(raw_sweep, "variants[*].sweep")
+    if not sweep:
+        return [ControllerVariant(name=name, pointer=pointer, description=description)]
+
+    sweep_paths = [str(path or "").strip() for path in sweep.keys()]
+    if any(not path for path in sweep_paths):
+        raise ValueError("variants[*].sweep keys must be non-empty dotted paths.")
+    labels = _sweep_labels(sweep_paths)
+    value_lists: list[list[Any]] = []
+    for path in sweep_paths:
+        values = sweep.get(path)
+        if not isinstance(values, list) or len(values) == 0:
+            raise ValueError(f"variants[*].sweep['{path}'] must be a non-empty list.")
+        value_lists.append(list(values))
+
+    expanded: list[ControllerVariant] = []
+    for combo in product(*value_lists):
+        pointer_copy = deepcopy(pointer)
+        sweep_parts: list[str] = []
+        sweep_desc_parts: list[str] = []
+        for path, value in zip(sweep_paths, combo):
+            root_path = path
+            if root_path.startswith("controller."):
+                root_path = root_path[len("controller.") :]
+            _deep_set(pointer_copy, root_path, value)
+            label = labels[path]
+            pretty = _format_sweep_value(value)
+            sweep_parts.append(f"{label}_{_slug_token(pretty)}")
+            sweep_desc_parts.append(f"{label}={pretty}")
+        variant_name = f"{name}__{'__'.join(sweep_parts)}"
+        variant_desc = description.strip()
+        sweep_desc = ", ".join(sweep_desc_parts)
+        if variant_desc:
+            variant_desc = f"{variant_desc} [{sweep_desc}]"
+        else:
+            variant_desc = f"Sweep: {sweep_desc}"
+        expanded.append(ControllerVariant(name=variant_name, pointer=pointer_copy, description=variant_desc))
+    return expanded
 
 
 def _parse_metric(raw: Any) -> ControllerBenchMetric:
@@ -147,18 +258,10 @@ def load_controller_bench_config(path: str | Path) -> ControllerBenchConfig:
 
     variants: list[ControllerVariant] = []
     for entry in list(raw.get("variants", []) or []):
-        d = _as_dict(entry, "variants[*]")
-        name = str(d.get("name", "") or "").strip()
-        pointer = _as_dict(d.get("controller"), "variants[*].controller")
-        if not name:
-            raise ValueError("variants[*].name must be non-empty.")
-        variants.append(
-            ControllerVariant(
-                name=name,
-                pointer=pointer,
-                description=str(d.get("description", "") or ""),
-            )
-        )
+        variants.extend(_expand_variant_entry(_as_dict(entry, "variants[*]")))
+    variant_names = [variant.name for variant in variants]
+    if len(set(variant_names)) != len(variant_names):
+        raise ValueError("Controller bench variants must have unique names after sweep expansion.")
 
     cases: list[ControllerBenchCase] = []
     for entry in list(raw.get("cases", []) or []):
@@ -186,12 +289,16 @@ def load_controller_bench_config(path: str | Path) -> ControllerBenchConfig:
     objectives = tuple(_parse_objective(o) for o in list(raw.get("objectives", []) or []))
     output_dir = Path(str(raw.get("output_dir", f"outputs/controller_bench/{raw.get('suite_name', 'suite')}")))
     if not output_dir.is_absolute():
-        output_dir = (Path.cwd() / output_dir).resolve()
+        output_dir = (cfg_path.parent / output_dir).resolve()
+    plot_mode = str(raw.get("plot_mode", "save") or "save").strip().lower()
+    if plot_mode not in {"interactive", "save", "both"}:
+        raise ValueError("controller bench plot_mode must be one of: interactive, save, both.")
 
     return ControllerBenchConfig(
         suite_name=str(raw.get("suite_name", cfg_path.stem) or cfg_path.stem),
         description=str(raw.get("description", "") or ""),
         output_dir=output_dir,
+        plot_mode=plot_mode,
         controller_target=target,
         variants=tuple(variants),
         cases=tuple(cases),
@@ -258,6 +365,149 @@ def _evaluate_pass_criteria(metrics: dict[str, Any], criteria: tuple[ControllerB
 def _slug(text: str) -> str:
     out = re.sub(r"[^A-Za-z0-9]+", "_", str(text or "").strip().lower()).strip("_")
     return out or "objective"
+
+
+def _controller_linear_system_summary(pointer: dict[str, Any]) -> dict[str, Any] | None:
+    module_name = str(pointer.get("module", "") or "").strip()
+    class_name = str(pointer.get("class_name", "") or "").strip()
+    params = dict(pointer.get("params", {}) or {})
+    if not module_name or not class_name:
+        return None
+    try:
+        mod = importlib.import_module(module_name)
+        cls = getattr(mod, class_name)
+        ctrl = cls(**params)
+    except Exception:
+        return None
+    fn = getattr(ctrl, "linear_system_summary", None)
+    if not callable(fn):
+        return None
+    try:
+        summary = fn()
+    except Exception:
+        return None
+    return dict(summary or {}) if isinstance(summary, dict) else None
+
+
+def _build_relative_rendezvous_leaderboards(
+    runs: list[dict[str, Any]],
+    variants: list[ControllerVariant],
+) -> list[dict[str, Any]]:
+    objective_runs: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for run in runs:
+        variant_name = str(run.get("variant_name", "") or "").strip()
+        for objective_result in list(run.get("objective_results", []) or []):
+            if str(objective_result.get("kind", "") or "").strip() != "relative_rendezvous":
+                continue
+            objective_name = str(objective_result.get("name", "") or "").strip()
+            if not objective_name or not variant_name:
+                continue
+            objective_runs.setdefault(objective_name, {}).setdefault(variant_name, []).append(dict(objective_result))
+
+    metric_specs = [
+        ("final_relative_distance_km", "Mean Final Range (km)", "asc"),
+        ("rms_relative_distance_km", "Mean RMS Range (km)", "asc"),
+        ("final_relative_speed_km_s", "Mean Final Speed (km/s)", "asc"),
+        ("total_dv_m_s", "Mean Total dV (m/s)", "asc"),
+        ("fuel_used_kg", "Mean Fuel Used (kg)", "asc"),
+        ("time_inside_keepout_s", "Mean Keepout Time (s)", "asc"),
+    ]
+
+    leaderboards: list[dict[str, Any]] = []
+    for objective_name, by_variant in objective_runs.items():
+        rankings: list[dict[str, Any]] = []
+
+        pass_entries: list[dict[str, Any]] = []
+        for variant in variants:
+            rows = by_variant.get(variant.name, [])
+            if not rows:
+                continue
+            run_count = len(rows)
+            pass_rate = float(sum(1 for row in rows if bool(row.get("passed", False))) / run_count)
+            pass_entries.append(
+                {
+                    "variant_name": variant.name,
+                    "value": pass_rate,
+                    "run_count": run_count,
+                }
+            )
+        pass_entries.sort(key=lambda row: (-float(row["value"]), str(row["variant_name"])))
+        if pass_entries:
+            rankings.append(
+                {
+                    "metric": "objective_pass_rate",
+                    "label": "Objective Pass Rate",
+                    "direction": "desc",
+                    "entries": [
+                        {
+                            "rank": idx + 1,
+                            "variant_name": str(row["variant_name"]),
+                            "value": float(row["value"]),
+                            "run_count": int(row["run_count"]),
+                        }
+                        for idx, row in enumerate(pass_entries)
+                    ],
+                }
+            )
+
+        for metric_suffix, label, direction in metric_specs:
+            entries: list[dict[str, Any]] = []
+            for variant in variants:
+                rows = by_variant.get(variant.name, [])
+                if not rows:
+                    continue
+                values: list[float] = []
+                for row in rows:
+                    prefix = str(row.get("metric_prefix", "") or "").strip()
+                    metric_value = dict(row.get("metrics", {}) or {}).get(f"{prefix}_{metric_suffix}")
+                    try:
+                        value_f = float(metric_value)
+                    except (TypeError, ValueError):
+                        continue
+                    if not math.isfinite(value_f):
+                        continue
+                    values.append(value_f)
+                if values:
+                    entries.append(
+                        {
+                            "variant_name": variant.name,
+                            "value": float(sum(values) / len(values)),
+                            "sample_count": len(values),
+                        }
+                    )
+            if not entries:
+                continue
+            reverse = direction == "desc"
+            entries.sort(key=lambda row: float(row["value"]), reverse=reverse)
+            if not reverse:
+                entries.sort(key=lambda row: (float(row["value"]), str(row["variant_name"])))
+            else:
+                entries.sort(key=lambda row: (-float(row["value"]), str(row["variant_name"])))
+            rankings.append(
+                {
+                    "metric": metric_suffix,
+                    "label": label,
+                    "direction": direction,
+                    "entries": [
+                        {
+                            "rank": idx + 1,
+                            "variant_name": str(row["variant_name"]),
+                            "value": float(row["value"]),
+                            "sample_count": int(row["sample_count"]),
+                        }
+                        for idx, row in enumerate(entries)
+                    ],
+                }
+            )
+
+        leaderboards.append(
+            {
+                "objective_name": objective_name,
+                "kind": "relative_rendezvous",
+                "rankings": rankings,
+            }
+        )
+    return leaderboards
 
 
 def _dedupe_metrics(metrics: list[ControllerBenchMetric]) -> tuple[ControllerBenchMetric, ...]:
@@ -518,8 +768,12 @@ def _run_single_bench_case(
     artifacts = {
         "output_dir": str(run_outdir),
         "summary_json": str(run_outdir / "master_run_summary.json"),
-        "run_log_json": str(run_outdir / "master_run_log.json"),
     }
+    if suite.save_run_payloads:
+        artifacts["run_log_json"] = str(run_outdir / "master_run_log.json")
+    linear_feedback_artifacts = write_linear_feedback_diagnostics(payload, suite.controller_target.object_id, run_outdir)
+    if linear_feedback_artifacts:
+        artifacts["linear_feedback"] = linear_feedback_artifacts
     return {
         "variant_name": variant.name,
         "case_name": case.name,
@@ -654,9 +908,12 @@ def run_controller_bench(config_path: str | Path, *, compare_names: list[str] | 
             for run in subset:
                 value = dict(run.get("metrics", {}) or {}).get(metric_name)
                 try:
-                    values.append(float(value))
+                    value_f = float(value)
                 except (TypeError, ValueError):
                     continue
+                if not math.isfinite(value_f):
+                    continue
+                values.append(value_f)
             if values:
                 metric_means[metric_name] = float(sum(values) / len(values))
         objective_pass_rates: dict[str, float] = {}
@@ -698,6 +955,7 @@ def run_controller_bench(config_path: str | Path, *, compare_names: list[str] | 
                 "name": variant.name,
                 "description": variant.description,
                 "pointer": deepcopy(variant.pointer),
+                "linear_system_summary": _controller_linear_system_summary(variant.pointer),
             }
             for variant in selected
         ],
@@ -724,6 +982,15 @@ def run_controller_bench(config_path: str | Path, *, compare_names: list[str] | 
             "parallel_workers": int(parallel_workers if parallel_active else 1),
             "parallel_fallback_reason": parallel_fallback_reason,
         },
+        "plot_mode": suite.plot_mode,
+        "leaderboards": {
+            "relative_rendezvous": _build_relative_rendezvous_leaderboards(runs, selected),
+        },
     }
-    result["artifacts"] = write_controller_bench_reports(result, suite.output_dir)
+    suite.output_dir.mkdir(parents=True, exist_ok=True)
+    result["artifacts"] = {}
+    plot_artifacts = render_controller_bench_visualizations(result, suite.output_dir, suite.plot_mode)
+    if plot_artifacts:
+        result["artifacts"].update(plot_artifacts)
+    result["artifacts"].update(write_controller_bench_reports(result, suite.output_dir))
     return result
