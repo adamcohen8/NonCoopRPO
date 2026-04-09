@@ -1,3 +1,5 @@
+import importlib
+
 from machine_learning.gym_env import (
     ActionField,
     AsyncVectorSimulationEnv,
@@ -73,33 +75,40 @@ __all__ = [
 ]
 
 
+def _load_optional_attr(*, module_name: str, attr_names: dict[str, str], requested_name: str) -> object:
+    try:
+        mod = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            f"Optional ML dependency is missing while loading '{requested_name}'. "
+            f"Install ML dependencies with `python -m pip install -r requirements-ml.txt`."
+        ) from exc
+    return getattr(mod, attr_names[requested_name])
+
+
 def __getattr__(name: str):
     if name in {"RLRendezvousConfig", "RLRendezvousEnv"}:
-        from machine_learning.rendezvous_env import RLRendezvousConfig, RLRendezvousEnv
-
-        return {
-            "RLRendezvousConfig": RLRendezvousConfig,
-            "RLRendezvousEnv": RLRendezvousEnv,
-        }[name]
+        mod = importlib.import_module("machine_learning.rendezvous_env")
+        return getattr(mod, name)
     if name in {"PPOConfig", "PPOLightningModule"}:
-        from machine_learning.ppo_lightning import PPOConfig, PPOLightningModule
-
-        return {
-            "PPOConfig": PPOConfig,
-            "PPOLightningModule": PPOLightningModule,
-        }[name]
+        return _load_optional_attr(
+            module_name="machine_learning.ppo_lightning",
+            attr_names={
+                "PPOConfig": "PPOConfig",
+                "PPOLightningModule": "PPOLightningModule",
+            },
+            requested_name=name,
+        )
     if name in {"AttitudeRICRLConfig", "AttitudeRICRLEnv"}:
-        from machine_learning.attitude_ric_env import AttitudeRICRLConfig, AttitudeRICRLEnv
-
-        return {
-            "AttitudeRICRLConfig": AttitudeRICRLConfig,
-            "AttitudeRICRLEnv": AttitudeRICRLEnv,
-        }[name]
+        mod = importlib.import_module("machine_learning.attitude_ric_env")
+        return getattr(mod, name)
     if name in {"AttitudeRICPPOConfig", "AttitudeRICPPOLightningModule"}:
-        from machine_learning.attitude_ric_ppo import AttitudeRICPPOConfig, AttitudeRICPPOLightningModule
-
-        return {
-            "AttitudeRICPPOConfig": AttitudeRICPPOConfig,
-            "AttitudeRICPPOLightningModule": AttitudeRICPPOLightningModule,
-        }[name]
+        return _load_optional_attr(
+            module_name="machine_learning.attitude_ric_ppo",
+            attr_names={
+                "AttitudeRICPPOConfig": "AttitudeRICPPOConfig",
+                "AttitudeRICPPOLightningModule": "AttitudeRICPPOLightningModule",
+            },
+            requested_name=name,
+        )
     raise AttributeError(name)

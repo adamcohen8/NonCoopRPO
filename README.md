@@ -51,7 +51,33 @@ There are five main ways to use the project:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
+python -m pip install .
+```
+
+Optional installs:
+
+```bash
+# local development / tests
+python -m pip install ".[dev]"
+
+# desktop GUI
+python -m pip install ".[gui]"
+
+# RL / training workflows
+python -m pip install ".[ml]"
+
+# everything
+python -m pip install ".[full]"
+```
+
+Compatibility shims are still available if you prefer requirements files:
+
+```bash
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-gui.txt
+python -m pip install -r requirements-ml.txt
+python -m pip install -r requirements-full.txt
 ```
 
 ### 2) Run a representative CLI scenario
@@ -63,6 +89,7 @@ python run_simulation.py --config configs/automation_smoke.yaml
 ### 3) Open the desktop GUI
 
 ```bash
+python -m pip install ".[gui]"
 python run_gui.py
 ```
 
@@ -109,6 +136,15 @@ HPOP comparison:
 ```bash
 python validation/hpop_compare.py --model two_body --dt 1 --duration-min 150 --plot-mode interactive
 ```
+
+### Dependency Profiles
+
+- `pip install .`: core simulation/API/CLI stack
+- `pip install ".[dev]"`: core + `pytest`
+- `pip install ".[gui]"`: core + PySide6 desktop UI support
+- `pip install ".[ml]"`: core + Gymnasium/Torch/Lightning
+- `pip install ".[full]"`: full local stack
+- `requirements*.txt`: compatibility shims for the same profiles
 
 ## Architecture At A Glance
 

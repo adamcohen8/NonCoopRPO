@@ -1,2 +1,2 @@
 # Compatibility shim for environments that still install from requirements files.
-.
+.[ml]

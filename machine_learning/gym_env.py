@@ -8,10 +8,14 @@ from typing import Any, Protocol
 
 import numpy as np
 
+_GYMNASIUM_IMPORT_ERROR: Exception | None = None
+
 try:
     import gymnasium as gym
     from gymnasium import spaces
-except Exception:  # pragma: no cover
+except Exception as exc:  # pragma: no cover
+    _GYMNASIUM_IMPORT_ERROR = exc
+
     class _FallbackEnv:
         metadata: dict[str, Any] = {}
 

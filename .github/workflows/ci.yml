@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install ".[dev]"
       - name: Import smoke test
         run: python -c "import run_simulation; import sim; print('import_ok')"
       - name: Run fast unit tests
@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install ".[full]"
       - name: Run full test suite
         run: pytest -q
       - name: Run automation smoke simulation
