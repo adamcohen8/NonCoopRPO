@@ -189,7 +189,7 @@ simulator:
 
 outputs:
   output_dir: "outputs/battlespace_dashboard_hcw_lqr_pursuit_target_evade"
-  mode: "interactive"
+  mode: "save"
   stats:
     enabled: true
     print_summary: true
@@ -211,7 +211,7 @@ outputs:
       chaser: [2.0, 1.5, 1.5]
     battlespace_dashboard_thruster_active_threshold_km_s2: 1.0e-15
     fps: 30
-    speed_multiple: 60.0
+    speed_multiple: 120.0
     frame_stride: 1
 
 monte_carlo:
