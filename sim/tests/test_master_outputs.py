@@ -6,6 +6,8 @@ import numpy as np
 
 from sim.config import scenario_config_from_dict
 from sim.master_outputs import animate_outputs, plot_outputs
+from sim.utils.plot_windows import attitude_axis_limits, axis_window_from_values, fuel_fraction_from_remaining_series, windows_from_points
+from sim.utils.thruster_plot_geometry import thruster_marker_geometry_body
 
 
 def _truth_hist(positions_km: list[list[float]], velocities_km_s: list[list[float]] | None = None) -> np.ndarray:
@@ -368,6 +370,8 @@ def test_animate_outputs_marks_thruster_active_in_ric_attitude_animation(monkeyp
     assert np.array_equal(captured["mask"], np.array([False, True, False]))
     assert np.allclose(captured["thruster_position_body_m"], np.array([0.0, 0.0, -0.5]))
     assert np.allclose(captured["thruster_direction_body"], np.array([0.0, 0.0, 1.0]))
+    assert captured["thruster_inactive_facecolor"] == "#808080"
+    assert captured["thruster_active_facecolor"] == "#D95F02"
 
 
 def test_animate_outputs_routes_battlespace_dashboard(monkeypatch, tmp_path: Path) -> None:
@@ -521,3 +525,67 @@ def test_animate_outputs_routes_battlespace_dashboard(monkeypatch, tmp_path: Pat
     assert np.allclose(captured["thruster_mounts"]["chaser"]["position_body_m"], np.array([0.0, 0.0, -0.5]))
     assert np.allclose(captured["thruster_mounts"]["chaser"]["direction_body"], np.array([0.0, 0.0, 1.0]))
     assert float(captured["dv_remaining"]["target"][1]) < float(captured["dv_remaining"]["target"][0])
+
+
+def test_thruster_marker_geometry_uses_plume_direction_face() -> None:
+    points, _ = thruster_marker_geometry_body(
+        lx_m=1.0,
+        ly_m=2.0,
+        lz_m=3.0,
+        thruster_position_body_m=None,
+        thruster_direction_body=np.array([0.0, 1.0, 0.0], dtype=float),
+    )
+
+    assert float(np.min(points[:, 1])) > 1.0
+
+
+def test_thruster_marker_geometry_prioritizes_plume_face_over_conflicting_mount_face() -> None:
+    points, _ = thruster_marker_geometry_body(
+        lx_m=1.0,
+        ly_m=2.0,
+        lz_m=3.0,
+        thruster_position_body_m=np.array([0.0, 0.0, -1.5], dtype=float),
+        thruster_direction_body=np.array([0.0, 0.0, 1.0], dtype=float),
+    )
+
+    assert float(np.min(points[:, 2])) > 1.5
+
+
+def test_axis_window_from_values_expands_independently() -> None:
+    xlim = axis_window_from_values([np.array([0.0, 20.0], dtype=float)], min_span=1.0, margin=1.15)
+    ylim = axis_window_from_values([np.array([0.0, 1.0], dtype=float)], min_span=1.0, margin=1.15)
+
+    assert np.isclose(np.mean(xlim), 10.0, atol=1e-6)
+    assert np.isclose(np.mean(ylim), 0.5, atol=1e-6)
+    assert (xlim[1] - xlim[0]) > (ylim[1] - ylim[0])
+
+
+def test_windows_from_points_center_on_midpoint_of_current_objects() -> None:
+    xlim, ylim, zlim = windows_from_points(
+        [
+            np.array([0.0, 0.0, 0.0], dtype=float),
+            np.array([1.0, 20.0, 5.0], dtype=float),
+        ],
+        axis_indices=(1, 0, 2),
+        min_span=1.0,
+        margin=1.15,
+    )
+
+    assert np.isclose(np.mean(xlim), 10.0, atol=1e-6)
+    assert np.isclose(np.mean(ylim), 0.5, atol=1e-6)
+    assert np.isclose(np.mean(zlim), 2.5, atol=1e-6)
+    assert (xlim[1] - xlim[0]) > (zlim[1] - zlim[0]) > (ylim[1] - ylim[0])
+
+
+def test_attitude_axis_limits_flip_intrack_only_for_ric() -> None:
+    xlim, ylim, zlim = attitude_axis_limits("ric", 2.0)
+
+    assert xlim == (2.0, -2.0)
+    assert ylim == (-2.0, 2.0)
+    assert zlim == (-2.0, 2.0)
+
+
+def test_fuel_fraction_from_remaining_series_normalizes_to_initial_budget() -> None:
+    frac = fuel_fraction_from_remaining_series(np.array([200.0, 150.0, 50.0, 0.0], dtype=float))
+
+    assert np.allclose(frac, np.array([1.0, 0.75, 0.25, 0.0], dtype=float))

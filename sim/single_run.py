@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from sim.actuators.orbital import attitude_coupled_thrust_eci, thruster_disturbance_torque_body_nm
+from sim.actuators.orbital import attitude_coupled_thrust_eci, effective_max_accel_km_s2, thruster_disturbance_torque_body_nm
 from sim.config import SimulationScenarioConfig, scenario_config_from_dict
 from sim.core.models import Command, StateBelief, StateTruth
 from sim.dynamics.attitude.rigid_body import get_attitude_guardrail_stats, reset_attitude_guardrail_stats
@@ -440,9 +440,18 @@ class _SingleRunEngine:
                 step_max_accel_km_s2 = 0.0
                 burned_this_step = False
                 world_truth_inner = world_truth_live.copy()
-                env_inner_common = {**self.base_environment, "world_truth": world_truth_inner}
+                env_inner_common = {
+                    **self.base_environment,
+                    "world_truth": world_truth_inner,
+                    "orbit_command_period_s": float(self.orbit_command_period_s),
+                }
                 env_sensor = {"world_truth": world_truth_inner}
-                env_inner = {**self.base_environment, "world_truth": world_truth_inner, "attitude_disabled": (not self.attitude_enabled)}
+                env_inner = {
+                    **self.base_environment,
+                    "world_truth": world_truth_inner,
+                    "attitude_disabled": (not self.attitude_enabled),
+                    "orbit_command_period_s": float(self.orbit_command_period_s),
+                }
                 orbit_state12_scratch = np.empty(12, dtype=float)
                 attitude_state13_scratch = np.empty(13, dtype=float)
                 deputy_state6_scratch = np.empty(6, dtype=float)
@@ -601,7 +610,36 @@ class _SingleRunEngine:
                     if bool(tr_inner.mass_kg <= (min_mass_kg + 1e-12)):
                         cmd_step.thrust_eci_km_s2 = np.zeros(3, dtype=float)
                         cmd_step.mode_flags["fuel_depleted"] = True
+                    if agent.orbital_max_thrust_n is not None:
+                        eff_max_accel_km_s2 = effective_max_accel_km_s2(
+                            current_mass_kg=float(max(tr_inner.mass_kg, 0.0)),
+                            max_accel_km_s2=0.0,
+                            max_thrust_n=agent.orbital_max_thrust_n,
+                        )
+                        accel_vec = np.array(cmd_step.thrust_eci_km_s2, dtype=float)
+                        accel_norm = float(np.linalg.norm(accel_vec))
+                        if accel_norm > eff_max_accel_km_s2 > 0.0:
+                            cmd_step.thrust_eci_km_s2 = accel_vec * (eff_max_accel_km_s2 / accel_norm)
+                            cmd_step.mode_flags["thrust_limited_scale"] = float(eff_max_accel_km_s2 / accel_norm)
+                        elif eff_max_accel_km_s2 == 0.0:
+                            cmd_step.thrust_eci_km_s2 = np.zeros(3, dtype=float)
+                        cmd_step.mode_flags["effective_max_accel_km_s2"] = float(eff_max_accel_km_s2)
+                        cmd_step.mode_flags["max_thrust_n"] = float(agent.orbital_max_thrust_n)
                     cmd_step.mode_flags["min_mass_kg"] = float(min_mass_kg)
+                    isp_s = agent.orbital_isp_s
+                    if isp_s is not None and float(isp_s) > 0.0 and "delta_mass_kg" not in cmd_step.mode_flags:
+                        g0_m_s2 = 9.80665
+                        a_mag_m_s2 = float(np.linalg.norm(cmd_step.thrust_eci_km_s2) * 1e3)
+                        thrust_n = float(max(tr_inner.mass_kg, 0.0) * a_mag_m_s2)
+                        mdot_kg_s = 0.0 if thrust_n <= 0.0 else float(thrust_n / (float(isp_s) * g0_m_s2))
+                        delta_mass_kg = float(max(mdot_kg_s, 0.0) * h)
+                        available_propellant_kg = float(max(tr_inner.mass_kg - min_mass_kg, 0.0))
+                        applied_delta_mass_kg = float(min(delta_mass_kg, available_propellant_kg))
+                        if delta_mass_kg > 1e-15 and applied_delta_mass_kg < (delta_mass_kg - 1e-15):
+                            propellant_scale = float(np.clip(applied_delta_mass_kg / delta_mass_kg, 0.0, 1.0))
+                            cmd_step.thrust_eci_km_s2 = np.array(cmd_step.thrust_eci_km_s2, dtype=float) * propellant_scale
+                            cmd_step.mode_flags["propellant_limited_scale"] = propellant_scale
+                        cmd_step.mode_flags["delta_mass_kg"] = applied_delta_mass_kg
                     thruster_torque_body_nm = np.zeros(3, dtype=float)
                     if (
                         self.attitude_enabled
@@ -616,15 +654,6 @@ class _SingleRunEngine:
                         )
                         cmd_step.torque_body_nm = np.array(cmd_step.torque_body_nm, dtype=float) + thruster_torque_body_nm
                     cmd_step.mode_flags["thruster_torque_body_nm"] = thruster_torque_body_nm.tolist()
-                    isp_s = agent.orbital_isp_s
-                    if isp_s is not None and float(isp_s) > 0.0 and "delta_mass_kg" not in cmd_step.mode_flags:
-                        g0_m_s2 = 9.80665
-                        a_mag_m_s2 = float(np.linalg.norm(cmd_step.thrust_eci_km_s2) * 1e3)
-                        thrust_n = float(max(tr_inner.mass_kg, 0.0) * a_mag_m_s2)
-                        mdot_kg_s = 0.0 if thrust_n <= 0.0 else float(thrust_n / (float(isp_s) * g0_m_s2))
-                        delta_mass_kg = float(max(mdot_kg_s, 0.0) * h)
-                        available_propellant_kg = float(max(tr_inner.mass_kg - min_mass_kg, 0.0))
-                        cmd_step.mode_flags["delta_mass_kg"] = float(min(delta_mass_kg, available_propellant_kg))
                     self.controller_debug_hist[aid].append(
                         {
                             "t_s": float(t_eval),

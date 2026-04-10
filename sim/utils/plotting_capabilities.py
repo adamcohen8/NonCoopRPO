@@ -16,6 +16,11 @@ from sim.dynamics.orbit.epoch import julian_date_to_datetime
 from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv, ric_rect_to_curv
 from sim.utils.ground_track import ground_track_from_eci_history, split_ground_track_dateline
 from sim.utils.figure_size import cap_figsize
+from sim.utils.plot_windows import attitude_axis_limits as _attitude_axis_limits
+from sim.utils.plot_windows import fuel_fraction_from_remaining_series as _fuel_fraction_from_remaining_series
+from sim.utils.plot_windows import RIC_FOLLOW_MARGIN
+from sim.utils.plot_windows import windows_from_points as _windows_from_points
+from sim.utils.thruster_plot_geometry import thruster_marker_geometry_body
 from sim.utils.quaternion import dcm_to_quaternion_bn, quaternion_to_dcm_bn
 from sim.utils.plotting import (
     plot_angular_rates as plot_angular_rates_legacy,
@@ -534,18 +539,23 @@ def animate_multi_ric_2d_projections(
         frame_i = int(frame_ids[i])
         for p in p_list:
             ix, iy, _, _ = _ric_2d_plane_axes(p)
-            plane_arrays: list[np.ndarray] = []
+            current_points: list[np.ndarray] = []
             for oid, arr in trajectories.items():
                 idx = min(frame_i, arr.shape[0] - 1)
                 start = 0 if show_trajectory else idx
                 seg = arr[start : idx + 1, :]
                 line_by_plane_obj[(p, oid)].set_data(seg[:, ix], seg[:, iy])
                 dot_by_plane_obj[(p, oid)].set_data([arr[idx, ix]], [arr[idx, iy]])
-                plane_arrays.extend([arr[: idx + 1, ix], arr[: idx + 1, iy]])
+                current_points.append(arr[idx, :])
                 artists.extend([line_by_plane_obj[(p, oid)], dot_by_plane_obj[(p, oid)]])
-            lim = _symmetric_limit_from_arrays(plane_arrays, min_lim=1.0, margin=1.15)
-            ax_by_plane[p].set_xlim(-lim, lim)
-            ax_by_plane[p].set_ylim(-lim, lim)
+            (xlim, ylim) = _windows_from_points(
+                current_points,
+                axis_indices=(ix, iy),
+                min_span=1.0,
+                margin=RIC_FOLLOW_MARGIN,
+            )
+            ax_by_plane[p].set_xlim(*xlim)
+            ax_by_plane[p].set_ylim(*ylim)
         t_now = float(t_s[min(frame_i, t_s.size - 1)]) if t_s.size else 0.0
         fig.suptitle(
             f"RIC 2D Projections Animation ({'Curvilinear' if frame == 'ric_curv' else 'Rect'})  t={t_now:.1f}s"
@@ -688,89 +698,6 @@ def _rectangular_prism_frame_vertices(
     return [verts[idx, :] for idx in faces]
 
 
-def _default_thruster_mount_position_body(
-    *,
-    lx_m: float,
-    ly_m: float,
-    lz_m: float,
-    outward_normal_body: np.ndarray,
-) -> np.ndarray:
-    dims = np.array([lx_m, ly_m, lz_m], dtype=float)
-    axis = np.array(outward_normal_body, dtype=float).reshape(3)
-    norm = float(np.linalg.norm(axis))
-    if norm <= 1e-12:
-        return np.array([0.0, 0.0, -0.5 * lz_m], dtype=float)
-    axis /= norm
-    idx = int(np.argmax(np.abs(axis)))
-    pos = np.zeros(3, dtype=float)
-    pos[idx] = 0.5 * dims[idx] * float(np.sign(axis[idx]) if abs(axis[idx]) > 1e-12 else 1.0)
-    return pos
-
-
-def _orthonormal_basis_from_axis(axis: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    a = np.array(axis, dtype=float).reshape(3)
-    n = float(np.linalg.norm(a))
-    if n <= 1e-12:
-        a = np.array([0.0, 0.0, 1.0], dtype=float)
-    else:
-        a /= n
-    basis = np.eye(3)
-    ref = basis[:, int(np.argmin(np.abs(a)))]
-    s = ref - np.dot(ref, a) * a
-    s_norm = float(np.linalg.norm(s))
-    if s_norm <= 1e-12:
-        ref = basis[:, (int(np.argmin(np.abs(a))) + 1) % 3]
-        s = ref - np.dot(ref, a) * a
-        s_norm = float(np.linalg.norm(s))
-    s /= max(s_norm, 1e-12)
-    u = np.cross(a, s)
-    u /= max(float(np.linalg.norm(u)), 1e-12)
-    return a, s, u
-
-
-def _thruster_face_mount_body(
-    *,
-    lx_m: float,
-    ly_m: float,
-    lz_m: float,
-    thruster_position_body_m: np.ndarray | None,
-    outward_normal_body: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    half_dims = 0.5 * np.array([lx_m, ly_m, lz_m], dtype=float)
-    axis = np.array(outward_normal_body, dtype=float).reshape(3)
-    axis_norm = float(np.linalg.norm(axis))
-    if axis_norm <= 1e-12:
-        axis = np.array([0.0, 0.0, -1.0], dtype=float)
-    else:
-        axis /= axis_norm
-
-    if thruster_position_body_m is None:
-        mount = _default_thruster_mount_position_body(
-            lx_m=lx_m,
-            ly_m=ly_m,
-            lz_m=lz_m,
-            outward_normal_body=axis,
-        )
-        return mount, axis
-
-    raw_mount = np.array(thruster_position_body_m, dtype=float).reshape(3)
-    raw_mount = np.clip(raw_mount, -half_dims, half_dims)
-    if float(np.linalg.norm(raw_mount)) > 1e-12:
-        scaled = np.abs(raw_mount) / np.maximum(half_dims, 1e-12)
-        idx = int(np.argmax(scaled))
-        sign = float(np.sign(raw_mount[idx])) if abs(raw_mount[idx]) > 1e-12 else float(np.sign(axis[idx]))
-    else:
-        idx = int(np.argmax(np.abs(axis)))
-        sign = float(np.sign(axis[idx]))
-    if abs(sign) <= 1e-12:
-        sign = 1.0
-    face_axis = np.zeros(3, dtype=float)
-    face_axis[idx] = sign
-    mount = raw_mount.copy()
-    mount[idx] = sign * half_dims[idx]
-    return mount, face_axis
-
-
 def _thruster_marker_geometry_body(
     *,
     lx_m: float,
@@ -779,54 +706,13 @@ def _thruster_marker_geometry_body(
     thruster_position_body_m: np.ndarray | None = None,
     thruster_direction_body: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[list[int]]]:
-    dims = np.array([lx_m, ly_m, lz_m], dtype=float)
-    marker_scale = float(max(np.min(dims), 1e-6))
-    axis_raw = (
-        np.array(thruster_direction_body, dtype=float).reshape(3)
-        if thruster_direction_body is not None
-        else np.array([0.0, 0.0, 1.0], dtype=float)
-    )
-    # Render the nozzle on the exterior face indicated by the mount location.
-    outward_axis_hint = -axis_raw
-    mount, outward_axis = _thruster_face_mount_body(
+    return thruster_marker_geometry_body(
         lx_m=lx_m,
         ly_m=ly_m,
         lz_m=lz_m,
         thruster_position_body_m=thruster_position_body_m,
-        outward_normal_body=outward_axis_hint,
+        thruster_direction_body=thruster_direction_body,
     )
-    axis, side, up = _orthonormal_basis_from_axis(outward_axis)
-
-    inner_radius = 0.065 * marker_scale
-    outer_radius = 0.13 * marker_scale
-    collar_radius = 0.17 * marker_scale
-    nozzle_length = 0.26 * marker_scale
-    base_offset = 0.02 * marker_scale
-    exit_offset = base_offset + nozzle_length
-    collar_offset = 0.008 * marker_scale
-    segments = 24
-
-    theta = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False, dtype=float)
-    unit_ring = np.vstack([np.cos(theta), np.sin(theta)]).T
-    base_center = mount + axis * base_offset
-    exit_center = mount + axis * exit_offset
-    collar_center = mount + axis * collar_offset
-    base_ring = np.vstack([base_center + inner_radius * (c * side + s * up) for c, s in unit_ring])
-    exit_ring = np.vstack([exit_center + outer_radius * (c * side + s * up) for c, s in unit_ring])
-    collar_ring = np.vstack([collar_center + collar_radius * (c * side + s * up) for c, s in unit_ring])
-    points = np.vstack([base_ring, exit_ring, collar_ring])
-
-    faces: list[list[int]] = []
-    for idx in range(segments):
-        nxt = (idx + 1) % segments
-        faces.append([idx, nxt, segments + nxt, segments + idx])
-    for idx in range(segments):
-        nxt = (idx + 1) % segments
-        faces.append([2 * segments + idx, 2 * segments + nxt, nxt, idx])
-    faces.append(list(range(segments)))
-    faces.append(list(range(2 * segments - 1, segments - 1, -1)))
-    faces.append(list(range(3 * segments - 1, 2 * segments - 1, -1)))
-    return points, faces
 
 
 def _marker_frame_faces(
@@ -837,6 +723,18 @@ def _marker_frame_faces(
 ) -> list[np.ndarray]:
     pts = (rotation_history[frame_idx, :, :] @ marker_points_body.T).T
     return [pts[idx, :] for idx in faces]
+
+
+def _attitude_display_axes(frame: AttitudeFrame) -> tuple[np.ndarray, tuple[str, str, str]]:
+    if frame == "ric":
+        # Display local RIC attitude with radial vertical: x=I, y=C, z=R.
+        return np.array([1, 2, 0], dtype=int), ("I", "C", "R")
+    return np.array([0, 1, 2], dtype=int), ("x", "y", "z")
+
+
+def _permute_face_vertices(face_vertices: list[np.ndarray], permutation: np.ndarray) -> list[np.ndarray]:
+    perm = np.array(permutation, dtype=int).reshape(3)
+    return [np.array(face, dtype=float)[:, perm] for face in face_vertices]
 
 
 def _symmetric_limit_from_arrays(
@@ -873,6 +771,8 @@ def animate_rectangular_prism_attitude(
     fps: float = 30.0,
     speed_multiple: float = 10.0,
 ) -> None:
+    thruster_inactive_edgecolor = "#5F5F5F"
+    thruster_active_edgecolor = "#D95F02"
     verts_body = _rectangular_prism_vertices_body(lx_m=lx_m, ly_m=ly_m, lz_m=lz_m)
     faces = _rectangular_prism_faces()
     c_anim = _attitude_rotation_history(truth_hist=truth_hist, frame=frame)
@@ -891,20 +791,25 @@ def animate_rectangular_prism_attitude(
         active_mask[:n_copy] = mask_arr[:n_copy]
 
     max_dim = 0.7 * max(lx_m, ly_m, lz_m)
+    display_perm, axis_labels = _attitude_display_axes(frame)
+    xlim, ylim, zlim = _attitude_axis_limits(frame, max_dim)
     fig = plt.figure(figsize=cap_figsize(7, 7))
     ax = fig.add_subplot(111, projection="3d")
-    ax.set_xlim(-max_dim, max_dim)
-    ax.set_ylim(-max_dim, max_dim)
-    ax.set_zlim(-max_dim, max_dim)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_zlim(*zlim)
     ax.set_box_aspect((1, 1, 1))
     ax.set_title(f"Rectangular Prism Attitude Animation ({frame.upper()})")
+    ax.set_xlabel(f"{axis_labels[0]} (m)")
+    ax.set_ylabel(f"{axis_labels[1]} (m)")
+    ax.set_zlabel(f"{axis_labels[2]} (m)")
     poly = Poly3DCollection([], alpha=0.35, facecolor=body_facecolor, edgecolor="k", linewidth=0.7)
     ax.add_collection3d(poly)
     thruster_poly = Poly3DCollection(
         [],
         alpha=1.0,
         facecolor=thruster_inactive_facecolor,
-        edgecolor="#2F241E",
+        edgecolor=thruster_inactive_edgecolor,
         linewidth=0.85,
     )
     ax.add_collection3d(thruster_poly)
@@ -918,18 +823,22 @@ def animate_rectangular_prism_attitude(
         )
 
     def update(i: int):
-        poly.set_verts(_frame_verts(i))
+        poly.set_verts(_permute_face_vertices(_frame_verts(i), display_perm))
         poly.set_facecolor(body_facecolor)
         thruster_poly.set_verts(
-            _marker_frame_faces(
-                marker_points_body=marker_points_body,
-                rotation_history=c_anim,
-                faces=marker_faces,
-                frame_idx=i,
+            _permute_face_vertices(
+                _marker_frame_faces(
+                    marker_points_body=marker_points_body,
+                    rotation_history=c_anim,
+                    faces=marker_faces,
+                    frame_idx=i,
+                ),
+                display_perm,
             )
         )
         thruster_poly.set_facecolor(thruster_active_facecolor if bool(active_mask[i]) else thruster_inactive_facecolor)
-        ax.set_xlabel(f"t={t_s[i]:.1f}s")
+        thruster_poly.set_edgecolor(thruster_active_edgecolor if bool(active_mask[i]) else thruster_inactive_edgecolor)
+        ax.set_title(f"Rectangular Prism Attitude Animation ({frame.upper()})  t={t_s[i]:.1f}s")
         return [poly, thruster_poly]
 
     dt = float(np.median(np.diff(t_s))) if t_s.size > 1 else 1.0
@@ -969,6 +878,7 @@ def animate_battlespace_dashboard(
     speed_multiple: float = 10.0,
     frame_stride: int = 1,
 ) -> None:
+    display_perm = np.array([1, 2, 0], dtype=int)
     target_hist_raw = np.array(truth_hist_by_object.get(target_object_id, np.array([])), dtype=float)
     chaser_hist_raw = np.array(truth_hist_by_object.get(chaser_object_id, np.array([])), dtype=float)
     ref_hist_raw = np.array(reference_truth_hist, dtype=float)
@@ -1037,6 +947,10 @@ def animate_battlespace_dashboard(
     for oid in (target_object_id, chaser_object_id):
         arr = np.array((delta_v_remaining_m_s_by_object or {}).get(oid, np.full(n_frames, np.nan)), dtype=float).reshape(-1)
         dv_remaining_by_object[oid] = arr[:n_frames] if arr.size >= n_frames else np.pad(arr, (0, n_frames - arr.size), constant_values=np.nan)
+    fuel_fraction_by_object = {
+        oid: _fuel_fraction_from_remaining_series(dv_remaining_by_object[oid])
+        for oid in (target_object_id, chaser_object_id)
+    }
 
     rel_r_km = chaser_hist[:, 0:3] - target_hist[:, 0:3]
     rel_v_km_s = chaser_hist[:, 3:6] - target_hist[:, 3:6]
@@ -1056,6 +970,8 @@ def animate_battlespace_dashboard(
     }
     thruster_inactive_facecolor = "#808080"
     thruster_active_facecolor = "#D95F02"
+    thruster_inactive_edgecolor = "#5F5F5F"
+    thruster_active_edgecolor = "#D95F02"
 
     for ax, plane, lim, title in (
         (ax_ri, "ri", 1.0, "RI Relative Motion"),
@@ -1078,14 +994,15 @@ def animate_battlespace_dashboard(
         body_vertices = body_vertices_by_object[oid]
         body_span = np.ptp(body_vertices, axis=0)
         lim = 0.7 * float(max(np.max(body_span), 1.0))
-        ax.set_xlim(-lim, lim)
-        ax.set_ylim(-lim, lim)
-        ax.set_zlim(-lim, lim)
+        xlim, ylim, zlim = _attitude_axis_limits("ric", lim)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.set_zlim(*zlim)
         ax.set_box_aspect((1, 1, 1))
         ax.view_init(elev=22.0, azim=35.0)
-        ax.set_xlabel("R (m)")
-        ax.set_ylabel("I (m)")
-        ax.set_zlabel("C (m)")
+        ax.set_xlabel("I (m)")
+        ax.set_ylabel("C (m)")
+        ax.set_zlabel("R (m)")
         ax.set_title(title)
         poly = Poly3DCollection([], alpha=0.35, facecolor=color_by_object[oid], edgecolor="k", linewidth=0.7)
         ax.add_collection3d(poly)
@@ -1094,7 +1011,7 @@ def animate_battlespace_dashboard(
             [],
             alpha=1.0,
             facecolor=thruster_inactive_facecolor,
-            edgecolor="#2F241E",
+            edgecolor=thruster_inactive_edgecolor,
             linewidth=0.85,
         )
         ax.add_collection3d(thruster_poly)
@@ -1120,6 +1037,35 @@ def animate_battlespace_dashboard(
     ax_rc.legend(loc="best")
 
     fig.suptitle("Battlespace Visualization Dashboard", fontsize=14)
+    fig.tight_layout(rect=[0.0, 0.06, 1.0, 0.95])
+
+    fuel_fill_by_object: dict[str, Rectangle] = {}
+
+    def _add_fuel_meter(attitude_ax: Any, oid: str) -> None:
+        bbox = attitude_ax.get_position()
+        meter_width = 0.022
+        meter_height = bbox.height * 0.72
+        meter_left = min(bbox.x1 + 0.012, 0.975 - meter_width)
+        meter_bottom = bbox.y0 + 0.14 * bbox.height
+        meter_ax = fig.add_axes([meter_left, meter_bottom, meter_width, meter_height])
+        meter_ax.set_xlim(0.0, 1.0)
+        meter_ax.set_ylim(0.0, 1.0)
+        meter_ax.set_xticks([])
+        meter_ax.set_yticks([0.0, 0.5, 1.0])
+        meter_ax.set_yticklabels([])
+        meter_ax.set_title("Fuel", fontsize=8, pad=4)
+        for spine in meter_ax.spines.values():
+            spine.set_edgecolor("#666666")
+            spine.set_linewidth(0.8)
+        meter_ax.set_facecolor("#f3f3f3")
+        meter_ax.add_patch(Rectangle((0.12, 0.0), 0.76, 1.0, facecolor="#ffffff", edgecolor="#999999", linewidth=0.8))
+        fill = Rectangle((0.12, 0.0), 0.76, 0.0, facecolor="#7fbf3f", edgecolor="none", alpha=0.95)
+        meter_ax.add_patch(fill)
+        fuel_fill_by_object[oid] = fill
+
+    _add_fuel_meter(ax_chaser, chaser_object_id)
+    _add_fuel_meter(ax_target, target_object_id)
+
     status_text = fig.text(
         0.5,
         0.015,
@@ -1130,18 +1076,10 @@ def animate_battlespace_dashboard(
         family="monospace",
         bbox={"facecolor": "white", "alpha": 0.9, "edgecolor": "#cccccc"},
     )
-    fig.tight_layout(rect=[0.0, 0.06, 1.0, 0.95])
-
     stride = int(max(frame_stride, 1))
     frame_ids = np.arange(0, n_frames, stride, dtype=int)
     if frame_ids.size == 0 or frame_ids[-1] != (n_frames - 1):
         frame_ids = np.append(frame_ids, n_frames - 1)
-
-    def _dv_text(oid: str, idx: int) -> str:
-        dv_val = float(dv_remaining_by_object[oid][idx])
-        if np.isfinite(dv_val):
-            return f"{dv_val:7.2f} m/s"
-        return "   n/a  "
 
     def update(i: int):
         artists: list[Any] = []
@@ -1162,66 +1100,71 @@ def animate_battlespace_dashboard(
                 ]
             )
 
-        ri_lim = _symmetric_limit_from_arrays(
-            [
-                traj[: frame_i + 1, ri_ix]
-                for traj in curv_traj_by_object.values()
-            ]
-            + [
-                traj[: frame_i + 1, ri_iy]
-                for traj in curv_traj_by_object.values()
-            ],
-            min_lim=1.0,
-            margin=1.15,
+        current_points = [
+            traj[min(frame_i, traj.shape[0] - 1), :]
+            for traj in curv_traj_by_object.values()
+        ]
+        (ri_xlim, ri_ylim) = _windows_from_points(
+            current_points,
+            axis_indices=(ri_ix, ri_iy),
+            min_span=1.0,
+            margin=RIC_FOLLOW_MARGIN,
         )
-        rc_lim = _symmetric_limit_from_arrays(
-            [
-                traj[: frame_i + 1, rc_ix]
-                for traj in curv_traj_by_object.values()
-            ]
-            + [
-                traj[: frame_i + 1, rc_iy]
-                for traj in curv_traj_by_object.values()
-            ],
-            min_lim=1.0,
-            margin=1.15,
+        (rc_xlim, rc_ylim) = _windows_from_points(
+            current_points,
+            axis_indices=(rc_ix, rc_iy),
+            min_span=1.0,
+            margin=RIC_FOLLOW_MARGIN,
         )
-        ax_ri.set_xlim(-ri_lim, ri_lim)
-        ax_ri.set_ylim(-ri_lim, ri_lim)
-        ax_rc.set_xlim(-rc_lim, rc_lim)
-        ax_rc.set_ylim(-rc_lim, rc_lim)
+        ax_ri.set_xlim(*ri_xlim)
+        ax_ri.set_ylim(*ri_ylim)
+        ax_rc.set_xlim(*rc_xlim)
+        ax_rc.set_ylim(*rc_ylim)
 
         for oid in (chaser_object_id, target_object_id):
             prism_poly_by_object[oid].set_verts(
-                _rectangular_prism_frame_vertices(
-                    body_vertices=body_vertices_by_object[oid],
-                    rotation_history=rotations_by_object[oid],
-                    faces=faces,
-                    frame_idx=frame_i,
+                _permute_face_vertices(
+                    _rectangular_prism_frame_vertices(
+                        body_vertices=body_vertices_by_object[oid],
+                        rotation_history=rotations_by_object[oid],
+                        faces=faces,
+                        frame_idx=frame_i,
+                    ),
+                    display_perm,
                 )
             )
             prism_poly_by_object[oid].set_facecolor(color_by_object[oid])
             thruster_poly_by_object[oid].set_verts(
-                _marker_frame_faces(
-                    marker_points_body=marker_points_by_object[oid],
-                    rotation_history=rotations_by_object[oid],
-                    faces=marker_faces_by_object[oid],
-                    frame_idx=frame_i,
+                _permute_face_vertices(
+                    _marker_frame_faces(
+                        marker_points_body=marker_points_by_object[oid],
+                        rotation_history=rotations_by_object[oid],
+                        faces=marker_faces_by_object[oid],
+                        frame_idx=frame_i,
+                    ),
+                    display_perm,
                 )
             )
             thruster_poly_by_object[oid].set_facecolor(
                 thruster_active_facecolor if bool(active_by_object[oid][frame_i]) else thruster_inactive_facecolor
             )
+            thruster_poly_by_object[oid].set_edgecolor(
+                thruster_active_edgecolor if bool(active_by_object[oid][frame_i]) else thruster_inactive_edgecolor
+            )
             artists.append(prism_poly_by_object[oid])
             artists.append(thruster_poly_by_object[oid])
+            frac = float(fuel_fraction_by_object[oid][frame_i])
+            if np.isfinite(frac):
+                frac_clip = float(np.clip(frac, 0.0, 1.0))
+                fuel_fill_by_object[oid].set_height(frac_clip)
+                fuel_fill_by_object[oid].set_facecolor(plt.get_cmap("RdYlGn")(frac_clip))
+            else:
+                fuel_fill_by_object[oid].set_height(0.0)
+                fuel_fill_by_object[oid].set_facecolor("#bdbdbd")
+            artists.append(fuel_fill_by_object[oid])
 
         status_text.set_text(
-            "\n".join(
-                [
-                    f"t = {t_plot[frame_i]:7.1f} s   Relative Range = {rel_range_km[frame_i]:8.3f} km   Relative Speed = {rel_speed_km_s[frame_i]:8.5f} km/s",
-                    f"Chaser dV Remaining = {_dv_text(chaser_object_id, frame_i)}   Target dV Remaining = {_dv_text(target_object_id, frame_i)}",
-                ]
-            )
+            f"t = {t_plot[frame_i]:7.1f} s   Relative Range = {rel_range_km[frame_i]:8.3f} km   Relative Speed = {rel_speed_km_s[frame_i]:8.5f} km/s"
         )
         artists.append(status_text)
         return artists
@@ -1281,14 +1224,22 @@ def animate_trajectory_frame(
         dot.set_data([r[i, 0]], [r[i, 1]])
         dot.set_3d_properties([r[i, 2]])
         if frame in ("ric_rect", "ric_curv"):
-            lim = _symmetric_limit_from_arrays(
-                [r[: i + 1, 0], r[: i + 1, 1], r[: i + 1, 2]],
-                min_lim=1.0,
-                margin=1.15,
+            xlim, ylim, zlim = _windows_from_points(
+                [r[i, :]],
+                axis_indices=(0, 1, 2),
+                min_span=1.0,
+                margin=RIC_FOLLOW_MARGIN,
             )
-            ax.set_xlim(-lim, lim)
-            ax.set_ylim(-lim, lim)
-            ax.set_zlim(-lim, lim)
+            ax.set_xlim(*xlim)
+            ax.set_ylim(*ylim)
+            ax.set_zlim(*zlim)
+            ax.set_box_aspect(
+                (
+                    max(xlim[1] - xlim[0], 1e-6),
+                    max(ylim[1] - ylim[0], 1e-6),
+                    max(zlim[1] - zlim[0], 1e-6),
+                )
+            )
         ax.set_xlabel(f"t={t_s[i]:.1f}s")
         return [line, dot]
 
@@ -1381,7 +1332,7 @@ def animate_multi_trajectory_frame(
     def update(i: int):
         artists = []
         frame_i = int(frame_ids[i])
-        scale_arrays: list[np.ndarray] = []
+        current_points: list[np.ndarray] = []
         for oid, arr in trajectories.items():
             idx = min(frame_i, arr.shape[0] - 1)
             start = 0 if show_trajectory else idx
@@ -1391,13 +1342,25 @@ def animate_multi_trajectory_frame(
             dot_by_obj[oid].set_data([arr[idx, ix]], [arr[idx, iy]])
             dot_by_obj[oid].set_3d_properties([arr[idx, iz]])
             if frame in ("ric_rect", "ric_curv"):
-                scale_arrays.extend([arr[: idx + 1, ix], arr[: idx + 1, iy], arr[: idx + 1, iz]])
+                current_points.append(arr[idx, :])
             artists.extend([line_by_obj[oid], dot_by_obj[oid]])
         if frame in ("ric_rect", "ric_curv"):
-            lim = _symmetric_limit_from_arrays(scale_arrays, min_lim=1.0, margin=1.15)
-            ax.set_xlim(-lim, lim)
-            ax.set_ylim(-lim, lim)
-            ax.set_zlim(-lim, lim)
+            xlim, ylim, zlim = _windows_from_points(
+                current_points,
+                axis_indices=(ix, iy, iz),
+                min_span=1.0,
+                margin=RIC_FOLLOW_MARGIN,
+            )
+            ax.set_xlim(*xlim)
+            ax.set_ylim(*ylim)
+            ax.set_zlim(*zlim)
+            ax.set_box_aspect(
+                (
+                    max(xlim[1] - xlim[0], 1e-6),
+                    max(ylim[1] - ylim[0], 1e-6),
+                    max(zlim[1] - zlim[0], 1e-6),
+                )
+            )
         t_now = float(t_s[min(frame_i, t_s.size - 1)]) if t_s.size else 0.0
         ax.set_title(f"Trajectories Animation ({frame.upper()})  t={t_now:.1f}s")
         return artists
@@ -1902,14 +1865,15 @@ def animate_side_by_side_rectangular_prism_ric_attitude(
     fig = plt.figure(figsize=cap_figsize(12, 6))
     ax_left = fig.add_subplot(1, 2, 1, projection="3d")
     ax_right = fig.add_subplot(1, 2, 2, projection="3d")
+    xlim, ylim, zlim = _attitude_axis_limits("ric", lim_km)
     for ax, title in ((ax_left, left_object_id), (ax_right, right_object_id)):
-        ax.set_xlim(-lim_km, lim_km)
-        ax.set_ylim(-lim_km, lim_km)
-        ax.set_zlim(-lim_km, lim_km)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.set_zlim(*zlim)
         ax.set_box_aspect((1, 1, 1))
         ax.set_xlabel("I (km)")
-        ax.set_ylabel("R (km)")
-        ax.set_zlabel("C (km)")
+        ax.set_ylabel("C (km)")
+        ax.set_zlabel("R (km)")
         ax.set_title(f"{title} Body in Local RIC")
 
     poly_left = Poly3DCollection([], alpha=0.4, facecolor="#4C9F70", edgecolor="k", linewidth=0.7)
@@ -1926,7 +1890,7 @@ def animate_side_by_side_rectangular_prism_ric_attitude(
         if not np.all(np.isfinite(c_rb)):
             return None
         verts = (c_rb @ verts_body.T).T
-        return [verts[idx, :] for idx in faces]
+        return _permute_face_vertices([verts[idx, :] for idx in faces], np.array([1, 2, 0], dtype=int))
 
     def update(i: int):
         k = int(frame_ids[i])

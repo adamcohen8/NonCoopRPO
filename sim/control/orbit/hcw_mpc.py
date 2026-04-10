@@ -50,8 +50,8 @@ class HCWRelativeOrbitMPCController(Controller):
     trust_region_step_km_s2: float = 1e-5
     debug_store_iteration_history: bool = False
 
-    _u_guess_ric: np.ndarray = field(init=False, repr=False)
-    _u_prev_ric: np.ndarray = field(init=False, repr=False)
+    _u_guess_ctrl: np.ndarray = field(init=False, repr=False)
+    _u_prev_ctrl: np.ndarray = field(init=False, repr=False)
     _rng: np.random.Generator = field(init=False, repr=False)
     _ad: np.ndarray = field(init=False, repr=False)
     _bd: np.ndarray = field(init=False, repr=False)
@@ -111,8 +111,8 @@ class HCWRelativeOrbitMPCController(Controller):
         self.target_rel_ric_rect = self._vector(self.target_rel_ric_rect, n=6)
         self.q_weights = self._vector(self.q_weights, n=6)
         self.terminal_weights = self._vector(self.terminal_weights, n=6)
-        self.r_weights = self._vector(self.r_weights, n=3)
-        self.rd_weights = self._vector(self.rd_weights, n=3)
+        self.r_weights = self._vector(self.r_weights, n=self._control_dim())
+        self.rd_weights = self._vector(self.rd_weights, n=self._control_dim())
 
         if np.any(self.q_weights < 0.0):
             raise ValueError("q_weights must be non-negative.")
@@ -123,11 +123,12 @@ class HCWRelativeOrbitMPCController(Controller):
         if np.any(self.rd_weights < 0.0):
             raise ValueError("rd_weights must be non-negative.")
 
-        self._u_guess_ric = np.zeros((1, 3), dtype=float)
-        self._u_prev_ric = np.zeros(3, dtype=float)
+        self._u_guess_ctrl = np.zeros((1, self._control_dim()), dtype=float)
+        self._u_prev_ctrl = np.zeros(self._control_dim(), dtype=float)
         self._rng = np.random.default_rng(0)
         self._ad = np.eye(6, dtype=float)
-        self._bd = np.vstack((np.zeros((3, 3), dtype=float), np.eye(3, dtype=float))) * self.default_model_dt_s
+        bd_full = np.vstack((np.zeros((3, 3), dtype=float), np.eye(3, dtype=float))) * self.default_model_dt_s
+        self._bd = self._control_input_matrix(bd_full)
         self._last_model_dt_s = float(self.default_model_dt_s)
 
     @staticmethod
@@ -138,6 +139,22 @@ class HCWRelativeOrbitMPCController(Controller):
         if arr.size != n:
             raise ValueError(f"Expected scalar or length-{n} vector.")
         return arr
+
+    def _control_dim(self) -> int:
+        return 3
+
+    def _control_axes(self) -> list[str]:
+        return ["R", "I", "C"]
+
+    def _control_input_matrix(self, bd_full: np.ndarray) -> np.ndarray:
+        return np.array(bd_full, dtype=float)
+
+    def _control_to_ric(self, u_ctrl: np.ndarray) -> np.ndarray:
+        return np.array(u_ctrl, dtype=float).reshape(3)
+
+    def _seed_control(self, x_rel_err: np.ndarray) -> np.ndarray:
+        a_seed_ric = -(self.seed_kp_pos * x_rel_err[:3] + self.seed_kd_vel * x_rel_err[3:])
+        return self._project_accel(a_seed_ric)
 
     def act(self, belief: StateBelief, t_s: float, budget_ms: float) -> Command:
         i0, i1 = self.ric_curv_state_slice
@@ -163,15 +180,15 @@ class HCWRelativeOrbitMPCController(Controller):
         c_ir = ric_dcm_ir_from_rv(r_tgt, v_tgt)
         x_rel_rect = ric_curv_to_rect(x_rel_curv, r0_km=r0)
         x_rel_err = self.state_signs * x_rel_rect - self.target_rel_ric_rect
-        a_seed_ric = -(self.seed_kp_pos * x_rel_err[:3] + self.seed_kd_vel * x_rel_err[3:])
-        a_seed_ric = self._project_accel(a_seed_ric)
+        u_seed = self._seed_control(x_rel_err)
+        a_seed_ric = self._control_to_ric(u_seed)
 
-        if self._u_guess_ric.shape != (h_steps, 3):
-            self._u_guess_ric = np.zeros((h_steps, 3), dtype=float)
-        if not np.any(np.abs(self._u_guess_ric) > 0.0):
-            self._u_guess_ric = self._build_seed_sequence(a_seed_ric, h_steps=h_steps)
+        if self._u_guess_ctrl.shape != (h_steps, self._control_dim()):
+            self._u_guess_ctrl = np.zeros((h_steps, self._control_dim()), dtype=float)
+        if not np.any(np.abs(self._u_guess_ctrl) > 0.0):
+            self._u_guess_ctrl = self._build_seed_sequence(u_seed, h_steps=h_steps)
         else:
-            self._u_guess_ric[0] = 0.5 * self._u_guess_ric[0] + 0.5 * a_seed_ric
+            self._u_guess_ctrl[0] = 0.5 * self._u_guess_ctrl[0] + 0.5 * u_seed
 
         deadline_s = float("inf")
         if budget_ms > 0.0:
@@ -180,7 +197,7 @@ class HCWRelativeOrbitMPCController(Controller):
         solve_t0 = perf_counter()
         u_opt, info = self._solve_mpc(
             x_rel0=np.array(x_rel_rect, dtype=float),
-            u_init=np.array(self._u_guess_ric, dtype=float),
+            u_init=np.array(self._u_guess_ctrl, dtype=float),
             h_steps=h_steps,
             deadline_s=deadline_s,
         )
@@ -188,9 +205,10 @@ class HCWRelativeOrbitMPCController(Controller):
         if u_opt.size == 0:
             return Command.zero()
 
-        u0_ric = self._project_accel(u_opt[0])
-        self._u_prev_ric = u0_ric
-        self._u_guess_ric = self._shift_sequence(u_opt)
+        u0_ctrl = self._project_accel(u_opt[0])
+        u0_ric = self._control_to_ric(u0_ctrl)
+        self._u_prev_ctrl = u0_ctrl
+        self._u_guess_ctrl = self._shift_sequence(u_opt)
         u0_eci = c_ir @ u0_ric
         return Command(
             thrust_eci_km_s2=u0_eci,
@@ -206,6 +224,7 @@ class HCWRelativeOrbitMPCController(Controller):
                 "gradient_method": self.gradient_method,
                 "mean_motion_rad_s": float(n),
                 "accel_ric_km_s2": u0_ric.tolist(),
+                "control_axes": self._control_axes(),
                 "seed_accel_ric_km_s2": a_seed_ric.tolist(),
                 "solve_time_ms": float(solve_ms),
                 **info,
@@ -243,7 +262,7 @@ class HCWRelativeOrbitMPCController(Controller):
             ],
             dtype=float,
         )
-        self._bd = np.array(
+        bd_full = np.array(
             [
                 [(1.0 - c) / n2, 2.0 * (dt / n - s / n2), 0.0],
                 [-2.0 * (dt / n - s / n2), 4.0 * (1.0 - c) / n2 - 1.5 * dt * dt, 0.0],
@@ -254,6 +273,7 @@ class HCWRelativeOrbitMPCController(Controller):
             ],
             dtype=float,
         )
+        self._bd = self._control_input_matrix(bd_full)
 
     def _solve_mpc(
         self,
@@ -279,7 +299,7 @@ class HCWRelativeOrbitMPCController(Controller):
         eval_count += 1
         if keep_hist:
             cost_hist.append(float(j))
-            first_u_hist.append(np.array(u[0], dtype=float).tolist())
+            first_u_hist.append(self._control_to_ric(u[0]).tolist())
 
         for it in range(self.max_iterations):
             if perf_counter() >= deadline_s:
@@ -291,7 +311,7 @@ class HCWRelativeOrbitMPCController(Controller):
             grad = np.zeros_like(u)
             if self.gradient_method == "finite_difference":
                 for k in range(h_steps):
-                    for j_idx in range(3):
+                    for j_idx in range(self._control_dim()):
                         if perf_counter() >= deadline_s:
                             reason = "deadline_during_gradient"
                             timed_out = True
@@ -342,7 +362,7 @@ class HCWRelativeOrbitMPCController(Controller):
                     j = jc
                     if keep_hist:
                         cost_hist.append(float(j))
-                        first_u_hist.append(np.array(u[0], dtype=float).tolist())
+                        first_u_hist.append(self._control_to_ric(u[0]).tolist())
                         accepted_alpha_hist.append(float(alpha))
                     improved = True
                     break
@@ -374,7 +394,7 @@ class HCWRelativeOrbitMPCController(Controller):
 
     def _cost(self, *, x_rel0: np.ndarray, u_seq: np.ndarray, h_steps: int) -> float:
         x = np.array(x_rel0, dtype=float).reshape(6)
-        u_prev = np.array(self._u_prev_ric, dtype=float).reshape(3)
+        u_prev = np.array(self._u_prev_ctrl, dtype=float).reshape(self._control_dim())
         u_seq = self._project_sequence(u_seq, h_steps=h_steps)
 
         j = 0.0
@@ -392,16 +412,16 @@ class HCWRelativeOrbitMPCController(Controller):
         return j
 
     def _project_accel(self, u_ric: np.ndarray) -> np.ndarray:
-        u = np.array(u_ric, dtype=float).reshape(3)
+        u = np.array(u_ric, dtype=float).reshape(self._control_dim())
         norm_u = float(np.linalg.norm(u))
         if self.max_accel_km_s2 > 0.0 and norm_u > self.max_accel_km_s2:
             u *= self.max_accel_km_s2 / norm_u
         elif self.max_accel_km_s2 == 0.0:
-            u = np.zeros(3, dtype=float)
+            u = np.zeros(self._control_dim(), dtype=float)
         return u
 
     def _project_sequence(self, u_seq: np.ndarray, *, h_steps: int) -> np.ndarray:
-        u = np.array(u_seq, dtype=float).reshape(h_steps, 3)
+        u = np.array(u_seq, dtype=float).reshape(h_steps, self._control_dim())
         if self.max_accel_km_s2 == 0.0:
             return np.zeros_like(u)
         if self.max_accel_km_s2 < 0.0:
@@ -413,7 +433,7 @@ class HCWRelativeOrbitMPCController(Controller):
         return u * scale
 
     def _shift_sequence(self, u_seq: np.ndarray) -> np.ndarray:
-        h_steps = int(np.array(u_seq, dtype=float).reshape(-1, 3).shape[0])
+        h_steps = int(np.array(u_seq, dtype=float).reshape(-1, self._control_dim()).shape[0])
         u = self._project_sequence(u_seq, h_steps=h_steps)
         if h_steps <= 1:
             return u
@@ -422,10 +442,50 @@ class HCWRelativeOrbitMPCController(Controller):
         shifted[-1] = u[-1]
         return shifted
 
-    def _build_seed_sequence(self, a0_ric: np.ndarray, *, h_steps: int) -> np.ndarray:
-        seq = np.zeros((h_steps, 3), dtype=float)
+    def _build_seed_sequence(self, u0_ctrl: np.ndarray, *, h_steps: int) -> np.ndarray:
+        seq = np.zeros((h_steps, self._control_dim()), dtype=float)
         decay = 1.0
         for k in range(h_steps):
-            seq[k] = self._project_accel(decay * np.array(a0_ric, dtype=float))
+            seq[k] = self._project_accel(decay * np.array(u0_ctrl, dtype=float))
             decay *= self.seed_decay
         return seq
+
+
+@dataclass
+class HCWInTrackCrossTrackMPCController(HCWRelativeOrbitMPCController):
+    """HCW relative-orbit MPC constrained to in-track and cross-track burns."""
+
+    r_weights: np.ndarray = field(default_factory=lambda: np.ones(2) * 4.0e12)
+    rd_weights: np.ndarray = field(default_factory=lambda: np.ones(2) * 4.0e12)
+    control_signs: np.ndarray = field(default_factory=lambda: np.ones(2))
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        signs = self._vector(self.control_signs, n=2)
+        signs[signs == 0.0] = 1.0
+        self.control_signs = np.sign(signs)
+
+    def _control_dim(self) -> int:
+        return 2
+
+    def _control_axes(self) -> list[str]:
+        return ["I", "C"]
+
+    def _control_input_matrix(self, bd_full: np.ndarray) -> np.ndarray:
+        bd = np.array(bd_full, dtype=float)
+        return bd[:, 1:3]
+
+    def _control_to_ric(self, u_ctrl: np.ndarray) -> np.ndarray:
+        u = self.control_signs * np.array(u_ctrl, dtype=float).reshape(2)
+        return np.array([0.0, u[0], u[1]], dtype=float)
+
+    def _seed_control(self, x_rel_err: np.ndarray) -> np.ndarray:
+        a_seed_ric = -(self.seed_kp_pos * x_rel_err[:3] + self.seed_kd_vel * x_rel_err[3:])
+        return self._project_accel(a_seed_ric[1:3])
+
+    def act(self, belief: StateBelief, t_s: float, budget_ms: float) -> Command:
+        cmd = super().act(belief, t_s, budget_ms)
+        if cmd.mode_flags:
+            cmd.mode_flags["mode"] = "relative_orbit_hcw_mpc_no_radial"
+            cmd.mode_flags["control_signs"] = self.control_signs.tolist()
+        return cmd

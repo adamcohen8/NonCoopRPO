@@ -87,6 +87,50 @@ class MissionArchitectureMigrationTests(unittest.TestCase):
         self.assertIn("remaining_delta_v_km_s", out["mission_mode"])
         self.assertLess(float(out["mission_mode"]["remaining_delta_v_km_s"]), 0.1)
 
+    def test_budgeted_end_state_execution_uses_mass_as_delta_v_truth_source(self) -> None:
+        e = BudgetedEndStateExecution(
+            strategy="thrust_limited",
+            max_thrust_n=10.0,
+            min_thrust_n=0.0,
+            burn_dt_s=1.0,
+            available_delta_v_km_s=0.0,
+            require_attitude_alignment=False,
+            alignment_tolerance_deg=180.0,
+        )
+        truth = _truth()
+        truth.mass_kg = 120.0
+        out = e.update(
+            intent={"desired_state_eci_6": np.array([7000.0, 0.0, 0.0, 0.01, 7.5, 0.0])},
+            truth=truth,
+            dt_s=1.0,
+            dry_mass_kg=100.0,
+            orbital_isp_s=220.0,
+            env={"attitude_disabled": True},
+        )
+        self.assertGreater(float(out["mission_mode"]["remaining_delta_v_km_s"]), 0.0)
+
+    def test_budgeted_end_state_execution_uses_command_hold_interval_for_accel(self) -> None:
+        e = BudgetedEndStateExecution(
+            strategy="thrust_limited",
+            max_thrust_n=10.0,
+            min_thrust_n=0.0,
+            burn_dt_s=0.25,
+            available_delta_v_km_s=0.1,
+            require_attitude_alignment=False,
+            alignment_tolerance_deg=180.0,
+        )
+        truth = _truth()
+        out = e.update(
+            intent={"desired_state_eci_6": np.array([7000.0, 0.0, 0.0, 0.01, 7.5, 0.0])},
+            truth=truth,
+            dt_s=0.25,
+            orbit_command_period_s=2.0,
+            env={"attitude_disabled": True},
+        )
+        accel_mag = float(np.linalg.norm(np.array(out["thrust_eci_km_s2"], dtype=float)))
+        applied_dv = float(out["mission_mode"]["applied_delta_v_km_s"])
+        self.assertAlmostEqual(accel_mag, applied_dv / 2.0, places=12)
+
     def test_predictive_burn_execution_accepts_desired_state_intent(self) -> None:
         e = PredictiveBurnExecution(lead_time_s=0.0, alignment_tolerance_deg=180.0)
         controller = _ConstantOrbitController([2.0e-5, 0.0, 0.0])

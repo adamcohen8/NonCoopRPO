@@ -35,12 +35,34 @@ BASIC_CHEMICAL_BOTTOM_Z = ChemicalPropulsionPreset(
 )
 
 
-def resolve_thruster_mount_from_specs(specs: dict[str, Any] | None) -> ThrusterMountPreset | None:
+def resolve_thruster_preset_from_specs(specs: dict[str, Any] | None) -> ChemicalPropulsionPreset | None:
     raw = dict(specs or {})
     preset_name = str(raw.get("thruster", "") or "").strip().upper()
-    preset_mount: ThrusterMountPreset | None = None
     if preset_name in ("BASIC_CHEMICAL_BOTTOM_Z", "BASIC_CHEMICAL_Z_BOTTOM"):
-        preset_mount = BASIC_CHEMICAL_BOTTOM_Z.mount
+        return BASIC_CHEMICAL_BOTTOM_Z
+    return None
+
+
+def resolve_thruster_max_thrust_n_from_specs(specs: dict[str, Any] | None) -> float | None:
+    raw = dict(specs or {})
+    explicit = raw.get("max_thrust_n")
+    if explicit is not None:
+        try:
+            val = float(explicit)
+        except (TypeError, ValueError):
+            val = np.nan
+        if np.isfinite(val) and val >= 0.0:
+            return float(val)
+    preset = resolve_thruster_preset_from_specs(raw)
+    if preset is not None:
+        return float(preset.max_thrust_n)
+    return None
+
+
+def resolve_thruster_mount_from_specs(specs: dict[str, Any] | None) -> ThrusterMountPreset | None:
+    raw = dict(specs or {})
+    preset = resolve_thruster_preset_from_specs(raw)
+    preset_mount: ThrusterMountPreset | None = None if preset is None else preset.mount
 
     explicit_direction = raw.get("thruster_direction_body")
     explicit_position = raw.get("thruster_position_body_m")

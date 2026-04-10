@@ -26,8 +26,8 @@ variants:
         design_dt_s: 1.0
         ric_curv_state_slice: [0, 6]
         chief_eci_state_slice: [6, 12]
-        q_weights: [80.0, 10, 1.0, 1.0, 2.0, 0.1]
-        r_weights: [1.0e12, 1.0e12]
+        q_weights: [100.0, 10, 1.0, 1.0, 2.0, 0.1]
+        r_weights: [3.0e13, 3.0e13]
 
 objectives:
   - kind: relative_rendezvous

@@ -9,7 +9,7 @@ from typing import Any, Callable
 import numpy as np
 
 from sim.presets.rockets import BASIC_1ST_STAGE, BASIC_SSTO_ROCKET, BASIC_TWO_STAGE_STACK, RocketStackPreset
-from sim.presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, resolve_thruster_mount_from_specs
+from sim.presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, resolve_thruster_max_thrust_n_from_specs, resolve_thruster_mount_from_specs
 from sim.config import SimulationScenarioConfig
 from sim.control.attitude.zero_torque import ZeroTorqueController
 from sim.control.orbit.zero_controller import ZeroController
@@ -426,6 +426,7 @@ class AgentRuntime:
     orbital_isp_s: float | None = None
     dry_mass_kg: float | None = None
     fuel_capacity_kg: float | None = None
+    orbital_max_thrust_n: float | None = None
     thruster_direction_body: np.ndarray | None = None
     thruster_position_body_m: np.ndarray | None = None
 
@@ -587,6 +588,7 @@ def _create_satellite_runtime(
     mission_modules = [_module_obj(pointer) for pointer in list(agent_cfg.mission_objectives or [])]
     mission_modules = [module for module in mission_modules if module is not None]
     sat_isp_s = _resolve_satellite_isp_s(specs)
+    sat_max_thrust_n = resolve_thruster_max_thrust_n_from_specs(specs)
     dry_mass_kg = specs.get("dry_mass_kg")
     fuel_capacity_kg = specs.get("fuel_mass_kg")
     thruster_mount = resolve_thruster_mount_from_specs(specs)
@@ -617,6 +619,7 @@ def _create_satellite_runtime(
         orbital_isp_s=(None if sat_isp_s <= 0.0 else float(sat_isp_s)),
         dry_mass_kg=(None if dry_mass_kg is None else float(dry_mass_kg)),
         fuel_capacity_kg=(None if fuel_capacity_kg is None else float(fuel_capacity_kg)),
+        orbital_max_thrust_n=sat_max_thrust_n,
         thruster_direction_body=(None if thruster_mount is None else np.array(thruster_mount.thrust_direction_body, dtype=float)),
         thruster_position_body_m=(None if thruster_mount is None else np.array(thruster_mount.position_body_m, dtype=float)),
     )
@@ -781,6 +784,7 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         orbital_isp_s=None,
         dry_mass_kg=None,
         fuel_capacity_kg=None,
+        orbital_max_thrust_n=None,
         thruster_direction_body=None,
         thruster_position_body_m=None,
     )
@@ -995,6 +999,10 @@ def _run_mission_execution(
                 "att_belief": att_belief,
                 "rocket_state": agent.rocket_state,
                 "rocket_vehicle_cfg": (agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
+                "dry_mass_kg": agent.dry_mass_kg,
+                "fuel_capacity_kg": agent.fuel_capacity_kg,
+                "orbital_isp_s": agent.orbital_isp_s,
+                "orbit_command_period_s": float(env.get("orbit_command_period_s", dt_s)),
             },
             fallback_kwargs={"intent": dict(intent or {}), "truth": truth, "t_s": t_s},
         )

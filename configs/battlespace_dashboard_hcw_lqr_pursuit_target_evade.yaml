@@ -1,8 +1,8 @@
-scenario_name: "battlespace_dashboard_hcw_lqr_pursuit_target_evade"
+scenario_name: "battlespace_dashboard_hcw_manual_no_radial_pursuit_target_evade"
 
 metadata:
   owner: "codex"
-  notes: "Battlespace dashboard test case: HCW LQR chaser pursuit against a coasting target."
+  notes: "Battlespace dashboard scenario with manual-gain HCW no-radial pursuit for the chaser and evasive target."
 
 rocket:
   enabled: false
@@ -14,27 +14,29 @@ chaser:
   specs:
     preset_satellite: "BASIC_SATELLITE"
     dry_mass_kg: 180.0
-    fuel_mass_kg: 20.0
+    fuel_mass_kg: 5.0
     thruster: "BASIC_CHEMICAL_Z_BOTTOM"
     attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
   initial_state:
     relative_to_target_ric:
       frame: "curv"
-      state: [0.0, -1.0, 0.0, 0.0, 0.0, 0.001]
+      state: [0.0, -5.0, 0.0, 0.0, 0.0, 0.002]
     attitude_quat_bn: [1.0, 0.0, 0.0, 0.0]
     angular_rate_body_rad_s: [0.0, 0.0, 0.0]
   orbit_control:
     kind: "python"
     module: "sim.control.orbit.lqr_no_radial"
-    class_name: "HCWNoRadialLQRController"
+    class_name: "HCWNoRadialManualController"
     params:
       mean_motion_rad_s: 0.001078
       max_accel_km_s2: 2.0e-5
-      design_dt_s: 5.0
+      design_dt_s: 10.0
       ric_curv_state_slice: [0, 6]
       chief_eci_state_slice: [6, 12]
-      q_weights: [100.0, 100.0, 2.0, 4.0, 50.0, 1.0]
-      r_weights: [5.0e11, 5.0e11]
+      state_signs: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      k_gain:
+        - [2.2e-05, -3.0e-07, 0.0, 9.0e-04, 1.01e-02, 0.0]
+        - [0.0, 0.0, 3.47267175e-07, 0.0, 0.0, 8.38834054e-04]
   attitude_control:
     kind: "python"
     module: "sim.control.attitude.baseline"
@@ -87,7 +89,7 @@ target:
   specs:
     preset_satellite: "BASIC_SATELLITE"
     dry_mass_kg: 1800.0
-    fuel_mass_kg: 0.0
+    fuel_mass_kg: 5.0
     thruster: "BASIC_CHEMICAL_Z_BOTTOM"
     attitude_system: "BASIC_REACTION_WHEELS_3AXIS"
   initial_state:
@@ -122,10 +124,14 @@ target:
   mission_strategy:
     kind: "python"
     module: "sim.mission.modules"
-    class_name: "HoldMissionStrategy"
+    class_name: "DefensiveMissionStrategy"
     params:
-      attitude_mode: "hold_eci"
-      hold_quat_bn: [1.0, 0.0, 0.0, 0.0]
+      chaser_id: "chaser"
+      defense_mode: "fixed_ric_axis"
+      axis_mode: "-I"
+      burn_accel_km_s2: 2.0e-6
+      require_finite_knowledge: true
+      align_to_thrust: true
   mission_execution:
     kind: "python"
     module: "sim.mission.modules"
@@ -149,7 +155,7 @@ target:
 
 simulator:
   scenario_type: "auto"
-  duration_s: 120.0
+  duration_s: 12000.0
   dt_s: 1.0
   dynamics:
     orbit:
@@ -166,7 +172,7 @@ simulator:
       enabled: true
       attitude_substep_s: 0.1
       disturbance_torques:
-        gravity_gradient: false
+        gravity_gradient: true
         magnetic: false
         drag: false
         srp: false

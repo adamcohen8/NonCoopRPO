@@ -65,6 +65,31 @@ def _estimate_needed_delta_v_m_s(current_truth: StateTruth, target_truth: StateT
     return float(np.linalg.norm(rel_v_km_s) * 1e3)
 
 
+def _available_delta_v_from_truth_mass_km_s(
+    *,
+    truth: StateTruth,
+    dry_mass_kg: float | None,
+    orbital_isp_s: float | None,
+    fallback_km_s: float | None = None,
+) -> float:
+    if (
+        dry_mass_kg is None
+        or orbital_isp_s is None
+        or (not np.isfinite(float(dry_mass_kg)))
+        or (not np.isfinite(float(orbital_isp_s)))
+        or float(dry_mass_kg) <= 0.0
+        or float(orbital_isp_s) <= 0.0
+    ):
+        if fallback_km_s is None or not np.isfinite(float(fallback_km_s)):
+            return 0.0
+        return float(max(float(fallback_km_s), 0.0))
+    m_cur_kg = float(max(float(truth.mass_kg), 0.0))
+    m_dry_kg = float(max(float(dry_mass_kg), 0.0))
+    if m_cur_kg <= m_dry_kg:
+        return 0.0
+    return float((float(orbital_isp_s) * 9.80665 * np.log(m_cur_kg / m_dry_kg)) / 1e3)
+
+
 def _resolve_angle_tolerance_rad(rad_value: float, deg_value: float | None) -> float:
     if deg_value is not None:
         return float(max(np.deg2rad(float(deg_value)), 0.0))
@@ -1765,6 +1790,10 @@ class BudgetedEndStateExecution:
         *,
         intent: dict[str, Any],
         truth: StateTruth,
+        dt_s: float = 1.0,
+        dry_mass_kg: float | None = None,
+        orbital_isp_s: float | None = None,
+        orbit_command_period_s: float | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         env = dict(kwargs.get("env", {}) or {})
@@ -1795,12 +1824,20 @@ class BudgetedEndStateExecution:
             }
             return out
 
+        burn_window_s = float(max(orbit_command_period_s if orbit_command_period_s is not None else dt_s, 1e-6))
+        available_delta_v_km_s = _available_delta_v_from_truth_mass_km_s(
+            truth=truth,
+            dry_mass_kg=dry_mass_kg,
+            orbital_isp_s=orbital_isp_s,
+            fallback_km_s=self.available_delta_v_km_s,
+        )
+
         cmd = IntegratedManeuverCommand(
             delta_v_eci_km_s=dv_eci,
-            available_delta_v_km_s=float(max(self.available_delta_v_km_s, 0.0)),
+            available_delta_v_km_s=available_delta_v_km_s,
             strategy=str(self.strategy),  # type: ignore[arg-type]
             max_thrust_n=float(max(self.max_thrust_n, 0.0)),
-            dt_s=float(max(self.burn_dt_s, 1e-6)),
+            dt_s=burn_window_s,
             min_thrust_n=float(max(self.min_thrust_n, 0.0)),
             require_attitude_alignment=(bool(self.require_attitude_alignment) and (not attitude_disabled)),
             thruster_position_body_m=None if self.thruster_position_body_m is None else np.array(self.thruster_position_body_m, dtype=float),
@@ -1808,12 +1845,13 @@ class BudgetedEndStateExecution:
             alignment_tolerance_rad=float(max(self.alignment_tolerance_rad, 0.0)),
         )
         _, decision = self._coordinator.execute(truth=truth, command=cmd)
-        self.available_delta_v_km_s = float(max(decision.remaining_delta_v_km_s, 0.0))
+        if dry_mass_kg is None or orbital_isp_s is None:
+            self.available_delta_v_km_s = float(max(decision.remaining_delta_v_km_s, 0.0))
 
         if decision.required_attitude_quat_bn is not None:
             out["desired_attitude_quat_bn"] = np.array(decision.required_attitude_quat_bn, dtype=float)
         if decision.executed and decision.applied_delta_v_km_s > 0.0:
-            out["thrust_eci_km_s2"] = _unit(dv_eci) * (float(decision.applied_delta_v_km_s) / float(max(self.burn_dt_s, 1e-6)))
+            out["thrust_eci_km_s2"] = _unit(dv_eci) * (float(decision.applied_delta_v_km_s) / burn_window_s)
 
         out["mission_mode"] = {
             **dict(intent.get("mission_mode", {}) or {}),
@@ -1821,7 +1859,7 @@ class BudgetedEndStateExecution:
             "phase": decision.action,
             "reason": decision.reason,
             "alignment_ok": bool(decision.alignment_ok),
-            "remaining_delta_v_km_s": float(self.available_delta_v_km_s),
+            "remaining_delta_v_km_s": float(max(decision.remaining_delta_v_km_s, 0.0)),
             "applied_delta_v_km_s": float(decision.applied_delta_v_km_s),
         }
         return out
@@ -2203,6 +2241,125 @@ class DefensiveRICAxisBurnMissionModule:
 
 
 @dataclass
+class SingleRICAxisBurnMissionModule:
+    """
+    One-shot burn in the target-centered RIC frame, then coast.
+
+    `axis_mode` selects the requested RIC axis.
+    `axis_kind="plume"` interprets that axis as the nozzle/plume direction,
+    so the applied force is opposite that axis.
+    """
+
+    target_id: str = "target"
+    use_knowledge_for_targeting: bool = False
+    axis_mode: str = "+I"
+    axis_kind: str = "plume"  # plume|force
+    burn_accel_km_s2: float = 2e-6
+    burn_start_s: float = 0.0
+    burn_duration_s: float = 60.0
+    slew_lead_time_s: float = 0.0
+    thruster_direction_body: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0], dtype=float))
+    require_finite_reference: bool = True
+
+    def _reference_state(
+        self,
+        *,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        ref = _resolve_target_state(
+            target_id=self.target_id,
+            use_knowledge_for_targeting=bool(self.use_knowledge_for_targeting),
+            own_knowledge=own_knowledge,
+            world_truth=world_truth,
+        )
+        if ref is None:
+            return None
+        if not self.require_finite_reference:
+            return ref
+        r_ref = np.array(ref[0], dtype=float).reshape(3)
+        v_ref = np.array(ref[1], dtype=float).reshape(3)
+        if not (np.all(np.isfinite(r_ref)) and np.all(np.isfinite(v_ref))):
+            return None
+        return r_ref, v_ref
+
+    def update(
+        self,
+        *,
+        truth: StateTruth,
+        own_knowledge: dict[str, StateBelief],
+        world_truth: dict[str, StateTruth],
+        t_s: float,
+        dt_s: float,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        ref = self._reference_state(own_knowledge=own_knowledge, world_truth=world_truth)
+        burn_start_s = float(self.burn_start_s)
+        burn_duration_s = float(max(self.burn_duration_s, 0.0))
+        slew_lead_time_s = float(max(self.slew_lead_time_s, 0.0))
+        burn_active = bool(float(t_s) >= burn_start_s and float(t_s) < (burn_start_s + burn_duration_s))
+        slew_active = bool(float(t_s) >= (burn_start_s - slew_lead_time_s) and float(t_s) < burn_start_s)
+        if ref is None:
+            out["fallback_thrust_eci_km_s2"] = np.zeros(3, dtype=float)
+            out["mission_mode"] = {
+                "type": "single_ric_axis_burn",
+                "phase": "hold_no_reference",
+                "axis_mode": str(self.axis_mode),
+                "axis_kind": str(self.axis_kind),
+                "burn_active": False,
+            }
+            return out
+
+        if (not burn_active) or float(max(self.burn_accel_km_s2, 0.0)) <= 0.0:
+            if not slew_active or float(max(self.burn_accel_km_s2, 0.0)) <= 0.0:
+                out["fallback_thrust_eci_km_s2"] = np.zeros(3, dtype=float)
+                out["mission_mode"] = {
+                    "type": "single_ric_axis_burn",
+                    "phase": "coast",
+                    "axis_mode": str(self.axis_mode),
+                    "axis_kind": str(self.axis_kind),
+                    "burn_active": bool(burn_active),
+                }
+                return out
+
+        axis_ric = _axis_unit_ric(self.axis_mode)
+        kind = str(self.axis_kind).strip().lower()
+        if kind not in {"plume", "force"}:
+            raise ValueError("axis_kind must be 'plume' or 'force'.")
+        force_ric = -axis_ric if kind == "plume" else axis_ric
+        r_ref, v_ref = ref
+        c_ir = ric_dcm_ir_from_rv(r_ref, v_ref)
+        force_eci = c_ir @ force_ric
+        thrust_cmd = float(max(self.burn_accel_km_s2, 0.0)) * _unit(force_eci)
+        required_q = _desired_attitude_for_thrust(
+            truth=truth,
+            thrust_eci_km_s2=thrust_cmd,
+            thruster_direction_body=np.array(self.thruster_direction_body, dtype=float),
+        )
+        out["desired_attitude_quat_bn"] = np.array(required_q, dtype=float)
+        if burn_active:
+            out["fallback_thrust_eci_km_s2"] = thrust_cmd
+            out["align_to_thrust"] = True
+            phase = "burn"
+        else:
+            out["fallback_thrust_eci_km_s2"] = np.zeros(3, dtype=float)
+            phase = "slew"
+        out["mission_mode"] = {
+            "type": "single_ric_axis_burn",
+            "phase": phase,
+            "axis_mode": str(self.axis_mode),
+            "axis_kind": str(self.axis_kind),
+            "burn_active": bool(burn_active),
+            "slew_active": bool(slew_active),
+            "burn_start_s": burn_start_s,
+            "burn_duration_s": burn_duration_s,
+            "slew_lead_time_s": slew_lead_time_s,
+        }
+        return out
+
+
+@dataclass
 class RocketMissionModule:
     launch_mode: str = "go_now"  # go_now|go_when_possible|wait_optimal_window
     orbital_goal: str = "pursuit"  # pursuit|predefined_orbit
@@ -2315,6 +2472,9 @@ class EndStateManeuverMissionModule:
         world_truth: dict[str, StateTruth],
         t_s: float,
         dt_s: float,
+        dry_mass_kg: float | None = None,
+        orbital_isp_s: float | None = None,
+        orbit_command_period_s: float | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         env = dict(kwargs.get("env", {}) or {})
@@ -2332,12 +2492,20 @@ class EndStateManeuverMissionModule:
             out["mission_mode"] = {"type": "end_state", "phase": "on_target"}
             return out
 
+        burn_window_s = float(max(orbit_command_period_s if orbit_command_period_s is not None else dt_s, 1e-6))
+        available_delta_v_km_s = _available_delta_v_from_truth_mass_km_s(
+            truth=truth,
+            dry_mass_kg=dry_mass_kg,
+            orbital_isp_s=orbital_isp_s,
+            fallback_km_s=self.available_delta_v_km_s,
+        )
+
         cmd = IntegratedManeuverCommand(
             delta_v_eci_km_s=dv_eci,
-            available_delta_v_km_s=float(max(self.available_delta_v_km_s, 0.0)),
+            available_delta_v_km_s=available_delta_v_km_s,
             strategy=str(self.strategy),  # type: ignore[arg-type]
             max_thrust_n=float(max(self.max_thrust_n, 0.0)),
-            dt_s=float(max(self.burn_dt_s, 1e-6)),
+            dt_s=burn_window_s,
             min_thrust_n=float(max(self.min_thrust_n, 0.0)),
             require_attitude_alignment=(bool(self.require_attitude_alignment) and (not attitude_disabled)),
             thruster_position_body_m=None if self.thruster_position_body_m is None else np.array(self.thruster_position_body_m, dtype=float),
@@ -2345,14 +2513,15 @@ class EndStateManeuverMissionModule:
             alignment_tolerance_rad=float(max(self.alignment_tolerance_rad, 0.0)),
         )
         _, decision = self._coordinator.execute(truth=truth, command=cmd)
-        self.available_delta_v_km_s = float(max(decision.remaining_delta_v_km_s, 0.0))
+        if dry_mass_kg is None or orbital_isp_s is None:
+            self.available_delta_v_km_s = float(max(decision.remaining_delta_v_km_s, 0.0))
 
         if decision.required_attitude_quat_bn is not None:
             out["desired_attitude_quat_bn"] = np.array(decision.required_attitude_quat_bn, dtype=float)
 
         if decision.executed and decision.applied_delta_v_km_s > 0.0:
             d = _unit(dv_eci)
-            a_cmd = d * (float(decision.applied_delta_v_km_s) / float(max(self.burn_dt_s, 1e-6)))
+            a_cmd = d * (float(decision.applied_delta_v_km_s) / burn_window_s)
             out["thrust_eci_km_s2"] = a_cmd
 
         out["mission_mode"] = {
@@ -2360,7 +2529,7 @@ class EndStateManeuverMissionModule:
             "phase": decision.action,
             "reason": decision.reason,
             "alignment_ok": bool(decision.alignment_ok),
-            "remaining_delta_v_km_s": float(self.available_delta_v_km_s),
+            "remaining_delta_v_km_s": float(max(decision.remaining_delta_v_km_s, 0.0)),
             "applied_delta_v_km_s": float(decision.applied_delta_v_km_s),
         }
         return out

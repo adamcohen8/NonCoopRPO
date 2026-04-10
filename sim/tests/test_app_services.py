@@ -50,6 +50,8 @@ def test_gui_capabilities_reflect_backend_catalog() -> None:
     assert any(label == "Open Loop Pitch Program" for label, _ in caps.base_guidance_options["rocket"])
     assert any(label == "Relative Orbit MPC" for label, _ in caps.orbit_control_options["chaser"])
     assert any(label == "HCW LQR (No Radial Burn)" for label, _ in caps.orbit_control_options["chaser"])
+    assert any(label == "HCW Manual Gain (No Radial Burn)" for label, _ in caps.orbit_control_options["chaser"])
+    assert any(label == "HCW Relative MPC (In/Cross Track Only)" for label, _ in caps.orbit_control_options["chaser"])
     assert caps.monte_carlo_parameter_categories["Environment"][0][1] == "simulator.environment.atmosphere_env.solar_flux_f107"
     assert any(path == "target.initial_state.coes.true_anomaly_deg" for _, path in caps.monte_carlo_parameter_categories["Target Orbit"])
     schema = caps.parameter_form_schemas["RelativeOrbitMPCController"]
@@ -58,6 +60,14 @@ def test_gui_capabilities_reflect_backend_catalog() -> None:
     assert any(
         field["key"] == "r_weights" and field.get("length") == 2
         for field in caps.parameter_form_schemas["HCWNoRadialLQRController"]
+    )
+    assert any(
+        field["key"] == "k_gain" and field.get("length") == 12
+        for field in caps.parameter_form_schemas["HCWNoRadialManualController"]
+    )
+    assert any(
+        field["key"] == "rd_weights" and field.get("length") == 2
+        for field in caps.parameter_form_schemas["HCWInTrackCrossTrackMPCController"]
     )
 
 

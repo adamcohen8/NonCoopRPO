@@ -18,6 +18,27 @@ def _unit(vec: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     return arr / mag
 
 
+def effective_max_accel_km_s2(
+    *,
+    current_mass_kg: float,
+    max_accel_km_s2: float = 0.0,
+    max_thrust_n: float | None = None,
+) -> float:
+    limits_km_s2: list[float] = []
+    accel_cap = float(max(max_accel_km_s2, 0.0))
+    if accel_cap > 0.0:
+        limits_km_s2.append(accel_cap)
+    if max_thrust_n is not None:
+        thrust_cap_n = float(max(max_thrust_n, 0.0))
+        if thrust_cap_n <= 0.0:
+            return 0.0
+        if current_mass_kg > 0.0 and np.isfinite(float(current_mass_kg)):
+            limits_km_s2.append(thrust_cap_n / float(current_mass_kg) / 1e3)
+    if not limits_km_s2:
+        return 0.0
+    return float(max(min(limits_km_s2), 0.0))
+
+
 def attitude_coupled_thrust_eci(
     commanded_accel_eci_km_s2: np.ndarray,
     *,
@@ -58,6 +79,7 @@ def thruster_disturbance_torque_body_nm(
 @dataclass(frozen=True)
 class OrbitalActuatorLimits:
     max_accel_km_s2: float
+    max_thrust_n: float | None = None
     min_impulse_bit_km_s: float = 0.0
     max_throttle_rate_km_s2_s: float = 1e-6
     isp_s: float = 220.0
@@ -79,10 +101,17 @@ class OrbitalActuator(Actuator):
         thruster_direction_body = mode_flags.get("thruster_direction_body", lim.thruster_direction_body)
         thruster_position_body_m = mode_flags.get("thruster_position_body_m", lim.thruster_position_body_m)
         current_mass_kg = float(mode_flags.get("current_mass_kg", mode_flags.get("mass_kg", 0.0)))
+        effective_max_accel = effective_max_accel_km_s2(
+            current_mass_kg=current_mass_kg,
+            max_accel_km_s2=lim.max_accel_km_s2,
+            max_thrust_n=lim.max_thrust_n,
+        )
 
         norm = np.linalg.norm(accel_filtered)
-        if norm > lim.max_accel_km_s2 > 0.0:
-            accel_filtered *= lim.max_accel_km_s2 / norm
+        if norm > effective_max_accel > 0.0:
+            accel_filtered *= effective_max_accel / norm
+        elif effective_max_accel == 0.0:
+            accel_filtered = np.zeros(3, dtype=float)
 
         max_delta = lim.max_throttle_rate_km_s2_s * dt_s
         delta = accel_filtered - self._last_accel
@@ -113,6 +142,9 @@ class OrbitalActuator(Actuator):
         thrust_n = max(current_mass_kg, 0.0) * accel_mag_m_s2
         mdot_kg_s = 0.0 if lim.isp_s <= 0.0 or thrust_n <= 0.0 else thrust_n / (lim.isp_s * g0_m_s2)
         mode_flags["delta_mass_kg"] = float(mdot_kg_s * dt_s)
+        mode_flags["effective_max_accel_km_s2"] = float(effective_max_accel)
+        if lim.max_thrust_n is not None:
+            mode_flags["max_thrust_n"] = float(max(lim.max_thrust_n, 0.0))
         thruster_torque_body_nm = np.zeros(3, dtype=float)
         if thruster_direction_body is not None and thruster_position_body_m is not None:
             thruster_torque_body_nm = thruster_disturbance_torque_body_nm(

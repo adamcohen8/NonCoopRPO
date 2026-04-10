@@ -61,6 +61,26 @@ class TestOrbitalActuator(unittest.TestCase):
         expected = 500.0 * 2.0 / (250.0 * 9.80665) * 4.0
         self.assertAlmostEqual(float(out.mode_flags["delta_mass_kg"]), expected, places=10)
 
+    def test_max_thrust_n_limits_applied_accel_by_current_mass(self):
+        actuator = OrbitalActuator()
+        limits = {
+            "orbital": OrbitalActuatorLimits(
+                max_accel_km_s2=10.0,
+                max_thrust_n=500.0,
+                max_throttle_rate_km_s2_s=10.0,
+                isp_s=250.0,
+            )
+        }
+        command = Command(
+            thrust_eci_km_s2=np.array([0.002, 0.0, 0.0], dtype=float),
+            mode_flags={"current_mass_kg": 500.0},
+        )
+
+        out = actuator.apply(command, limits, dt_s=1.0)
+
+        self.assertTrue(np.allclose(np.array(out.thrust_eci_km_s2, dtype=float), np.array([0.001, 0.0, 0.0], dtype=float)))
+        self.assertAlmostEqual(float(out.mode_flags["effective_max_accel_km_s2"]), 0.001, places=12)
+
     def test_kernel_supplies_current_mass_to_orbital_actuator(self):
         truth0 = StateTruth(
             position_eci_km=np.array([7000.0, 0.0, 0.0], dtype=float),
@@ -97,6 +117,45 @@ class TestOrbitalActuator(unittest.TestCase):
         expected_delta_mass = 500.0 * 2.0 / (250.0 * 9.80665) * 4.0
         final_mass = float(log.truth_by_object["sat"][-1, 13])
         self.assertAlmostEqual(final_mass, 500.0 - expected_delta_mass, places=10)
+
+    def test_kernel_max_thrust_limit_increases_accel_as_mass_drops(self):
+        truth0 = StateTruth(
+            position_eci_km=np.array([7000.0, 0.0, 0.0], dtype=float),
+            velocity_eci_km_s=np.zeros(3, dtype=float),
+            attitude_quat_bn=np.array([1.0, 0.0, 0.0, 0.0], dtype=float),
+            angular_rate_body_rad_s=np.zeros(3, dtype=float),
+            mass_kg=500.0,
+            t_s=0.0,
+        )
+        sat = SimObject(
+            cfg=ObjectConfig(object_id="sat"),
+            truth=truth0,
+            belief=StateBelief(state=np.zeros(6), covariance=np.eye(6), last_update_t_s=0.0),
+            dynamics=_MassDepletingDynamics(),
+            sensor=_NoSensor(),
+            estimator=_HoldEstimator(),
+            controller=_ConstantThrustController(np.array([0.01, 0.0, 0.0], dtype=float)),
+            actuator=OrbitalActuator(),
+            limits={
+                "orbital": OrbitalActuatorLimits(
+                    max_accel_km_s2=10.0,
+                    max_thrust_n=500.0,
+                    max_throttle_rate_km_s2_s=10.0,
+                    isp_s=250.0,
+                )
+            },
+        )
+
+        log = SimulationKernel(
+            config=SimConfig(dt_s=4.0, steps=2, controller_budget_ms=1.0, terminate_on_earth_impact=False),
+            objects=[sat],
+            env={},
+        ).run()
+
+        first_accel = float(log.applied_thrust_by_object["sat"][1, 0])
+        second_accel = float(log.applied_thrust_by_object["sat"][2, 0])
+        self.assertAlmostEqual(first_accel, 500.0 / 500.0 / 1e3, places=12)
+        self.assertGreater(second_accel, first_accel)
 
     def test_orbital_actuator_couples_applied_thrust_to_current_attitude(self):
         actuator = OrbitalActuator()

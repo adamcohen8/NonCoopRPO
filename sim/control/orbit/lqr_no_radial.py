@@ -10,6 +10,98 @@ from sim.core.models import Command, StateBelief
 from sim.utils.frames import ric_curv_to_rect, ric_dcm_ir_from_rv
 
 
+def _validate_no_radial_common(
+    *,
+    mean_motion_rad_s: float,
+    max_accel_km_s2: float,
+    design_dt_s: float,
+    ric_curv_state_slice: tuple[int, int],
+    chief_eci_state_slice: tuple[int, int],
+    state_signs: np.ndarray,
+) -> np.ndarray:
+    if mean_motion_rad_s <= 0.0:
+        raise ValueError("mean_motion_rad_s must be positive.")
+    if max_accel_km_s2 < 0.0:
+        raise ValueError("max_accel_km_s2 must be non-negative.")
+    if design_dt_s <= 0.0:
+        raise ValueError("design_dt_s must be positive.")
+    if ric_curv_state_slice[1] - ric_curv_state_slice[0] != 6:
+        raise ValueError("ric_curv_state_slice must select exactly 6 elements.")
+    if chief_eci_state_slice[1] - chief_eci_state_slice[0] != 6:
+        raise ValueError("chief_eci_state_slice must select exactly 6 elements.")
+
+    signs = np.array(state_signs, dtype=float).reshape(-1)
+    if signs.size != 6:
+        raise ValueError("state_signs must be length-6.")
+    signs[signs == 0.0] = 1.0
+    return np.sign(signs)
+
+
+def _act_no_radial_common(
+    *,
+    belief: StateBelief,
+    ric_curv_state_slice: tuple[int, int],
+    chief_eci_state_slice: tuple[int, int],
+    state_signs: np.ndarray,
+    max_accel_km_s2: float,
+    k_gain: np.ndarray,
+    mode_name: str,
+    debug_law_label: str,
+) -> Command:
+    i0, i1 = ric_curv_state_slice
+    j0, j1 = chief_eci_state_slice
+    if belief.state.size < max(i1, j1):
+        return Command.zero()
+
+    x_curv = np.array(belief.state[i0:i1], dtype=float)
+    chief_eci = np.array(belief.state[j0:j1], dtype=float)
+    r_chief = chief_eci[0:3]
+    v_chief = chief_eci[3:6]
+    r0 = float(np.linalg.norm(r_chief))
+    if r0 <= 0.0:
+        return Command.zero()
+
+    x_rect = ric_curv_to_rect(x_curv, r0_km=r0)
+    x_effective = np.array(state_signs, dtype=float) * x_rect
+    k_arr = np.array(k_gain, dtype=float).reshape(2, 6)
+    a_cmd_ic_pre_limit = -k_arr @ x_effective
+    a_cmd_ic = np.array(a_cmd_ic_pre_limit, dtype=float)
+    a_cmd_ric = np.array([0.0, a_cmd_ic[0], a_cmd_ic[1]], dtype=float)
+    nrm = float(np.linalg.norm(a_cmd_ric))
+    limit_scale = 1.0
+    if nrm > max_accel_km_s2 > 0.0:
+        limit_scale = float(max_accel_km_s2 / nrm)
+        a_cmd_ric *= limit_scale
+        a_cmd_ic *= limit_scale
+
+    c_ir = ric_dcm_ir_from_rv(r_chief, v_chief)
+    a_cmd_eci = c_ir @ a_cmd_ric
+    debug = HCWLQRController._linear_feedback_debug_payload(
+        control_axes=["I", "C"],
+        k_gain=k_arr,
+        x_rect=x_rect,
+        x_effective=x_effective,
+        control_pre_limit=a_cmd_ic_pre_limit,
+        control_post_limit=a_cmd_ic,
+        limit_scale=limit_scale,
+        state_signs=np.array(state_signs, dtype=float),
+    )
+    debug["law_label"] = debug_law_label
+    return Command(
+        thrust_eci_km_s2=a_cmd_eci,
+        torque_body_nm=np.zeros(3),
+        mode_flags={
+            "mode": mode_name,
+            "ric_curv_state_slice": [i0, i1],
+            "chief_eci_state_slice": [j0, j1],
+            "state_signs": np.array(state_signs, dtype=float).tolist(),
+            "accel_ric_km_s2": a_cmd_ric.tolist(),
+            "control_axes": ["I", "C"],
+            "linear_feedback_debug": debug,
+        },
+    )
+
+
 @dataclass
 class HCWNoRadialLQRController(Controller):
     mean_motion_rad_s: float
@@ -54,26 +146,18 @@ class HCWNoRadialLQRController(Controller):
         }
 
     def __post_init__(self) -> None:
-        if self.mean_motion_rad_s <= 0.0:
-            raise ValueError("mean_motion_rad_s must be positive.")
-        if self.max_accel_km_s2 < 0.0:
-            raise ValueError("max_accel_km_s2 must be non-negative.")
-        if self.design_dt_s <= 0.0:
-            raise ValueError("design_dt_s must be positive.")
-        if self.ric_curv_state_slice[1] - self.ric_curv_state_slice[0] != 6:
-            raise ValueError("ric_curv_state_slice must select exactly 6 elements.")
-        if self.chief_eci_state_slice[1] - self.chief_eci_state_slice[0] != 6:
-            raise ValueError("chief_eci_state_slice must select exactly 6 elements.")
+        self.state_signs = _validate_no_radial_common(
+            mean_motion_rad_s=self.mean_motion_rad_s,
+            max_accel_km_s2=self.max_accel_km_s2,
+            design_dt_s=self.design_dt_s,
+            ric_curv_state_slice=self.ric_curv_state_slice,
+            chief_eci_state_slice=self.chief_eci_state_slice,
+            state_signs=self.state_signs,
+        )
         if self.riccati_max_iter <= 0:
             raise ValueError("riccati_max_iter must be positive.")
         if self.riccati_tol <= 0.0:
             raise ValueError("riccati_tol must be positive.")
-
-        signs = np.array(self.state_signs, dtype=float).reshape(-1)
-        if signs.size != 6:
-            raise ValueError("state_signs must be length-6.")
-        signs[signs == 0.0] = 1.0
-        self.state_signs = np.sign(signs)
 
         q = np.array(self.q_weights, dtype=float).reshape(-1)
         if q.size == 1:
@@ -119,52 +203,59 @@ class HCWNoRadialLQRController(Controller):
         self._k_gain = HCWLQRController._solve_discrete_lqr(ad, bd, Q, R, self.riccati_max_iter, self.riccati_tol)
 
     def act(self, belief: StateBelief, t_s: float, budget_ms: float) -> Command:
-        i0, i1 = self.ric_curv_state_slice
-        j0, j1 = self.chief_eci_state_slice
-        if belief.state.size < max(i1, j1):
-            return Command.zero()
+        return _act_no_radial_common(
+            belief=belief,
+            ric_curv_state_slice=self.ric_curv_state_slice,
+            chief_eci_state_slice=self.chief_eci_state_slice,
+            state_signs=self.state_signs,
+            max_accel_km_s2=self.max_accel_km_s2,
+            k_gain=self._k_gain,
+            mode_name="hcw_lqr_no_radial",
+            debug_law_label=HCWLQRController._control_law_label(self.state_signs),
+        )
 
-        x_curv = np.array(belief.state[i0:i1], dtype=float)
-        chief_eci = np.array(belief.state[j0:j1], dtype=float)
-        r_chief = chief_eci[0:3]
-        v_chief = chief_eci[3:6]
-        r0 = float(np.linalg.norm(r_chief))
-        if r0 <= 0.0:
-            return Command.zero()
 
-        x_rect = ric_curv_to_rect(x_curv, r0_km=r0)
-        x_effective = self.state_signs * x_rect
-        a_cmd_ic_pre_limit = -self._k_gain @ x_effective
-        a_cmd_ic = np.array(a_cmd_ic_pre_limit, dtype=float)
-        a_cmd_ric = np.array([0.0, a_cmd_ic[0], a_cmd_ic[1]], dtype=float)
-        nrm = float(np.linalg.norm(a_cmd_ric))
-        limit_scale = 1.0
-        if nrm > self.max_accel_km_s2 > 0.0:
-            limit_scale = float(self.max_accel_km_s2 / nrm)
-            a_cmd_ric *= limit_scale
-            a_cmd_ic *= limit_scale
+@dataclass
+class HCWNoRadialManualController(Controller):
+    mean_motion_rad_s: float
+    max_accel_km_s2: float
+    design_dt_s: float = 10.0
+    ric_curv_state_slice: tuple[int, int] = (0, 6)
+    chief_eci_state_slice: tuple[int, int] = (6, 12)
+    state_signs: np.ndarray = field(default_factory=lambda: np.ones(6))
+    k_gain: np.ndarray = field(default_factory=lambda: np.zeros((2, 6), dtype=float))
 
-        c_ir = ric_dcm_ir_from_rv(r_chief, v_chief)
-        a_cmd_eci = c_ir @ a_cmd_ric
-        return Command(
-            thrust_eci_km_s2=a_cmd_eci,
-            torque_body_nm=np.zeros(3),
-            mode_flags={
-                "mode": "hcw_lqr_no_radial",
-                "ric_curv_state_slice": [i0, i1],
-                "chief_eci_state_slice": [j0, j1],
-                "state_signs": self.state_signs.tolist(),
-                "accel_ric_km_s2": a_cmd_ric.tolist(),
-                "control_axes": ["I", "C"],
-                "linear_feedback_debug": HCWLQRController._linear_feedback_debug_payload(
-                    control_axes=["I", "C"],
-                    k_gain=self._k_gain,
-                    x_rect=x_rect,
-                    x_effective=x_effective,
-                    control_pre_limit=a_cmd_ic_pre_limit,
-                    control_post_limit=a_cmd_ic,
-                    limit_scale=limit_scale,
-                    state_signs=self.state_signs,
-                ),
-            },
+    def __post_init__(self) -> None:
+        self.state_signs = _validate_no_radial_common(
+            mean_motion_rad_s=self.mean_motion_rad_s,
+            max_accel_km_s2=self.max_accel_km_s2,
+            design_dt_s=self.design_dt_s,
+            ric_curv_state_slice=self.ric_curv_state_slice,
+            chief_eci_state_slice=self.chief_eci_state_slice,
+            state_signs=self.state_signs,
+        )
+        self.k_gain = np.array(self.k_gain, dtype=float).reshape(-1)
+        if self.k_gain.size != 12:
+            raise ValueError("k_gain must be a 2x6 matrix or length-12 vector.")
+        self.k_gain = self.k_gain.reshape(2, 6)
+
+    def linear_system_summary(self) -> dict[str, object]:
+        return {
+            "system_type": "manual_state_feedback",
+            "sample_time_s": float(self.design_dt_s),
+            "law_label": "u = -Kx",
+            "control_axes": ["I", "C"],
+            "gain_matrix": np.array(self.k_gain, dtype=float).tolist(),
+        }
+
+    def act(self, belief: StateBelief, t_s: float, budget_ms: float) -> Command:
+        return _act_no_radial_common(
+            belief=belief,
+            ric_curv_state_slice=self.ric_curv_state_slice,
+            chief_eci_state_slice=self.chief_eci_state_slice,
+            state_signs=self.state_signs,
+            max_accel_km_s2=self.max_accel_km_s2,
+            k_gain=self.k_gain,
+            mode_name="hcw_manual_no_radial",
+            debug_law_label="u = -Kx",
         )

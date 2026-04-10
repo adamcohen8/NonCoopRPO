@@ -243,6 +243,62 @@ class TestMasterSimulator(unittest.TestCase):
         thrust_norm = np.linalg.norm(np.nan_to_num(thrust_hist, nan=0.0), axis=1)
         self.assertGreater(float(np.max(thrust_norm)), 0.0)
 
+    def test_integrated_satellite_burn_is_limited_by_fixed_thruster_force(self):
+        cfg = scenario_config_from_dict(
+            {
+                "scenario_name": "fixed_thrust_satellite_limit",
+                "rocket": {"enabled": False},
+                "target": {"enabled": False},
+                "chaser": {
+                    "enabled": True,
+                    "specs": {
+                        "mass_kg": 100.0,
+                        "thruster": "BASIC_CHEMICAL_Z_BOTTOM",
+                    },
+                    "initial_state": {
+                        "position_eci_km": [7000.0, 0.0, 0.0],
+                        "velocity_eci_km_s": [0.0, 7.5, 0.0],
+                        "attitude_quat_bn": [1.0, 0.0, 0.0, 0.0],
+                    },
+                    "mission_objectives": [
+                        {
+                            "module": "sim.tests.test_master_simulator",
+                            "class_name": "ConstantIntegratedThrustMission",
+                            "params": {"thrust_eci_km_s2": [1.0e-3, 0.0, 0.0]},
+                        }
+                    ],
+                    "attitude_control": {
+                        "module": "sim.control.attitude.zero_torque",
+                        "class_name": "ZeroTorqueController",
+                    },
+                    "orbit_control": {
+                        "module": "sim.control.orbit.zero_controller",
+                        "class_name": "ZeroController",
+                    },
+                },
+                "simulator": {
+                    "duration_s": 1.0,
+                    "dt_s": 1.0,
+                    "termination": {"earth_impact_enabled": False},
+                    "dynamics": {"attitude": {"enabled": False}},
+                },
+                "outputs": {
+                    "output_dir": "outputs/test_fixed_thrust_satellite_limit",
+                    "mode": "save",
+                    "stats": {"print_summary": False, "save_json": False, "save_full_log": False},
+                    "plots": {"enabled": False, "figure_ids": []},
+                    "animations": {"enabled": False, "types": []},
+                },
+                "monte_carlo": {"enabled": False},
+            }
+        )
+
+        payload = _run_single_config(cfg)
+        thrust_hist = np.array(payload["applied_thrust_by_object"]["chaser"], dtype=float)
+        applied_mag = float(np.linalg.norm(thrust_hist[-1, :]))
+
+        self.assertAlmostEqual(applied_mag, 35.0 / 100.0 / 1e3, places=12)
+
     def test_stationkeep_strategy_drives_orbit_targeting_through_execution(self):
         cfg = scenario_config_from_dict(
             {

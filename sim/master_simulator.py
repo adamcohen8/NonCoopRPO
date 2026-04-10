@@ -22,8 +22,8 @@ from typing import Any, Callable
 import numpy as np
 
 from sim.presets.rockets import BASIC_1ST_STAGE, BASIC_SSTO_ROCKET, BASIC_TWO_STAGE_STACK, RocketStackPreset
-from sim.presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, resolve_thruster_mount_from_specs
-from sim.actuators.orbital import attitude_coupled_thrust_eci, thruster_disturbance_torque_body_nm
+from sim.presets.thrusters import BASIC_CHEMICAL_BOTTOM_Z, resolve_thruster_max_thrust_n_from_specs, resolve_thruster_mount_from_specs
+from sim.actuators.orbital import attitude_coupled_thrust_eci, effective_max_accel_km_s2, thruster_disturbance_torque_body_nm
 from sim.config import SimulationScenarioConfig, load_simulation_yaml, scenario_config_from_dict, validate_scenario_plugins
 from sim.control.attitude.zero_torque import ZeroTorqueController
 from sim.control.orbit.zero_controller import ZeroController
@@ -1139,6 +1139,7 @@ class AgentRuntime:
     orbital_isp_s: float | None = None
     dry_mass_kg: float | None = None
     fuel_capacity_kg: float | None = None
+    orbital_max_thrust_n: float | None = None
     thruster_direction_body: np.ndarray | None = None
     thruster_position_body_m: np.ndarray | None = None
 
@@ -1253,6 +1254,7 @@ def _create_satellite_runtime(
     missions = [_module_obj(p) for p in list(agent_cfg.mission_objectives or [])]
     missions = [m for m in missions if m is not None]
     sat_isp_s = _resolve_satellite_isp_s(specs)
+    sat_max_thrust_n = resolve_thruster_max_thrust_n_from_specs(specs)
     thruster_mount = resolve_thruster_mount_from_specs(specs)
     sat_dry_mass_kg: float | None = None
     sat_fuel_capacity_kg: float | None = None
@@ -1297,6 +1299,7 @@ def _create_satellite_runtime(
         orbital_isp_s=(None if sat_isp_s <= 0.0 else float(sat_isp_s)),
         dry_mass_kg=sat_dry_mass_kg,
         fuel_capacity_kg=sat_fuel_capacity_kg,
+        orbital_max_thrust_n=sat_max_thrust_n,
         thruster_direction_body=(None if thruster_mount is None else np.array(thruster_mount.thrust_direction_body, dtype=float)),
         thruster_position_body_m=(None if thruster_mount is None else np.array(thruster_mount.position_body_m, dtype=float)),
     )
@@ -1441,6 +1444,7 @@ def _create_rocket_runtime(cfg: SimulationScenarioConfig) -> AgentRuntime:
         orbital_isp_s=None,
         dry_mass_kg=None,
         fuel_capacity_kg=None,
+        orbital_max_thrust_n=None,
         thruster_direction_body=None,
         thruster_position_body_m=None,
     )
@@ -1679,6 +1683,10 @@ def _run_mission_execution(
                 "att_belief": att_belief,
                 "rocket_state": agent.rocket_state,
                 "rocket_vehicle_cfg": (agent.rocket_sim.vehicle_cfg if agent.rocket_sim is not None else None),
+                "dry_mass_kg": agent.dry_mass_kg,
+                "fuel_capacity_kg": agent.fuel_capacity_kg,
+                "orbital_isp_s": agent.orbital_isp_s,
+                "orbit_command_period_s": float(env.get("orbit_command_period_s", dt_s)),
             },
             fallback_kwargs={"intent": dict(intent or {}), "truth": truth, "t_s": t_s},
         )
@@ -2413,12 +2421,17 @@ class _SingleRunEngine:
                 step_max_accel_km_s2 = 0.0
                 burned_this_step = False
                 world_truth_inner = world_truth_live.copy()
-                env_inner_common = {**self.base_environment, "world_truth": world_truth_inner}
+                env_inner_common = {
+                    **self.base_environment,
+                    "world_truth": world_truth_inner,
+                    "orbit_command_period_s": float(self.orbit_command_period_s),
+                }
                 env_sensor = {"world_truth": world_truth_inner}
                 env_inner = {
                     **self.base_environment,
                     "world_truth": world_truth_inner,
                     "attitude_disabled": (not self.attitude_enabled),
+                    "orbit_command_period_s": float(self.orbit_command_period_s),
                 }
                 orbit_state12_scratch = np.empty(12, dtype=float)
                 attitude_state13_scratch = np.empty(13, dtype=float)
@@ -2593,7 +2606,36 @@ class _SingleRunEngine:
                     if fuel_depleted:
                         cmd_step.thrust_eci_km_s2 = np.zeros(3, dtype=float)
                         cmd_step.mode_flags["fuel_depleted"] = True
+                    if agent.orbital_max_thrust_n is not None:
+                        eff_max_accel_km_s2 = effective_max_accel_km_s2(
+                            current_mass_kg=float(max(tr_inner.mass_kg, 0.0)),
+                            max_accel_km_s2=0.0,
+                            max_thrust_n=agent.orbital_max_thrust_n,
+                        )
+                        accel_vec = np.array(cmd_step.thrust_eci_km_s2, dtype=float)
+                        accel_norm = float(np.linalg.norm(accel_vec))
+                        if accel_norm > eff_max_accel_km_s2 > 0.0:
+                            cmd_step.thrust_eci_km_s2 = accel_vec * (eff_max_accel_km_s2 / accel_norm)
+                            cmd_step.mode_flags["thrust_limited_scale"] = float(eff_max_accel_km_s2 / accel_norm)
+                        elif eff_max_accel_km_s2 == 0.0:
+                            cmd_step.thrust_eci_km_s2 = np.zeros(3, dtype=float)
+                        cmd_step.mode_flags["effective_max_accel_km_s2"] = float(eff_max_accel_km_s2)
+                        cmd_step.mode_flags["max_thrust_n"] = float(agent.orbital_max_thrust_n)
                     cmd_step.mode_flags["min_mass_kg"] = float(min_mass_kg)
+                    isp_s = agent.orbital_isp_s
+                    if isp_s is not None and float(isp_s) > 0.0 and "delta_mass_kg" not in cmd_step.mode_flags:
+                        g0_m_s2 = 9.80665
+                        a_mag_m_s2 = float(np.linalg.norm(cmd_step.thrust_eci_km_s2) * 1e3)
+                        thrust_n = float(max(tr_inner.mass_kg, 0.0) * a_mag_m_s2)
+                        mdot_kg_s = 0.0 if thrust_n <= 0.0 else float(thrust_n / (float(isp_s) * g0_m_s2))
+                        delta_mass_kg = float(max(mdot_kg_s, 0.0) * h)
+                        available_propellant_kg = float(max(tr_inner.mass_kg - min_mass_kg, 0.0))
+                        applied_delta_mass_kg = float(min(delta_mass_kg, available_propellant_kg))
+                        if delta_mass_kg > 1e-15 and applied_delta_mass_kg < (delta_mass_kg - 1e-15):
+                            propellant_scale = float(np.clip(applied_delta_mass_kg / delta_mass_kg, 0.0, 1.0))
+                            cmd_step.thrust_eci_km_s2 = np.array(cmd_step.thrust_eci_km_s2, dtype=float) * propellant_scale
+                            cmd_step.mode_flags["propellant_limited_scale"] = propellant_scale
+                        cmd_step.mode_flags["delta_mass_kg"] = applied_delta_mass_kg
                     thruster_torque_body_nm = np.zeros(3, dtype=float)
                     if (
                         self.attitude_enabled
@@ -2608,15 +2650,6 @@ class _SingleRunEngine:
                         )
                         cmd_step.torque_body_nm = np.array(cmd_step.torque_body_nm, dtype=float) + thruster_torque_body_nm
                     cmd_step.mode_flags["thruster_torque_body_nm"] = thruster_torque_body_nm.tolist()
-                    isp_s = agent.orbital_isp_s
-                    if isp_s is not None and float(isp_s) > 0.0 and "delta_mass_kg" not in cmd_step.mode_flags:
-                        g0_m_s2 = 9.80665
-                        a_mag_m_s2 = float(np.linalg.norm(cmd_step.thrust_eci_km_s2) * 1e3)
-                        thrust_n = float(max(tr_inner.mass_kg, 0.0) * a_mag_m_s2)
-                        mdot_kg_s = 0.0 if thrust_n <= 0.0 else float(thrust_n / (float(isp_s) * g0_m_s2))
-                        delta_mass_kg = float(max(mdot_kg_s, 0.0) * h)
-                        available_propellant_kg = float(max(tr_inner.mass_kg - min_mass_kg, 0.0))
-                        cmd_step.mode_flags["delta_mass_kg"] = float(min(delta_mass_kg, available_propellant_kg))
                     debug_channels = cmd_step.mode_flags.get("debug", {})
                     self.controller_debug_hist[aid].append(
                         {

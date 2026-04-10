@@ -198,6 +198,7 @@ def build_sim_object_from_presets(
     limits = {
         "orbital": OrbitalActuatorLimits(
             max_accel_km_s2=thruster.max_thrust_n / max(satellite.wet_mass_kg, 1e-9) / 1e3,
+            max_thrust_n=thruster.max_thrust_n,
             min_impulse_bit_km_s=thruster.min_impulse_bit_n_s / max(satellite.wet_mass_kg, 1e-9) / 1e3,
             max_throttle_rate_km_s2_s=1e-4,
             isp_s=thruster.isp_s,
