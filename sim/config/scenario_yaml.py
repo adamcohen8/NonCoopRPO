@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import math
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +162,119 @@ def _as_dict(value: Any, section_name: str) -> dict[str, Any]:
     return dict(value)
 
 
+def _parse_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field_name} must be a boolean true/false value, not {value!r}.")
+
+
+def _is_bool_like_key(key: str) -> bool:
+    normalized = key.strip().lower()
+    if normalized in {
+        "enabled",
+        "strict",
+        "j2",
+        "j3",
+        "j4",
+        "drag",
+        "srp",
+        "third_body_moon",
+        "third_body_sun",
+        "parallel_enabled",
+    }:
+        return True
+    return normalized.startswith(
+        (
+            "use_",
+            "save_",
+            "display_",
+            "print_",
+            "require_",
+        )
+    )
+
+
+def _enforce_strict_booleans(value: Any, path: str = "root") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if _is_bool_like_key(str(key)) and not isinstance(child, bool):
+                raise ValueError(f"{child_path} must be a boolean true/false value, not {child!r}.")
+            _enforce_strict_booleans(child, child_path)
+    elif isinstance(value, list):
+        for idx, child in enumerate(value):
+            _enforce_strict_booleans(child, f"{path}[{idx}]")
+
+
+def _parse_float(value: Any, field_name: str) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a finite number.") from exc
+    if not math.isfinite(out):
+        raise ValueError(f"{field_name} must be a finite number.")
+    return out
+
+
+def _parse_optional_float(value: Any, field_name: str) -> float | None:
+    if value is None:
+        return None
+    return _parse_float(value, field_name)
+
+
+def _validate_integer_multiple(
+    *,
+    numerator: float,
+    denominator: float,
+    numerator_name: str,
+    denominator_name: str,
+) -> None:
+    ratio = numerator / denominator
+    nearest = round(ratio)
+    tol = 1e-9 * max(1.0, abs(ratio))
+    if abs(ratio - nearest) > tol:
+        raise ValueError(
+            f"{numerator_name} must be an integer multiple of {denominator_name}; "
+            f"got {numerator_name}={numerator:g}, {denominator_name}={denominator:g}."
+        )
+
+
+def _validate_sim_timing(out: SimulatorSection) -> None:
+    if out.dt_s <= 0.0:
+        raise ValueError("simulator.dt_s must be positive.")
+    if out.duration_s <= 0.0:
+        raise ValueError("simulator.duration_s must be positive.")
+    _validate_integer_multiple(
+        numerator=out.duration_s,
+        denominator=out.dt_s,
+        numerator_name="simulator.duration_s",
+        denominator_name="simulator.dt_s",
+    )
+
+    dynamics = dict(out.dynamics or {})
+    timing_fields = (
+        ("simulator.dynamics.orbit.orbit_substep_s", dict(dynamics.get("orbit", {}) or {}).get("orbit_substep_s")),
+        (
+            "simulator.dynamics.attitude.attitude_substep_s",
+            dict(dynamics.get("attitude", {}) or {}).get("attitude_substep_s"),
+        ),
+    )
+    for field_name, raw in timing_fields:
+        substep = _parse_optional_float(raw, field_name)
+        if substep is None:
+            continue
+        if substep <= 0.0:
+            raise ValueError(f"{field_name} must be positive when provided.")
+        if substep > out.dt_s:
+            raise ValueError(f"{field_name} must be less than or equal to simulator.dt_s.")
+        _validate_integer_multiple(
+            numerator=out.dt_s,
+            denominator=substep,
+            numerator_name="simulator.dt_s",
+            denominator_name=field_name,
+        )
+
+
 def _parse_algorithm_pointer(value: Any) -> AlgorithmPointer | None:
     if value is None:
         return None
@@ -184,7 +298,7 @@ def _parse_bridge_pointer(value: Any) -> BridgePointer | None:
         return None
     d = _as_dict(value, "bridge")
     return BridgePointer(
-        enabled=bool(d.get("enabled", False)),
+        enabled=_parse_bool(d.get("enabled", False), "bridge.enabled"),
         mode=str(d.get("mode", "sil")),
         endpoint=d.get("endpoint"),
         module=d.get("module"),
@@ -217,7 +331,7 @@ def _parse_agent_section(value: Any, role: str) -> AgentSection:
     }
     default_enabled = bool(default_enabled_by_role.get(role, True))
     return AgentSection(
-        enabled=bool(d.get("enabled", default_enabled)),
+        enabled=_parse_bool(d.get("enabled", default_enabled), f"{role}.enabled"),
         role=str(d.get("role", role)),
         specs=dict(d.get("specs", {}) or {}),
         initial_state=dict(d.get("initial_state", {}) or {}),
@@ -241,20 +355,26 @@ def _parse_simulator_section(value: Any) -> SimulatorSection:
     plugin_validation.update(dict(d.get("plugin_validation", {}) or {}))
     termination = {"earth_impact_enabled": True, "earth_radius_km": 6378.137}
     termination.update(dict(d.get("termination", {}) or {}))
+    plugin_validation["strict"] = _parse_bool(plugin_validation.get("strict", True), "simulator.plugin_validation.strict")
+    termination["earth_impact_enabled"] = _parse_bool(
+        termination.get("earth_impact_enabled", True),
+        "simulator.termination.earth_impact_enabled",
+    )
+    termination["earth_radius_km"] = _parse_float(
+        termination.get("earth_radius_km", 6378.137),
+        "simulator.termination.earth_radius_km",
+    )
     out = SimulatorSection(
         scenario_type=str(d.get("scenario_type", "auto")),
-        duration_s=float(d.get("duration_s", 3600.0)),
-        dt_s=float(d.get("dt_s", 1.0)),
-        initial_jd_utc=float(d["initial_jd_utc"]) if d.get("initial_jd_utc") is not None else None,
+        duration_s=_parse_float(d.get("duration_s", 3600.0), "simulator.duration_s"),
+        dt_s=_parse_float(d.get("dt_s", 1.0), "simulator.dt_s"),
+        initial_jd_utc=_parse_optional_float(d.get("initial_jd_utc"), "simulator.initial_jd_utc"),
         dynamics=dict(d.get("dynamics", {}) or {}),
         environment=dict(d.get("environment", {}) or {}),
         plugin_validation=plugin_validation,
         termination=termination,
     )
-    if out.dt_s <= 0.0:
-        raise ValueError("simulator.dt_s must be positive.")
-    if out.duration_s <= 0.0:
-        raise ValueError("simulator.duration_s must be positive.")
+    _validate_sim_timing(out)
     if not out.scenario_type.strip():
         raise ValueError("simulator.scenario_type must be non-empty.")
     return out
@@ -282,10 +402,10 @@ def _parse_monte_carlo_section(value: Any) -> MonteCarloSection:
     if not isinstance(vars_raw, list):
         raise ValueError("monte_carlo.variations must be a list.")
     out = MonteCarloSection(
-        enabled=bool(d.get("enabled", False)),
+        enabled=_parse_bool(d.get("enabled", False), "monte_carlo.enabled"),
         iterations=int(d.get("iterations", 1)),
         base_seed=int(d.get("base_seed", 0)),
-        parallel_enabled=bool(d.get("parallel_enabled", False)),
+        parallel_enabled=_parse_bool(d.get("parallel_enabled", False), "monte_carlo.parallel_enabled"),
         parallel_workers=int(d.get("parallel_workers", 0)),
         variations=[_parse_mc_variation(v) for v in vars_raw],
     )
@@ -301,7 +421,10 @@ def _parse_analysis_execution_section(value: Any, *, fallback: MonteCarloSection
     default_parallel_enabled = bool(fallback.parallel_enabled) if fallback is not None else False
     default_parallel_workers = int(fallback.parallel_workers) if fallback is not None else 0
     out = AnalysisExecutionSection(
-        parallel_enabled=bool(d.get("parallel_enabled", default_parallel_enabled)),
+        parallel_enabled=_parse_bool(
+            d.get("parallel_enabled", default_parallel_enabled),
+            "analysis.execution.parallel_enabled",
+        ),
         parallel_workers=int(d.get("parallel_workers", default_parallel_workers)),
     )
     if out.parallel_workers < 0:
@@ -312,7 +435,7 @@ def _parse_analysis_execution_section(value: Any, *, fallback: MonteCarloSection
 def _parse_analysis_baseline_section(value: Any) -> AnalysisBaselineSection:
     d = _as_dict(value, "analysis.baseline")
     return AnalysisBaselineSection(
-        enabled=bool(d.get("enabled", False)),
+        enabled=_parse_bool(d.get("enabled", False), "analysis.baseline.enabled"),
         summary_json=str(d.get("summary_json", "") or ""),
     )
 
@@ -384,7 +507,7 @@ def _parse_analysis_section(value: Any, *, legacy_mc: MonteCarloSection) -> Anal
     if not isinstance(metrics, list):
         raise ValueError("analysis.metrics must be a list.")
     out = AnalysisSection(
-        enabled=bool(d.get("enabled", False)),
+        enabled=_parse_bool(d.get("enabled", False), "analysis.enabled"),
         study_type=str(d.get("study_type", "monte_carlo")).strip().lower(),
         execution=_parse_analysis_execution_section(d.get("execution"), fallback=legacy_mc),
         metrics=[str(x) for x in metrics],
@@ -461,6 +584,7 @@ def _parse_outputs_section(value: Any) -> OutputsSection:
 
 def scenario_config_from_dict(data: dict[str, Any]) -> SimulationScenarioConfig:
     root = _as_dict(data, "root")
+    _enforce_strict_booleans(root)
     legacy_mc = _parse_monte_carlo_section(root.get("monte_carlo"))
     analysis = _parse_analysis_section(root.get("analysis"), legacy_mc=legacy_mc)
     normalized_mc, normalized_analysis = _normalize_analysis_and_monte_carlo(legacy_mc, analysis)

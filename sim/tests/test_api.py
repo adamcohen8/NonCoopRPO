@@ -120,10 +120,10 @@ def _lhs_sensitivity_api_config(output_dir: Path) -> dict:
             "seed": 19,
             "parameters": [
                 {
-                    "parameter_path": "simulator.dt_s",
+                    "parameter_path": "target.specs.mass_kg",
                     "distribution": "uniform",
-                    "low": 0.5,
-                    "high": 1.5,
+                    "low": 90.0,
+                    "high": 110.0,
                 }
             ],
         },

@@ -10,7 +10,7 @@ import tempfile
 import time
 
 from sim.controller_lab import run_controller_bench
-from sim.config import load_simulation_yaml
+from sim.config import load_simulation_yaml, validate_scenario_plugins
 from sim.master_simulator import run_master_simulation
 
 try:
@@ -58,6 +58,9 @@ def _batch_total_runs(cfg, study_type: str) -> int:
     if study_type == "monte_carlo":
         return int(max(cfg.monte_carlo.iterations, 0))
     if study_type == "sensitivity":
+        method = str(getattr(cfg.analysis.sensitivity, "method", "one_at_a_time") or "one_at_a_time").strip().lower()
+        if method == "lhs":
+            return int(max(int(cfg.analysis.sensitivity.samples or 0), 0))
         return int(sum(len(list(param.values or [])) for param in list(cfg.analysis.sensitivity.parameters or [])))
     return 0
 
@@ -647,6 +650,85 @@ def _print_controller_bench_summary(out: dict) -> None:
     print("=" * 102)
 
 
+def _object_list(cfg) -> list[str]:
+    objects = []
+    for oid, sec in (("target", cfg.target), ("rocket", cfg.rocket), ("chaser", cfg.chaser)):
+        if bool(getattr(sec, "enabled", False)):
+            objects.append(oid)
+    return objects
+
+
+def _optional_timing_value(section: dict, key: str, fallback: float) -> float:
+    raw = section.get(key)
+    if raw is None:
+        return float(fallback)
+    return float(raw)
+
+
+def _print_config_validation_report(config_path: str) -> bool:
+    print("")
+    print("=" * 72)
+    print("CONFIG VALIDATION")
+    print("=" * 72)
+    try:
+        cfg = load_simulation_yaml(config_path)
+    except Exception as exc:
+        _print_field("Status", "FAILED")
+        _print_field("Config", str(Path(config_path).expanduser()))
+        print("-" * 72)
+        print(f"Error: {exc}")
+        print("=" * 72)
+        return False
+
+    resolved_config = Path(config_path).expanduser().resolve()
+    study_type = _active_study_type(cfg)
+    study_label = {
+        "single_run": "Single Run",
+        "monte_carlo": "Monte Carlo",
+        "sensitivity": "Sensitivity",
+    }.get(study_type, study_type.title())
+    dynamics = dict(cfg.simulator.dynamics or {})
+    orbit = dict(dynamics.get("orbit", {}) or {})
+    attitude = dict(dynamics.get("attitude", {}) or {})
+    orbit_substep_s = _optional_timing_value(orbit, "orbit_substep_s", float(cfg.simulator.dt_s))
+    attitude_enabled = bool(attitude.get("enabled", True))
+    attitude_substep_s = _optional_timing_value(attitude, "attitude_substep_s", float(cfg.simulator.dt_s))
+    step_count = int(round(float(cfg.simulator.duration_s) / float(cfg.simulator.dt_s)))
+
+    _print_field("Status", "PARSED")
+    _print_field("Config", str(resolved_config))
+    _print_field("Scenario", str(cfg.scenario_name))
+    scenario_description = str(getattr(cfg, "scenario_description", "") or "").strip()
+    if scenario_description:
+        _print_field("Desc", scenario_description)
+    _print_field("Mode", study_label)
+    _print_field("Objects", ", ".join(_object_list(cfg)) or "none")
+    _print_field("Timing", f"duration={float(cfg.simulator.duration_s):.6g}s, dt={float(cfg.simulator.dt_s):.6g}s, steps={step_count}")
+    _print_field("Orbit Step", f"{orbit_substep_s:.6g}s")
+    _print_field("Attitude", "disabled" if not attitude_enabled else f"substep={attitude_substep_s:.6g}s")
+    if study_type in {"monte_carlo", "sensitivity"}:
+        total_runs = _batch_total_runs(cfg, study_type)
+        parallel_enabled, workers = _batch_parallel_settings(cfg, study_type)
+        workers_txt = str(int(workers)) if int(workers or 0) > 0 else "auto"
+        _print_field("Analysis", f"runs={total_runs}, parallel={'on' if parallel_enabled else 'off'}, workers={workers_txt if parallel_enabled else 'n/a'}")
+    _print_field("Output Dir", str(Path(cfg.outputs.output_dir)))
+
+    strict_plugins = bool(cfg.simulator.plugin_validation.get("strict", True))
+    plugin_errors = validate_scenario_plugins(cfg)
+    if plugin_errors:
+        print("-" * 72)
+        _print_field("Plugins", "FAILED" if strict_plugins else "WARN")
+        for err in plugin_errors:
+            print(f"- {err}")
+        print("=" * 72)
+        return not strict_plugins
+
+    _print_field("Plugins", "OK")
+    _print_field("Result", "OK")
+    print("=" * 72)
+    return True
+
+
 def main() -> None:
     repo_root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="Master simulation runner: one YAML config, no other inputs required.")
@@ -659,6 +741,11 @@ def main() -> None:
         "--benchmark-serial",
         action="store_true",
         help="Run a serial Monte Carlo benchmark (plots/saves disabled) and print max serial throughput and worker recommendation.",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Validate the scenario config, print a preflight summary, and exit without running the simulator.",
     )
     parser.add_argument(
         "--benchmark-runs",
@@ -681,6 +768,11 @@ def main() -> None:
     if args.controller_bench:
         out = run_controller_bench(args.controller_bench, compare_names=list(args.compare or []))
         _print_controller_bench_summary(out)
+        return
+    if args.validate_only:
+        ok = _print_config_validation_report(args.config)
+        if not ok:
+            raise SystemExit(1)
         return
     if args.benchmark_serial:
         _print_serial_benchmark(config_path=args.config, benchmark_runs=int(max(args.benchmark_runs, 1)))

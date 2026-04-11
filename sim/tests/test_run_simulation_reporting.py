@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 from contextlib import redirect_stdout
+from pathlib import Path
+import tempfile
 
-from run_simulation import _print_monte_carlo_summary, _print_sensitivity_summary
+from run_simulation import _print_config_validation_report, _print_monte_carlo_summary, _print_sensitivity_summary
 
 
 def test_print_sensitivity_summary_does_not_fall_through_into_monte_carlo_output() -> None:
@@ -64,3 +66,60 @@ def test_print_monte_carlo_summary_reports_aggregate_statistics() -> None:
     assert "Iterations" in output
     assert "P(success)" in output
     assert "Guardrails" in output
+
+
+def test_validate_only_report_succeeds_for_valid_config() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = Path(tmpdir) / "valid.yaml"
+        cfg_path.write_text(
+            """
+scenario_name: validate_smoke
+target:
+  enabled: true
+simulator:
+  duration_s: 10.0
+  dt_s: 1.0
+  dynamics:
+    orbit:
+      orbit_substep_s: 0.5
+    attitude:
+      enabled: false
+outputs:
+  output_dir: outputs/validate_smoke
+  mode: save
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ok = _print_config_validation_report(str(cfg_path))
+    output = buf.getvalue()
+    assert ok is True
+    assert "CONFIG VALIDATION" in output
+    assert "validate_smoke" in output
+    assert "steps=10" in output
+    assert "Plugins" in output
+    assert "Result" in output
+
+
+def test_validate_only_report_fails_for_bad_timing_before_run() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = Path(tmpdir) / "bad.yaml"
+        cfg_path.write_text(
+            """
+scenario_name: bad_timing
+simulator:
+  duration_s: 2.5
+  dt_s: 1.0
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ok = _print_config_validation_report(str(cfg_path))
+    output = buf.getvalue()
+    assert ok is False
+    assert "FAILED" in output
+    assert "integer multiple" in output

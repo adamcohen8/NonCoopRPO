@@ -35,8 +35,8 @@ chaser:
       chief_eci_state_slice: [6, 12]
       state_signs: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       k_gain:
-        - [2.2e-05, -3.0e-07, 0.0, 9.0e-04, 1.01e-02, 0.0]
-        - [0.0, 0.0, 3.47267175e-07, 0.0, 0.0, 8.38834054e-04]
+        - [2.2e-04, -3.0e-06, 0.0, 9.0e-03, 1.01e-01, 0.0]
+        - [0.0, 0.0, 3.47267175e-06, 0.0, 0.0, 8.38834054e-03]
   attitude_control:
     kind: "python"
     module: "sim.control.attitude.baseline"
@@ -58,7 +58,7 @@ chaser:
     params:
       target_id: "target"
       use_knowledge_for_targeting: false
-      max_accel_km_s2: 2.0e-6
+      max_accel_km_s2: 2.0e-5
       align_to_thrust: true
   mission_execution:
     kind: "python"
@@ -128,7 +128,7 @@ target:
     params:
       chaser_id: "chaser"
       defense_mode: "fixed_ric_axis"
-      axis_mode: "-I"
+      axis_mode: "-C"
       burn_accel_km_s2: 2.0e-6
       require_finite_knowledge: true
       align_to_thrust: true
@@ -155,7 +155,7 @@ target:
 
 simulator:
   scenario_type: "auto"
-  duration_s: 12000.0
+  duration_s: 6000.0
   dt_s: 1.0
   dynamics:
     orbit:
@@ -189,7 +189,7 @@ simulator:
 
 outputs:
   output_dir: "outputs/battlespace_dashboard_hcw_lqr_pursuit_target_evade"
-  mode: "save"
+  mode: "interactive"
   stats:
     enabled: true
     print_summary: true

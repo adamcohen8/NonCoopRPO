@@ -52,6 +52,53 @@ class TestScenarioYamlConfig(unittest.TestCase):
                 }
             )
 
+    def test_string_booleans_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "target.enabled"):
+            scenario_config_from_dict(
+                {
+                    "target": {"enabled": "false"},
+                    "simulator": {"duration_s": 10.0, "dt_s": 1.0},
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "outputs.plots.enabled"):
+            scenario_config_from_dict(
+                {
+                    "simulator": {"duration_s": 10.0, "dt_s": 1.0},
+                    "outputs": {"plots": {"enabled": "false"}},
+                }
+            )
+
+    def test_timing_must_be_finite_positive_and_commensurate(self):
+        with self.assertRaisesRegex(ValueError, "simulator.duration_s must be an integer multiple"):
+            scenario_config_from_dict(
+                {
+                    "simulator": {"duration_s": 2.5, "dt_s": 1.0},
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "orbit_substep_s must be less than or equal"):
+            scenario_config_from_dict(
+                {
+                    "simulator": {
+                        "duration_s": 10.0,
+                        "dt_s": 1.0,
+                        "dynamics": {"orbit": {"orbit_substep_s": 2.0}},
+                    },
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "simulator.dt_s must be an integer multiple"):
+            scenario_config_from_dict(
+                {
+                    "simulator": {
+                        "duration_s": 10.0,
+                        "dt_s": 1.0,
+                        "dynamics": {"attitude": {"attitude_substep_s": 0.3}},
+                    },
+                }
+            )
+
     def test_analysis_section_normalizes_monte_carlo_and_sensitivity(self):
         mc_cfg = scenario_config_from_dict(
             {
