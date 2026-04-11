@@ -819,6 +819,102 @@ def _sample_variation(v, rng: np.random.Generator) -> Any:
     raise ValueError(f"Unsupported variation mode '{v.mode}'.")
 
 
+def _prepare_monte_carlo_runs(
+    *,
+    cfg: SimulationScenarioConfig,
+    root: dict[str, Any],
+    outdir: Path,
+) -> list[dict[str, Any]]:
+    rng = np.random.default_rng(int(cfg.monte_carlo.base_seed))
+    varies_metadata_seed = any(str(v.parameter_path) == "metadata.seed" for v in cfg.monte_carlo.variations)
+    prepared: list[dict[str, Any]] = []
+    for i in range(int(cfg.monte_carlo.iterations)):
+        cdict = deepcopy(root)
+        sampled = {}
+        for v in cfg.monte_carlo.variations:
+            sv = _sample_variation(v, rng)
+            _deep_set(cdict, v.parameter_path, sv)
+            sampled[v.parameter_path] = sv
+        if not varies_metadata_seed:
+            md = cdict.setdefault("metadata", {})
+            if "seed" not in md:
+                md["seed"] = int(cfg.monte_carlo.base_seed) + i
+        mode = str(cdict.get("outputs", {}).get("mode", "interactive"))
+        if mode == "interactive":
+            cdict.setdefault("outputs", {})["mode"] = "save"
+        cdict.setdefault("outputs", {})["output_dir"] = str(outdir / f"mc_run_{i:04d}")
+        prepared.append(
+            {
+                "iteration": i,
+                "sampled_parameters": sampled,
+                "config_dict": cdict,
+                "seed": int(cdict.get("metadata", {}).get("seed", int(cfg.monte_carlo.base_seed) + i)),
+            }
+        )
+    return prepared
+
+
+def prepare_batch_run_configs(cfg: SimulationScenarioConfig) -> list[dict[str, Any]]:
+    study_type = _analysis_study_type(cfg)
+    if study_type not in {"monte_carlo", "sensitivity"}:
+        return []
+    root = cfg.to_dict()
+    outdir = Path(cfg.outputs.output_dir)
+    if study_type == "sensitivity":
+        sensitivity_method = str(cfg.analysis.sensitivity.method or "one_at_a_time").strip().lower()
+        if sensitivity_method == "lhs":
+            return _prepare_lhs_sensitivity_runs(cfg=cfg, root=root, outdir=outdir)
+        return _prepare_oaat_sensitivity_runs(cfg=cfg, root=root, outdir=outdir)
+    return _prepare_monte_carlo_runs(cfg=cfg, root=root, outdir=outdir)
+
+
+def validate_generated_batch_configs(cfg: SimulationScenarioConfig) -> dict[str, Any]:
+    strict_plugins = bool(cfg.simulator.plugin_validation.get("strict", True))
+    try:
+        prepared = prepare_batch_run_configs(cfg)
+    except Exception as exc:
+        return {
+            "run_count": 0,
+            "errors": [
+                {
+                    "iteration": None,
+                    "parameter_path": None,
+                    "parameter_value": None,
+                    "error": str(exc),
+                }
+            ],
+        }
+
+    errors: list[dict[str, Any]] = []
+    for item in prepared:
+        iteration = int(item.get("iteration", 0))
+        try:
+            run_cfg = scenario_config_from_dict(dict(item.get("config_dict", {}) or {}))
+            plugin_errors = validate_scenario_plugins(run_cfg) if strict_plugins else []
+        except Exception as exc:
+            errors.append(
+                {
+                    "iteration": iteration,
+                    "parameter_path": item.get("parameter_path"),
+                    "parameter_value": item.get("parameter_value"),
+                    "sampled_parameters": dict(item.get("sampled_parameters", {}) or {}),
+                    "error": str(exc),
+                }
+            )
+            continue
+        for plugin_error in plugin_errors:
+            errors.append(
+                {
+                    "iteration": iteration,
+                    "parameter_path": item.get("parameter_path"),
+                    "parameter_value": item.get("parameter_value"),
+                    "sampled_parameters": dict(item.get("sampled_parameters", {}) or {}),
+                    "error": str(plugin_error),
+                }
+            )
+    return {"run_count": int(len(prepared)), "errors": errors}
+
+
 def _combine_commands(orb: Command, att: Command) -> Command:
     return Command(
         thrust_eci_km_s2=np.array(orb.thrust_eci_km_s2, dtype=float),
@@ -2319,7 +2415,6 @@ def run_master_simulation(
     outdir.mkdir(parents=True, exist_ok=True)
     mc_out_cfg = dict(cfg.outputs.monte_carlo or {})
     repo_root = Path(__file__).resolve().parents[1]
-    rng = np.random.default_rng(int(cfg.monte_carlo.base_seed))
     runs = []
     run_details: list[dict[str, Any]] = []
     closest_approach_km_runs: list[float] = []
@@ -2349,31 +2444,7 @@ def run_master_simulation(
     parallel_workers = max(1, min(parallel_workers, total_iters))
     parallel_active = bool(parallel_enabled and total_iters > 1)
     parallel_fallback_reason: str | None = None
-    prepared: list[dict[str, Any]] = []
-    for i in range(total_iters):
-        cdict = deepcopy(root)
-        sampled = {}
-        for v in cfg.monte_carlo.variations:
-            sv = _sample_variation(v, rng)
-            _deep_set(cdict, v.parameter_path, sv)
-            sampled[v.parameter_path] = sv
-        if not varies_metadata_seed:
-            md = cdict.setdefault("metadata", {})
-            if "seed" not in md:
-                md["seed"] = int(cfg.monte_carlo.base_seed) + i
-        # Prevent unwanted pop-up windows in MC mode unless explicitly both/save.
-        mode = str(cdict.get("outputs", {}).get("mode", "interactive"))
-        if mode == "interactive":
-            cdict.setdefault("outputs", {})["mode"] = "save"
-        cdict.setdefault("outputs", {})["output_dir"] = str(outdir / f"mc_run_{i:04d}")
-        prepared.append(
-            {
-                "iteration": i,
-                "sampled_parameters": sampled,
-                "config_dict": cdict,
-                "seed": int(cdict.get("metadata", {}).get("seed", int(cfg.monte_carlo.base_seed) + i)),
-            }
-        )
+    prepared = _prepare_monte_carlo_runs(cfg=cfg, root=root, outdir=outdir)
 
     completed: dict[int, dict[str, Any]] = {}
     if parallel_active:

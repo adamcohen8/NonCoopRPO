@@ -123,3 +123,44 @@ simulator:
     assert ok is False
     assert "FAILED" in output
     assert "integer multiple" in output
+
+
+def test_validate_only_report_checks_generated_lhs_configs() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg_path = Path(tmpdir) / "bad_lhs.yaml"
+        cfg_path.write_text(
+            """
+scenario_name: bad_lhs_timing
+target:
+  enabled: true
+simulator:
+  duration_s: 2.0
+  dt_s: 1.0
+outputs:
+  output_dir: outputs/bad_lhs_timing
+  mode: save
+analysis:
+  enabled: true
+  study_type: sensitivity
+  sensitivity:
+    method: lhs
+    samples: 3
+    seed: 19
+    parameters:
+      - parameter_path: simulator.dt_s
+        distribution: uniform
+        low: 0.5
+        high: 1.5
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ok = _print_config_validation_report(str(cfg_path))
+    output = buf.getvalue()
+    assert ok is False
+    assert "Generated" in output
+    assert "FAILED" in output
+    assert "simulator.dt_s" in output
+    assert "integer multiple" in output

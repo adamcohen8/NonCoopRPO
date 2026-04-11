@@ -82,6 +82,14 @@ python -m pip install -r requirements-full.txt
 
 ### 2) Run a representative CLI scenario
 
+Validate the config before running:
+
+```bash
+python run_simulation.py --config configs/automation_smoke.yaml --validate-only
+```
+
+Then run the scenario:
+
 ```bash
 python run_simulation.py --config configs/automation_smoke.yaml
 ```
@@ -122,6 +130,8 @@ Sensitivity supports:
 - tracked metrics,
 - optional baseline comparison, and
 - Latin hypercube sampling (LHS).
+
+The loader validates the base config and generated Monte Carlo/sensitivity run configs before a batch starts. Timing values must form a clean grid: `duration_s` must be an integer multiple of `dt_s`, and optional `orbit_substep_s` / `attitude_substep_s` values must be positive, no larger than `dt_s`, and divide `dt_s`. Boolean fields must use YAML booleans such as `true` and `false`, not quoted strings like `"false"`. Avoid continuous sweeps of `simulator.dt_s` unless every sampled value preserves the timing grid.
 
 ### 6) Run validation tooling
 

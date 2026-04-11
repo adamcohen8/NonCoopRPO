@@ -446,6 +446,10 @@ Simulator Section
   - free_tumble_one_orbit_ric
 - duration_s: total simulation duration
 - dt_s: primary simulation step
+- timing grid:
+  - duration_s must be an integer multiple of dt_s.
+  - optional substeps must be positive, less than or equal to dt_s, and divide dt_s exactly.
+  - run `python run_simulation.py --config <path> --validate-only` to check the base config and generated MC/sensitivity configs before execution.
 - initial_jd_utc: optional epoch start (null if unused)
 - dynamics: orbit/attitude/rocket model switches
   - optional substep controls for satellite propagation:
@@ -545,6 +549,8 @@ Monte Carlo Section
 - parallel_enabled: true/false; run MC iterations concurrently in separate processes.
 - parallel_workers: worker process count (0 or omitted = auto, usually cpu_count-1).
 - variations: list of parameter variation definitions
+- generated MC configs are validated before workers launch.
+- if varying simulator.dt_s, use choice values that preserve the timing grid; continuous uniform/normal dt_s sampling will usually produce invalid generated configs.
 
 Variation Entry Fields
 - parameter_path: dot-path to parameter to vary
@@ -562,13 +568,17 @@ Variation Entry Fields
 
 Validation Rules (Current Loader)
 - YAML root must be a mapping/object.
-- simulator.dt_s > 0
-- simulator.duration_s > 0
+- Boolean fields must be YAML booleans, true/false, not quoted strings such as "false".
+- simulator.dt_s must be finite and > 0.
+- simulator.duration_s must be finite, > 0, and an integer multiple of simulator.dt_s.
+- simulator.dynamics.orbit.orbit_substep_s, when set, must be finite, > 0, <= simulator.dt_s, and divide simulator.dt_s.
+- simulator.dynamics.attitude.attitude_substep_s, when set, must be finite, > 0, <= simulator.dt_s, and divide simulator.dt_s.
 - simulator.scenario_type must be non-empty.
 - outputs.mode must be one of: interactive, save, both.
 - outputs.output_dir must be non-empty.
 - monte_carlo.iterations > 0
 - monte_carlo.variations[*].parameter_path must be a non-empty string.
+- --validate-only also validates generated Monte Carlo and sensitivity run configs after parameter variations/sampling are applied.
 
 Plugin Contract Validation (strict mode)
 - rocket.guidance / rocket.base_guidance: must construct and implement command(state, sim_cfg, vehicle_cfg)

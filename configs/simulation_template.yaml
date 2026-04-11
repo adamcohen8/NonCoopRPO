@@ -239,13 +239,17 @@ target:
 
 simulator:
   scenario_type: "auto"
+  # Timing grid rules:
+  # - duration_s must be an integer multiple of dt_s.
+  # - optional orbit/attitude substeps must be positive, <= dt_s, and divide dt_s.
+  # - run `python run_simulation.py --config <path> --validate-only` before long runs.
   duration_s: 7200.0
   dt_s: 1.0
   initial_jd_utc: null
   dynamics:
     orbit:
       model: "two_body"
-      orbit_substep_s: null   # optional; smaller substep for orbit integration
+      orbit_substep_s: null   # optional; smaller substep for orbit integration; must divide dt_s
       j2: false
       j3: false
       j4: false
@@ -257,7 +261,7 @@ simulator:
         order: 8
     attitude:
       enabled: true
-      attitude_substep_s: null   # optional; smaller substep for attitude integration
+      attitude_substep_s: null   # optional; smaller substep for attitude integration; must divide dt_s
       disturbance_torques:
         gravity_gradient: true
         magnetic: true
@@ -397,6 +401,9 @@ outputs:
       max_guardrail_events: 10
 
 monte_carlo:
+  # Use YAML booleans (true/false), not quoted strings ("false").
+  # Generated MC configs are validated before workers launch; if varying simulator.dt_s,
+  # every sampled value must preserve duration_s/dt_s and substep/dt_s integer ratios.
   enabled: false
   iterations: 100
   base_seed: 1000

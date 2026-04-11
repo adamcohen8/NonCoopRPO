@@ -11,7 +11,7 @@ import time
 
 from sim.controller_lab import run_controller_bench
 from sim.config import load_simulation_yaml, validate_scenario_plugins
-from sim.master_simulator import run_master_simulation
+from sim.master_simulator import run_master_simulation, validate_generated_batch_configs
 
 try:
     import resource
@@ -724,6 +724,31 @@ def _print_config_validation_report(config_path: str) -> bool:
         return not strict_plugins
 
     _print_field("Plugins", "OK")
+    if study_type in {"monte_carlo", "sensitivity"}:
+        generated = validate_generated_batch_configs(cfg)
+        generated_count = int(generated.get("run_count", 0))
+        generated_errors = list(generated.get("errors", []) or [])
+        if generated_errors:
+            print("-" * 72)
+            _print_field("Generated", f"FAILED ({len(generated_errors)} of {generated_count} runs)")
+            for err in generated_errors[:10]:
+                iteration = err.get("iteration")
+                sampled = dict(err.get("sampled_parameters", {}) or {})
+                param_path = err.get("parameter_path")
+                param_value = err.get("parameter_value")
+                if sampled:
+                    sampled_txt = ", ".join(f"{k}={v!r}" for k, v in sorted(sampled.items()))
+                elif param_path is not None:
+                    sampled_txt = f"{param_path}={param_value!r}"
+                else:
+                    sampled_txt = "generation"
+                iter_txt = "setup" if iteration is None else f"run {int(iteration)}"
+                print(f"- {iter_txt}: {sampled_txt}: {err.get('error')}")
+            if len(generated_errors) > 10:
+                print(f"- ... {len(generated_errors) - 10} more generated config errors")
+            print("=" * 72)
+            return False
+        _print_field("Generated", f"OK ({generated_count} runs)")
     _print_field("Result", "OK")
     print("=" * 72)
     return True
