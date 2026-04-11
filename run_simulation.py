@@ -11,7 +11,8 @@ import time
 
 from sim.controller_lab import run_controller_bench
 from sim.config import load_simulation_yaml, validate_scenario_plugins
-from sim.master_simulator import run_master_simulation, validate_generated_batch_configs
+from sim.execution import run_simulation_config_file
+from sim.master_simulator import validate_generated_batch_configs
 
 try:
     import resource
@@ -516,7 +517,7 @@ def _print_serial_benchmark(config_path: str, benchmark_runs: int) -> None:
     cpu_before = _cpu_time_seconds_including_children()
     t0 = time.perf_counter()
     try:
-        out = run_master_simulation(config_path=tmp_cfg_path)
+        out = run_simulation_config_file(config_path=tmp_cfg_path)
     finally:
         try:
             os.unlink(tmp_cfg_path)
@@ -889,11 +890,11 @@ def main() -> None:
                             bar.update(step - last_step)
                             state["last_step"] = step
 
-                    out = run_master_simulation(
+                    out = run_simulation_config_file(
                         config_path=args.config,
                         step_callback=None,
-                        mc_callback=_on_mc_done,
-                        mc_progress_callback=_on_worker_progress,
+                        batch_callback=_on_mc_done,
+                        batch_progress_callback=_on_worker_progress,
                     )
                 finally:
                     for wb in worker_bars:
@@ -925,11 +926,11 @@ def main() -> None:
                         print(f"Worker {pid} run {iteration + 1}/{max(mc_total, 1)}: {pct}% ({step}/{total})")
                         worker_last[pid] = pct
 
-                out = run_master_simulation(
+                out = run_simulation_config_file(
                     config_path=args.config,
                     step_callback=None,
-                    mc_callback=_on_mc_done,
-                    mc_progress_callback=_on_worker_progress,
+                    batch_callback=_on_mc_done,
+                    batch_progress_callback=_on_worker_progress,
                 )
         else:
             mc_bar = None
@@ -985,7 +986,7 @@ def main() -> None:
                                 sim_bar.close()
                                 sim_bar = None
 
-                    out = run_master_simulation(config_path=args.config, step_callback=_on_mc_step)
+                    out = run_simulation_config_file(config_path=args.config, step_callback=_on_mc_step)
                 finally:
                     if sim_bar is not None:
                         sim_bar.close()
@@ -1011,7 +1012,7 @@ def main() -> None:
                     if t > 0 and s >= t:
                         overall_report(started_runs, mc_total)
 
-                out = run_master_simulation(config_path=args.config, step_callback=_on_mc_step)
+                out = run_simulation_config_file(config_path=args.config, step_callback=_on_mc_step)
     else:
         total_steps = int(max(math.floor(float(cfg.simulator.duration_s) / float(cfg.simulator.dt_s)), 0))
         pbar = None
@@ -1038,7 +1039,7 @@ def main() -> None:
             last_step = s
 
         try:
-            out = run_master_simulation(config_path=args.config, step_callback=_on_step)
+            out = run_simulation_config_file(config_path=args.config, step_callback=_on_step)
         finally:
             if pbar is not None:
                 pbar.close()

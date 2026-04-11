@@ -3,13 +3,25 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import json
+import sys
 from unittest.mock import patch
 
 import numpy as np
 import yaml
 
+import run_simulation
 from sim import SimulationConfig, SimulationResult, SimulationSession, SimulationSnapshot
+from sim.execution import run_simulation_config_file
+from sim.execution.campaigns import prepare_monte_carlo_runs, run_serial_monte_carlo_runs
 from sim.master_simulator import run_master_simulation
+from sim.execution.sensitivity import prepare_sensitivity_runs, run_sensitivity_runs
+from sim.reporting.monte_carlo import (
+    apply_monte_carlo_baseline_comparison,
+    build_monte_carlo_report_payload,
+    write_monte_carlo_report_artifacts,
+)
+from sim.reporting.monte_carlo_plots import write_monte_carlo_plot_artifacts
+from sim.reporting.sensitivity import build_sensitivity_report_payload, write_sensitivity_summary_artifact
 
 
 class ConstantIntegratedThrustMission:
@@ -179,6 +191,47 @@ class TestSimulationApi:
             assert callback_events[0] == (0, 2)
             assert callback_events[-1] == (2, 2)
 
+    def test_execution_service_file_single_run_matches_api_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "api_smoke.yaml"
+            cfg_dict = _api_config(Path(tmpdir))
+            cfg_path.write_text(yaml.safe_dump(cfg_dict, sort_keys=False), encoding="utf-8")
+
+            service_out = run_simulation_config_file(cfg_path)
+            api_result = SimulationSession.from_yaml(cfg_path).run()
+
+            assert service_out["config_path"] == str(cfg_path.resolve())
+            assert service_out["scenario_name"] == api_result.summary["scenario_name"]
+            assert service_out["run"]["samples"] == api_result.summary["samples"]
+            assert service_out["run"]["duration_s"] == api_result.summary["duration_s"]
+
+    def test_cli_single_run_keeps_existing_config_command_shape(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "api_smoke.yaml"
+            cfg_path.write_text(yaml.safe_dump(_api_config(Path(tmpdir)), sort_keys=False), encoding="utf-8")
+            service_payload = {
+                "config_path": str(cfg_path.resolve()),
+                "scenario_name": "api_smoke",
+                "scenario_description": "API smoke test scenario",
+                "monte_carlo": {"enabled": False},
+                "run": {
+                    "scenario_name": "api_smoke",
+                    "scenario_description": "API smoke test scenario",
+                    "objects": ["target"],
+                    "samples": 3,
+                    "dt_s": 1.0,
+                    "duration_s": 2.0,
+                    "terminated_early": False,
+                },
+            }
+
+            with patch.object(sys, "argv", ["run_simulation.py", "--config", str(cfg_path)]):
+                with patch("run_simulation.run_simulation_config_file", return_value=service_payload) as run_file:
+                    run_simulation.main()
+
+            run_file.assert_called_once()
+            assert Path(run_file.call_args.kwargs["config_path"]).resolve() == cfg_path.resolve()
+
     def test_session_reset_step_and_run_single_scenario(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = SimulationConfig.from_dict(_api_config(Path(tmpdir)))
@@ -251,6 +304,274 @@ class TestSimulationApi:
             assert result.payload["monte_carlo"]["enabled"] is True
             assert result.payload["monte_carlo"]["iterations"] == 2
             assert "pass_rate" in result.metrics
+
+    def test_execution_service_dispatches_serial_monte_carlo_to_campaign_runner(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "api_mc.yaml"
+            cfg_path.write_text(yaml.safe_dump(_api_config(Path(tmpdir), monte_carlo=True), sort_keys=False), encoding="utf-8")
+            payload = {
+                "config_path": str(cfg_path.resolve()),
+                "scenario_name": "api_smoke",
+                "monte_carlo": {"enabled": True, "iterations": 2},
+                "aggregate_stats": {"pass_rate": 1.0},
+                "runs": [],
+            }
+
+            with patch("sim.execution.campaigns.run_monte_carlo_campaign", return_value=payload) as run_campaign:
+                out = run_simulation_config_file(cfg_path)
+
+            run_campaign.assert_called_once()
+            assert Path(run_campaign.call_args.kwargs["config_path"]).resolve() == cfg_path.resolve()
+            assert out["monte_carlo"]["enabled"] is True
+            assert out["aggregate_stats"]["pass_rate"] == 1.0
+
+    def test_campaign_runner_prepares_serial_monte_carlo_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "out"
+            cfg = SimulationConfig.from_dict(_api_config(outdir, monte_carlo=True)).to_scenario_config()
+
+            prepared = prepare_monte_carlo_runs(cfg=cfg, root=cfg.to_dict(), outdir=outdir)
+
+            assert [int(item["iteration"]) for item in prepared] == [0, 1]
+            assert [int(item["seed"]) for item in prepared] == [123, 123]
+            assert prepared[0]["config_dict"]["outputs"]["output_dir"] == str(outdir / "mc_run_0000")
+            assert prepared[1]["config_dict"]["outputs"]["output_dir"] == str(outdir / "mc_run_0001")
+
+    def test_campaign_runner_executes_serial_monte_carlo_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "out"
+            cfg = SimulationConfig.from_dict(_api_config(outdir, monte_carlo=True)).to_scenario_config()
+            callback_events: list[tuple[int, int]] = []
+
+            result = run_serial_monte_carlo_runs(
+                cfg=cfg,
+                root=cfg.to_dict(),
+                outdir=outdir,
+                strict_plugins=True,
+                batch_callback=lambda done, total: callback_events.append((done, total)),
+            )
+
+            assert result["parallel_active"] is False
+            assert sorted(result["completed"].keys()) == [0, 1]
+            assert result["completed"][0]["summary"]["samples"] == 3
+            assert callback_events == [(1, 2), (2, 2)]
+
+    def test_monte_carlo_reporting_builds_aggregate_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_dir = Path(tmpdir)
+            cfg = SimulationConfig.from_dict(_api_config(root_dir / "out", monte_carlo=True)).to_scenario_config()
+            runs = [
+                {
+                    "iteration": 0,
+                    "sampled_parameters": {},
+                    "summary": {
+                        "scenario_name": "api_smoke",
+                        "duration_s": 2.0,
+                        "terminated_early": False,
+                        "thrust_stats": {},
+                    },
+                    "closest_approach_km": float("nan"),
+                    "assessment": {},
+                }
+            ]
+            run_details = [
+                {
+                    "iteration": 0,
+                    "seed": 123,
+                    "pass": True,
+                    "fail_reasons": [],
+                    "duration_s": 2.0,
+                    "closest_approach_km": float("nan"),
+                    "guardrail_events": 0,
+                    "total_dv_m_s_total": 0.0,
+                    "total_dv_m_s_by_object": {},
+                    "delta_v_remaining_m_s_by_object": {},
+                }
+            ]
+
+            report = build_monte_carlo_report_payload(
+                cfg=cfg,
+                config_path=root_dir / "mc.yaml",
+                root=cfg.to_dict(),
+                repo_root=root_dir,
+                runs=runs,
+                run_details=run_details,
+                closest_approach_km_runs=[float("nan")],
+                duration_runs_s=[2.0],
+                total_dv_runs_m_s=[0.0],
+                guardrail_event_runs=[0],
+                failure_mode_counts={},
+                dv_budget_m_s_by_object={},
+                gates={},
+                mc_out_cfg={},
+                varies_metadata_seed=False,
+                parallel_active=False,
+                parallel_enabled=False,
+                total_iters=1,
+                parallel_workers=1,
+            )
+
+            assert report["agg"]["monte_carlo"]["enabled"] is True
+            assert report["agg"]["aggregate_stats"]["pass_rate"] == 1.0
+            assert report["commander_brief"]["runs"] == 2
+            assert report["analyst_pack"]["run_details"][0]["seed"] == 123
+
+    def test_monte_carlo_reporting_writes_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "out"
+            outdir.mkdir()
+            cfg = SimulationConfig.from_dict(_api_config(outdir, monte_carlo=True)).to_scenario_config()
+            agg = {
+                "scenario_name": "api_smoke",
+                "artifacts": {},
+                "aggregate_stats": {"pass_rate": 1.0},
+            }
+            commander = {
+                "scenario_name": "api_smoke",
+                "runs": 2,
+                "p_success": 1.0,
+                "p_fail": 0.0,
+                "top_failure_modes": [],
+            }
+            analyst = {"scenario_name": "api_smoke", "run_details": []}
+
+            out = write_monte_carlo_report_artifacts(
+                cfg=cfg,
+                outdir=outdir,
+                agg=agg,
+                commander_brief=commander,
+                analyst_pack=analyst,
+                run_details=[{"iteration": 0}],
+                mc_out_cfg={"save_aggregate_summary": True, "save_raw_runs": True},
+            )
+
+            artifacts = out["artifacts"]
+            assert Path(artifacts["summary_json"]).exists()
+            assert Path(artifacts["commander_brief_json"]).exists()
+            assert Path(artifacts["commander_brief_md"]).exists()
+            assert Path(artifacts["analyst_pack_json"]).exists()
+            assert Path(artifacts["run_details_json"]).exists()
+
+    def test_monte_carlo_reporting_applies_baseline_comparison_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "mc.yaml"
+            cfg_path.write_text("scenario_name: missing_baseline\n", encoding="utf-8")
+            agg = {"aggregate_stats": {}, "commander_brief": {}}
+            commander: dict[str, object] = {}
+
+            out = apply_monte_carlo_baseline_comparison(
+                agg=agg,
+                commander_brief=commander,
+                config_path=cfg_path,
+                baseline_summary_json="does_not_exist.json",
+            )
+
+            assert "baseline_comparison_error" in out
+
+    def test_monte_carlo_plot_writer_noops_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            cfg = SimulationConfig.from_dict(_api_config(outdir, monte_carlo=True)).to_scenario_config()
+            agg = {"artifacts": {}}
+
+            out = write_monte_carlo_plot_artifacts(
+                cfg=cfg,
+                outdir=outdir,
+                agg=agg,
+                runs=[],
+                run_details=[],
+                relative_range_series_runs=[],
+                durations_s=np.array([], dtype=float),
+                ca_finite=np.array([], dtype=float),
+                all_obj_ids=[],
+                dv_by_object={},
+                dv_remaining_m_s_by_object={},
+                dv_budget_m_s_by_object={},
+                failure_mode_counts={},
+                keepout_threshold=float("nan"),
+                gates={},
+                mc_out_cfg={"save_ops_dashboard": False, "display_ops_dashboard": False},
+            )
+
+            assert out["artifacts"] == {}
+
+    def test_sensitivity_runner_executes_serial_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SimulationConfig.from_dict(_sensitivity_api_config(Path(tmpdir))).to_scenario_config()
+            prepared = [
+                {
+                    "iteration": 0,
+                    "config_dict": cfg.to_dict(),
+                }
+            ]
+            prepared[0]["config_dict"]["analysis"]["enabled"] = False
+
+            result = run_sensitivity_runs(
+                cfg=cfg,
+                prepared=prepared,
+                strict_plugins=True,
+            )
+
+            assert result["parallel_active"] is False
+            assert result["completed"][0]["summary"]["samples"] == 3
+
+    def test_sensitivity_prep_and_artifact_helpers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "out"
+            outdir.mkdir()
+            cfg = SimulationConfig.from_dict(_sensitivity_api_config(outdir)).to_scenario_config()
+
+            prepared = prepare_sensitivity_runs(
+                cfg=cfg,
+                root=cfg.to_dict(),
+                outdir=outdir,
+                sensitivity_method="one_at_a_time",
+            )
+            payload = write_sensitivity_summary_artifact(
+                outdir=outdir,
+                payload={"scenario_name": "api_smoke", "artifacts": {}},
+            )
+
+            assert len(prepared) == 2
+            assert Path(payload["artifacts"]["summary_json"]).exists()
+
+    def test_sensitivity_reporting_builds_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SimulationConfig.from_dict(_sensitivity_api_config(Path(tmpdir))).to_scenario_config()
+            prepared = [
+                {
+                    "iteration": 0,
+                    "parameter_path": "simulator.dt_s",
+                    "parameter_value": 1.0,
+                    "value_index": 0,
+                    "sampled_parameters": {"simulator.dt_s": 1.0},
+                }
+            ]
+            completed = {
+                0: {
+                    "summary": {"duration_s": 2.0, "terminated_early": False},
+                    "closest_approach_km": float("nan"),
+                    "payload": {"summary": {"duration_s": 2.0, "terminated_early": False}},
+                }
+            }
+
+            payload = build_sensitivity_report_payload(
+                cfg=cfg,
+                config_path=Path(tmpdir) / "sensitivity.yaml",
+                prepared=prepared,
+                completed=completed,
+                baseline=None,
+                metric_paths=["summary.duration_s"],
+                sensitivity_method="one_at_a_time",
+                parallel_enabled=False,
+                parallel_active=False,
+                parallel_workers=1,
+                parallel_fallback_reason=None,
+            )
+
+            assert payload["analysis"]["run_count"] == 1
+            assert payload["runs"][0]["metrics"]["summary.duration_s"] == 2.0
+            assert payload["parameter_rankings"][0]["parameter_path"] == "simulator.dt_s"
 
     def test_session_run_sensitivity_analysis(self):
         with tempfile.TemporaryDirectory() as tmpdir:

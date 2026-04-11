@@ -1,19 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-import hashlib
 import importlib
 import inspect
 import json
 import logging
-import multiprocessing as mp
 import os
 from pathlib import Path
-import queue as queue_mod
-from statistics import NormalDist
 import subprocess
 import time
 from typing import Any, Callable
@@ -401,311 +395,6 @@ def _analysis_study_type(cfg: SimulationScenarioConfig) -> str:
     return "single_run"
 
 
-def _analysis_parallel_settings(cfg: SimulationScenarioConfig) -> tuple[bool, int]:
-    if bool(cfg.analysis.enabled):
-        return bool(cfg.analysis.execution.parallel_enabled), int(cfg.analysis.execution.parallel_workers or 0)
-    return bool(cfg.monte_carlo.parallel_enabled), int(cfg.monte_carlo.parallel_workers or 0)
-
-
-def _analysis_metrics(cfg: SimulationScenarioConfig) -> list[str]:
-    metrics = [str(x).strip() for x in list(cfg.analysis.metrics or []) if str(x).strip()]
-    if metrics:
-        return metrics
-    return [
-        "summary.duration_s",
-        "summary.terminated_early",
-        "summary.termination_reason",
-        "derived.closest_approach_km",
-    ]
-
-
-def _extract_analysis_metric(run_payload: dict[str, Any], metric_path: str) -> Any:
-    path = str(metric_path or "").strip()
-    if not path:
-        return None
-    if path == "derived.closest_approach_km":
-        value = _closest_approach_from_run_payload(run_payload)
-        return float(value) if np.isfinite(value) else None
-    if path.startswith("summary."):
-        return _deep_get(dict(run_payload.get("summary", {}) or {}), path[len("summary."):], default=None)
-    if path.startswith("payload."):
-        return _deep_get(run_payload, path[len("payload."):], default=None)
-    return _deep_get(run_payload, path, default=None)
-
-
-def _extract_analysis_metrics(run_payload: dict[str, Any], metric_paths: list[str]) -> dict[str, Any]:
-    return {path: _extract_analysis_metric(run_payload, path) for path in metric_paths}
-
-
-def _serialize_analysis_value(value: Any) -> str:
-    if isinstance(value, float):
-        return f"{value:.12g}"
-    if isinstance(value, (int, bool)):
-        return str(value)
-    if value is None:
-        return "null"
-    return json.dumps(value, sort_keys=True)
-
-
-def _prepare_analysis_run_config(
-    cdict: dict[str, Any],
-    *,
-    outdir: Path,
-    run_prefix: str,
-    iteration: int,
-) -> dict[str, Any]:
-    mode = str(cdict.get("outputs", {}).get("mode", "interactive"))
-    if mode == "interactive":
-        cdict.setdefault("outputs", {})["mode"] = "save"
-    cdict.setdefault("outputs", {})["output_dir"] = str(outdir / f"{run_prefix}_{iteration:04d}")
-    return cdict
-
-
-def _prepare_oaat_sensitivity_runs(
-    *,
-    cfg: SimulationScenarioConfig,
-    root: dict[str, Any],
-    outdir: Path,
-) -> list[dict[str, Any]]:
-    prepared: list[dict[str, Any]] = []
-    iteration = 0
-    for param in cfg.analysis.sensitivity.parameters:
-        parameter_path = str(param.parameter_path)
-        if not parameter_path:
-            raise ValueError("analysis.sensitivity.parameters[*].parameter_path must be non-empty.")
-        values = list(param.values or [])
-        if not values:
-            raise ValueError(f"analysis.sensitivity.parameters[{parameter_path!r}] must provide at least one value.")
-        for value_index, value in enumerate(values):
-            cdict = _prepare_analysis_run_config(
-                deepcopy(root),
-                outdir=outdir,
-                run_prefix="sensitivity_run",
-                iteration=iteration,
-            )
-            _deep_set(cdict, parameter_path, value)
-            prepared.append(
-                {
-                    "iteration": iteration,
-                    "parameter_path": parameter_path,
-                    "parameter_value": value,
-                    "value_index": value_index,
-                    "sampled_parameters": {parameter_path: value},
-                    "config_dict": cdict,
-                }
-            )
-            iteration += 1
-    return prepared
-
-
-def _lhs_parameter_value(param: Any, unit_sample: float) -> float:
-    u = float(np.clip(float(unit_sample), 1.0e-12, 1.0 - 1.0e-12))
-    distribution = str(getattr(param, "distribution", "uniform") or "uniform").strip().lower()
-    if distribution == "uniform":
-        low = getattr(param, "low", None)
-        high = getattr(param, "high", None)
-        if low is None or high is None:
-            raise ValueError(f"LHS parameter '{param.parameter_path}' requires low/high for uniform distribution.")
-        return float(low) + u * (float(high) - float(low))
-    if distribution == "normal":
-        mean = getattr(param, "mean", None)
-        std = getattr(param, "std", None)
-        if mean is None or std is None or float(std) <= 0.0:
-            raise ValueError(f"LHS parameter '{param.parameter_path}' requires mean/std with std > 0.")
-        return float(NormalDist(mu=float(mean), sigma=float(std)).inv_cdf(u))
-    raise ValueError(f"Unsupported LHS distribution '{distribution}' for parameter '{param.parameter_path}'.")
-
-
-def _prepare_lhs_sensitivity_runs(
-    *,
-    cfg: SimulationScenarioConfig,
-    root: dict[str, Any],
-    outdir: Path,
-) -> list[dict[str, Any]]:
-    params = list(cfg.analysis.sensitivity.parameters or [])
-    samples = int(cfg.analysis.sensitivity.samples or 0)
-    if samples <= 0:
-        raise ValueError("analysis.sensitivity.samples must be > 0 for method='lhs'.")
-    if not params:
-        raise ValueError("analysis.sensitivity.parameters must contain at least one parameter.")
-
-    rng = np.random.default_rng(int(cfg.analysis.sensitivity.seed))
-    sampled_columns: dict[str, np.ndarray] = {}
-    for param in params:
-        bins = np.arange(samples, dtype=float)
-        unit_samples = (rng.permutation(samples).astype(float) + rng.random(samples)) / float(samples)
-        sampled_columns[str(param.parameter_path)] = np.array(
-            [_lhs_parameter_value(param, unit) for unit in unit_samples],
-            dtype=float,
-        )
-
-    prepared: list[dict[str, Any]] = []
-    for iteration in range(samples):
-        cdict = _prepare_analysis_run_config(
-            deepcopy(root),
-            outdir=outdir,
-            run_prefix="sensitivity_lhs_run",
-            iteration=iteration,
-        )
-        sampled_parameters: dict[str, Any] = {}
-        for param in params:
-            parameter_path = str(param.parameter_path)
-            value = float(sampled_columns[parameter_path][iteration])
-            _deep_set(cdict, parameter_path, value)
-            sampled_parameters[parameter_path] = value
-        prepared.append(
-            {
-                "iteration": iteration,
-                "parameter_path": None,
-                "parameter_value": None,
-                "value_index": iteration,
-                "sampled_parameters": sampled_parameters,
-                "config_dict": cdict,
-            }
-        )
-    return prepared
-
-
-def _build_lhs_parameter_summaries(
-    *,
-    cfg: SimulationScenarioConfig,
-    metric_paths: list[str],
-    run_details: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if not run_details:
-        return [], []
-    summaries: list[dict[str, Any]] = []
-    rankings: list[dict[str, Any]] = []
-    for param in cfg.analysis.sensitivity.parameters:
-        parameter_path = str(param.parameter_path)
-        x_vals: list[float] = []
-        for detail in run_details:
-            value = dict(detail.get("sampled_parameters", {}) or {}).get(parameter_path)
-            if isinstance(value, bool):
-                x_vals.append(1.0 if value else 0.0)
-            elif isinstance(value, (int, float, np.integer, np.floating)):
-                x_vals.append(float(value))
-            else:
-                x_vals.append(float("nan"))
-        x = np.array(x_vals, dtype=float)
-        finite_x = np.isfinite(x)
-        metric_correlations: dict[str, dict[str, float]] = {}
-        max_abs_corr = 0.0
-        for metric_path in metric_paths:
-            y_vals: list[float] = []
-            for detail in run_details:
-                value = dict(detail.get("metrics", {}) or {}).get(metric_path)
-                if isinstance(value, bool):
-                    y_vals.append(1.0 if value else 0.0)
-                elif isinstance(value, (int, float, np.integer, np.floating)):
-                    y_vals.append(float(value))
-                else:
-                    y_vals.append(float("nan"))
-            y = np.array(y_vals, dtype=float)
-            finite = finite_x & np.isfinite(y)
-            corr = float("nan")
-            if int(np.sum(finite)) >= 3:
-                x_ok = x[finite]
-                y_ok = y[finite]
-                if not np.allclose(np.std(x_ok), 0.0) and not np.allclose(np.std(y_ok), 0.0):
-                    corr = float(np.corrcoef(x_ok, y_ok)[0, 1])
-            abs_corr = abs(corr) if np.isfinite(corr) else float("nan")
-            if np.isfinite(abs_corr):
-                max_abs_corr = max(max_abs_corr, abs_corr)
-            metric_correlations[metric_path] = {
-                "correlation": corr,
-                "abs_correlation": abs_corr,
-            }
-        finite_param = x[finite_x]
-        summary = {
-            "parameter_path": parameter_path,
-            "distribution": str(param.distribution),
-            "sample_count": int(finite_param.size),
-            "value_stats": {
-                "mean": float(np.mean(finite_param)) if finite_param.size else float("nan"),
-                "min": float(np.min(finite_param)) if finite_param.size else float("nan"),
-                "max": float(np.max(finite_param)) if finite_param.size else float("nan"),
-                "std": float(np.std(finite_param)) if finite_param.size else float("nan"),
-            },
-            "metric_correlations": metric_correlations,
-        }
-        summaries.append(summary)
-        rankings.append(
-            {
-                "parameter_path": parameter_path,
-                "distribution": str(param.distribution),
-                "sample_count": int(finite_param.size),
-                "max_abs_correlation": float(max_abs_corr),
-            }
-        )
-    rankings.sort(key=lambda row: float(row.get("max_abs_correlation", 0.0)), reverse=True)
-    return summaries, rankings
-
-
-def _aggregate_sensitivity_parameter_runs(
-    *,
-    parameter_path: str,
-    metric_paths: list[str],
-    run_details: list[dict[str, Any]],
-    baseline_metrics: dict[str, Any],
-) -> dict[str, Any]:
-    grouped: dict[str, dict[str, Any]] = {}
-    for detail in run_details:
-        if str(detail.get("parameter_path", "")) != parameter_path:
-            continue
-        value = detail.get("parameter_value")
-        value_key = _serialize_analysis_value(value)
-        bucket = grouped.setdefault(
-            value_key,
-            {
-                "parameter_value": value,
-                "runs": [],
-                "metrics": {},
-            },
-        )
-        bucket["runs"].append(detail)
-
-    for bucket in grouped.values():
-        metric_summary: dict[str, Any] = {}
-        for metric_path in metric_paths:
-            values = [run["metrics"].get(metric_path) for run in bucket["runs"]]
-            numeric = np.array(
-                [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and np.isfinite(float(v))],
-                dtype=float,
-            )
-            entry: dict[str, Any] = {"sample_count": int(len(values))}
-            if numeric.size:
-                entry["mean"] = float(np.mean(numeric))
-                entry["min"] = float(np.min(numeric))
-                entry["max"] = float(np.max(numeric))
-                baseline_value = baseline_metrics.get(metric_path)
-                if isinstance(baseline_value, (int, float)) and not isinstance(baseline_value, bool) and np.isfinite(float(baseline_value)):
-                    entry["delta_from_baseline"] = float(np.mean(numeric) - float(baseline_value))
-            else:
-                non_null = [v for v in values if v is not None]
-                if non_null:
-                    entry["values"] = non_null
-                    baseline_value = baseline_metrics.get(metric_path)
-                    if baseline_value is not None:
-                        entry["matches_baseline"] = bool(all(v == baseline_value for v in non_null))
-            metric_summary[metric_path] = entry
-        bucket["metrics"] = metric_summary
-
-    response_curve = [grouped[key] for key in sorted(grouped.keys())]
-    max_abs_delta = 0.0
-    for bucket in response_curve:
-        for metric_entry in dict(bucket.get("metrics", {}) or {}).values():
-            delta = metric_entry.get("delta_from_baseline")
-            if isinstance(delta, (int, float)) and np.isfinite(float(delta)):
-                max_abs_delta = max(max_abs_delta, abs(float(delta)))
-    return {
-        "parameter_path": parameter_path,
-        "value_count": int(len(response_curve)),
-        "max_abs_delta_from_baseline": float(max_abs_delta),
-        "response_curve": response_curve,
-    }
-
-
 def _mc_initial_relative_ric_curv_samples(
     cfg: SimulationScenarioConfig,
     run_details: list[dict[str, Any]],
@@ -803,55 +492,9 @@ def _run_mc_iteration_from_dict(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sample_variation(v, rng: np.random.Generator) -> Any:
-    mode = v.mode.lower()
-    if mode == "choice":
-        if not v.options:
-            raise ValueError(f"Variation '{v.parameter_path}' with mode=choice requires options.")
-        return v.options[int(rng.integers(0, len(v.options)))]
-    if mode == "uniform":
-        if v.low is None or v.high is None:
-            raise ValueError(f"Variation '{v.parameter_path}' with mode=uniform requires low/high.")
-        return float(rng.uniform(v.low, v.high))
-    if mode == "normal":
-        if v.mean is None or v.std is None:
-            raise ValueError(f"Variation '{v.parameter_path}' with mode=normal requires mean/std.")
-        return float(rng.normal(v.mean, v.std))
-    raise ValueError(f"Unsupported variation mode '{v.mode}'.")
+    from sim.execution.campaigns import sample_monte_carlo_variation
 
-
-def _prepare_monte_carlo_runs(
-    *,
-    cfg: SimulationScenarioConfig,
-    root: dict[str, Any],
-    outdir: Path,
-) -> list[dict[str, Any]]:
-    rng = np.random.default_rng(int(cfg.monte_carlo.base_seed))
-    varies_metadata_seed = any(str(v.parameter_path) == "metadata.seed" for v in cfg.monte_carlo.variations)
-    prepared: list[dict[str, Any]] = []
-    for i in range(int(cfg.monte_carlo.iterations)):
-        cdict = deepcopy(root)
-        sampled = {}
-        for v in cfg.monte_carlo.variations:
-            sv = _sample_variation(v, rng)
-            _deep_set(cdict, v.parameter_path, sv)
-            sampled[v.parameter_path] = sv
-        if not varies_metadata_seed:
-            md = cdict.setdefault("metadata", {})
-            if "seed" not in md:
-                md["seed"] = int(cfg.monte_carlo.base_seed) + i
-        mode = str(cdict.get("outputs", {}).get("mode", "interactive"))
-        if mode == "interactive":
-            cdict.setdefault("outputs", {})["mode"] = "save"
-        cdict.setdefault("outputs", {})["output_dir"] = str(outdir / f"mc_run_{i:04d}")
-        prepared.append(
-            {
-                "iteration": i,
-                "sampled_parameters": sampled,
-                "config_dict": cdict,
-                "seed": int(cdict.get("metadata", {}).get("seed", int(cfg.monte_carlo.base_seed) + i)),
-            }
-        )
-    return prepared
+    return sample_monte_carlo_variation(v, rng)
 
 
 def prepare_batch_run_configs(cfg: SimulationScenarioConfig) -> list[dict[str, Any]]:
@@ -861,11 +504,14 @@ def prepare_batch_run_configs(cfg: SimulationScenarioConfig) -> list[dict[str, A
     root = cfg.to_dict()
     outdir = Path(cfg.outputs.output_dir)
     if study_type == "sensitivity":
+        from sim.execution.sensitivity import prepare_sensitivity_runs
+
         sensitivity_method = str(cfg.analysis.sensitivity.method or "one_at_a_time").strip().lower()
-        if sensitivity_method == "lhs":
-            return _prepare_lhs_sensitivity_runs(cfg=cfg, root=root, outdir=outdir)
-        return _prepare_oaat_sensitivity_runs(cfg=cfg, root=root, outdir=outdir)
-    return _prepare_monte_carlo_runs(cfg=cfg, root=root, outdir=outdir)
+        return prepare_sensitivity_runs(cfg=cfg, root=root, outdir=outdir, sensitivity_method=sensitivity_method)
+
+    from sim.execution.campaigns import prepare_monte_carlo_runs
+
+    return prepare_monte_carlo_runs(cfg=cfg, root=root, outdir=outdir)
 
 
 def validate_generated_batch_configs(cfg: SimulationScenarioConfig) -> dict[str, Any]:
@@ -2154,12 +1800,18 @@ def _run_sensitivity_analysis(
     root = cfg.to_dict()
     outdir = Path(cfg.outputs.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
-    metric_paths = _analysis_metrics(cfg)
+    from sim.reporting.sensitivity import analysis_metrics, extract_analysis_metrics
 
-    if sensitivity_method == "lhs":
-        prepared = _prepare_lhs_sensitivity_runs(cfg=cfg, root=root, outdir=outdir)
-    else:
-        prepared = _prepare_oaat_sensitivity_runs(cfg=cfg, root=root, outdir=outdir)
+    metric_paths = analysis_metrics(cfg)
+
+    from sim.execution.sensitivity import prepare_sensitivity_runs
+
+    prepared = prepare_sensitivity_runs(
+        cfg=cfg,
+        root=root,
+        outdir=outdir,
+        sensitivity_method=sensitivity_method,
+    )
 
     baseline: dict[str, Any] | None = None
     baseline_summary_json = str(cfg.analysis.baseline.summary_json or "").strip()
@@ -2186,193 +1838,44 @@ def _run_sensitivity_analysis(
         baseline = {
             "source": "run",
             "summary": dict(baseline_payload.get("summary", {}) or {}),
-            "metrics": _extract_analysis_metrics(baseline_payload, metric_paths),
+            "metrics": extract_analysis_metrics(baseline_payload, metric_paths),
         }
 
-    parallel_enabled, max_workers_cfg = _analysis_parallel_settings(cfg)
+    parallel_enabled = bool(cfg.analysis.execution.parallel_enabled)
     total_iters = int(len(prepared))
-    default_workers = max(1, (os.cpu_count() or 1) - 1)
-    parallel_workers = max_workers_cfg if max_workers_cfg > 0 else default_workers
-    parallel_workers = max(1, min(parallel_workers, max(total_iters, 1)))
-    parallel_active = bool(parallel_enabled and total_iters > 1)
-    parallel_fallback_reason: str | None = None
-    completed: dict[int, dict[str, Any]] = {}
 
-    if parallel_active:
-        manager = None
-        progress_queue = None
-        thread_env_prev = _set_parallel_worker_thread_limits(default_threads="1")
-        try:
-            manager = mp.Manager()
-            progress_queue = manager.Queue()
-            tasks = [
-                {
-                    "iteration": p["iteration"],
-                    "config_dict": p["config_dict"],
-                    "strict_plugins": strict_plugins,
-                    "progress_queue": progress_queue,
-                    "progress_emit_every": 20,
-                }
-                for p in prepared
-            ]
-            with ProcessPoolExecutor(max_workers=parallel_workers) as ex:
-                fut_to_idx = {ex.submit(_run_mc_iteration_from_dict, t): int(t["iteration"]) for t in tasks}
-                pending = set(fut_to_idx.keys())
-                while pending:
-                    done_now, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
-                    for fut in done_now:
-                        idx = fut_to_idx[fut]
-                        completed[idx] = fut.result()
-                        if batch_callback is not None:
-                            try:
-                                batch_callback(len(completed), total_iters)
-                            except Exception as exc:
-                                logger.warning("Disabling analysis callback after runtime error: %s", exc)
-                                batch_callback = None
-                    if progress_queue is not None:
-                        while True:
-                            try:
-                                evt = progress_queue.get_nowait()
-                            except queue_mod.Empty:
-                                break
-                            except Exception:
-                                break
-                            if batch_progress_callback is not None:
-                                try:
-                                    batch_progress_callback(dict(evt or {}))
-                                except Exception as exc:
-                                    logger.warning("Disabling analysis progress callback after runtime error: %s", exc)
-                                    batch_progress_callback = None
-        except (OSError, PermissionError, NotImplementedError, EOFError) as exc:
-            parallel_active = False
-            parallel_fallback_reason = f"{type(exc).__name__}: {exc}"
-            logger.warning("Parallel sensitivity analysis unavailable, falling back to serial execution: %s", exc)
-        finally:
-            if progress_queue is not None:
-                try:
-                    while True:
-                        evt = progress_queue.get_nowait()
-                        if batch_progress_callback is not None:
-                            batch_progress_callback(dict(evt or {}))
-                except Exception:
-                    pass
-            if manager is not None:
-                try:
-                    manager.shutdown()
-                except Exception:
-                    pass
-            _restore_env_vars(thread_env_prev)
+    from sim.execution.sensitivity import run_sensitivity_runs
 
-    if not parallel_active:
-        completed_count = 0
-        for prepared_run in prepared:
-            run_cfg = scenario_config_from_dict(dict(prepared_run["config_dict"]))
-            if strict_plugins:
-                errs = validate_scenario_plugins(run_cfg)
-                if errs:
-                    msg = (
-                        "Plugin validation failed in sensitivity run {i}:\n- ".format(i=int(prepared_run["iteration"]))
-                        + "\n- ".join(errs)
-                    )
-                    raise ValueError(msg)
-            run_payload = _run_single_config(run_cfg, step_callback=step_callback)
-            completed[int(prepared_run["iteration"])] = {
-                "iteration": int(prepared_run["iteration"]),
-                "summary": dict(run_payload.get("summary", {}) or {}),
-                "closest_approach_km": _closest_approach_from_run_payload(run_payload),
-                "payload": run_payload,
-            }
-            completed_count += 1
-            if batch_callback is not None:
-                try:
-                    batch_callback(completed_count, total_iters)
-                except Exception as exc:
-                    logger.warning("Disabling analysis callback after runtime error: %s", exc)
-                    batch_callback = None
+    sensitivity_result = run_sensitivity_runs(
+        cfg=cfg,
+        prepared=prepared,
+        strict_plugins=strict_plugins,
+        step_callback=step_callback,
+        batch_callback=batch_callback,
+        batch_progress_callback=batch_progress_callback,
+    )
+    completed = dict(sensitivity_result.get("completed", {}) or {})
+    parallel_active = bool(sensitivity_result.get("parallel_active", False))
+    parallel_workers = int(sensitivity_result.get("parallel_workers", 1) or 1)
+    parallel_fallback_reason = sensitivity_result.get("parallel_fallback_reason")
 
-    runs: list[dict[str, Any]] = []
-    for prepared_run in sorted(prepared, key=lambda entry: int(entry["iteration"])):
-        idx = int(prepared_run["iteration"])
-        completed_run = dict(completed.get(idx, {}) or {})
-        payload = dict(completed_run.get("payload", {}) or {})
-        if not payload:
-            payload = {
-                "summary": dict(completed_run.get("summary", {}) or {}),
-            }
-        metrics = _extract_analysis_metrics(payload, metric_paths)
-        run_entry = {
-            "iteration": idx,
-            "parameter_path": prepared_run.get("parameter_path"),
-            "parameter_value": prepared_run.get("parameter_value"),
-            "value_index": int(prepared_run["value_index"]),
-            "sampled_parameters": dict(prepared_run.get("sampled_parameters", {}) or {}),
-            "summary": dict(completed_run.get("summary", payload.get("summary", {})) or {}),
-            "closest_approach_km": _safe_float(completed_run.get("closest_approach_km")),
-            "metrics": metrics,
-        }
-        runs.append(run_entry)
+    from sim.reporting.sensitivity import build_sensitivity_report_payload, write_sensitivity_summary_artifact
 
-    baseline_metrics = dict(baseline.get("metrics", {}) or {}) if baseline is not None else {}
-    if sensitivity_method == "lhs":
-        parameter_summaries, parameter_rankings = _build_lhs_parameter_summaries(
-            cfg=cfg,
-            metric_paths=metric_paths,
-            run_details=runs,
-        )
-    else:
-        parameter_summaries = [
-            _aggregate_sensitivity_parameter_runs(
-                parameter_path=str(param.parameter_path),
-                metric_paths=metric_paths,
-                run_details=runs,
-                baseline_metrics=baseline_metrics,
-            )
-            for param in cfg.analysis.sensitivity.parameters
-        ]
-        parameter_rankings = sorted(
-            (
-                {
-                    "parameter_path": str(summary.get("parameter_path", "")),
-                    "max_abs_delta_from_baseline": float(summary.get("max_abs_delta_from_baseline", 0.0)),
-                    "value_count": int(summary.get("value_count", 0)),
-                }
-                for summary in parameter_summaries
-            ),
-            key=lambda entry: float(entry["max_abs_delta_from_baseline"]),
-            reverse=True,
-        )
+    agg = build_sensitivity_report_payload(
+        cfg=cfg,
+        config_path=config_path,
+        prepared=prepared,
+        completed=completed,
+        baseline=baseline,
+        metric_paths=metric_paths,
+        sensitivity_method=sensitivity_method,
+        parallel_enabled=parallel_enabled,
+        parallel_active=parallel_active,
+        parallel_workers=parallel_workers,
+        parallel_fallback_reason=parallel_fallback_reason,
+    )
 
-    agg = {
-        "config_path": str(Path(config_path).resolve()),
-        "scenario_name": cfg.scenario_name,
-        "scenario_description": cfg.scenario_description,
-        "analysis": {
-            "enabled": True,
-            "study_type": "sensitivity",
-            "method": sensitivity_method,
-            "parallel_enabled": bool(parallel_active),
-            "parallel_requested": bool(parallel_enabled and total_iters > 1),
-            "parallel_workers": int(parallel_workers if parallel_active else 1),
-            "metrics": metric_paths,
-            "parameter_count": int(len(cfg.analysis.sensitivity.parameters)),
-            "run_count": int(len(runs)),
-            "samples": int(cfg.analysis.sensitivity.samples if sensitivity_method == "lhs" else len(runs)),
-            "seed": int(cfg.analysis.sensitivity.seed),
-        },
-        "monte_carlo": {"enabled": False},
-        "baseline": baseline,
-        "parameter_summaries": parameter_summaries,
-        "parameter_rankings": parameter_rankings,
-        "runs": runs,
-        "artifacts": {},
-    }
-    if parallel_fallback_reason is not None:
-        agg["analysis"]["parallel_fallback_reason"] = str(parallel_fallback_reason)
-
-    summary_path = outdir / "master_analysis_sensitivity_summary.json"
-    write_json(str(summary_path), agg)
-    agg["artifacts"]["summary_json"] = str(summary_path)
-    return agg
+    return write_sensitivity_summary_artifact(outdir=outdir, payload=agg)
 
 
 def run_master_simulation(
@@ -2398,16 +1901,15 @@ def run_master_simulation(
             batch_progress_callback=mc_progress_callback,
         )
     if study_type != "monte_carlo":
-        from sim.api import SimulationConfig, SimulationSession
+        from sim.execution import run_simulation_scenario
 
-        session = SimulationSession.from_config(SimulationConfig(cfg, source_path=Path(config_path).resolve()))
-        result = session.run(step_callback=step_callback)
+        payload = run_simulation_scenario(cfg, source_path=Path(config_path).resolve(), step_callback=step_callback)
         return {
             "config_path": str(Path(config_path).resolve()),
             "scenario_name": cfg.scenario_name,
             "scenario_description": cfg.scenario_description,
             "monte_carlo": {"enabled": False},
-            "run": result.summary,
+            "run": dict(payload.get("summary", {}) or {}),
         }
 
     root = cfg.to_dict()
@@ -2438,102 +1940,23 @@ def run_master_simulation(
     varies_metadata_seed = any(str(v.parameter_path) == "metadata.seed" for v in cfg.monte_carlo.variations)
     total_iters = int(cfg.monte_carlo.iterations)
     parallel_enabled = bool(cfg.monte_carlo.parallel_enabled)
-    max_workers_cfg = int(cfg.monte_carlo.parallel_workers or 0)
-    default_workers = max(1, (os.cpu_count() or 1) - 1)
-    parallel_workers = max_workers_cfg if max_workers_cfg > 0 else default_workers
-    parallel_workers = max(1, min(parallel_workers, total_iters))
-    parallel_active = bool(parallel_enabled and total_iters > 1)
-    parallel_fallback_reason: str | None = None
-    prepared = _prepare_monte_carlo_runs(cfg=cfg, root=root, outdir=outdir)
+    from sim.execution.campaigns import run_monte_carlo_runs
 
-    completed: dict[int, dict[str, Any]] = {}
-    if parallel_active:
-        manager = None
-        progress_queue = None
-        thread_env_prev = _set_parallel_worker_thread_limits(default_threads="1")
-        try:
-            manager = mp.Manager()
-            progress_queue = manager.Queue()
-            tasks = [
-                {
-                    "iteration": p["iteration"],
-                    "config_dict": p["config_dict"],
-                    "strict_plugins": strict_plugins,
-                    "progress_queue": progress_queue,
-                    "progress_emit_every": int(mc_out_cfg.get("parallel_progress_emit_every_steps", 20) or 20),
-                }
-                for p in prepared
-            ]
-            with ProcessPoolExecutor(max_workers=parallel_workers) as ex:
-                fut_to_idx = {ex.submit(_run_mc_iteration_from_dict, t): int(t["iteration"]) for t in tasks}
-                pending = set(fut_to_idx.keys())
-                while pending:
-                    done_now, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
-                    for fut in done_now:
-                        idx = fut_to_idx[fut]
-                        completed[idx] = fut.result()
-                        if mc_callback is not None:
-                            try:
-                                mc_callback(len(completed), total_iters)
-                            except Exception as exc:
-                                logger.warning("Disabling Monte Carlo callback after runtime error: %s", exc)
-                                mc_callback = None
-                    if progress_queue is not None:
-                        while True:
-                            try:
-                                evt = progress_queue.get_nowait()
-                            except queue_mod.Empty:
-                                break
-                            except Exception:
-                                break
-                            if mc_progress_callback is not None:
-                                try:
-                                    mc_progress_callback(dict(evt or {}))
-                                except Exception as exc:
-                                    logger.warning("Disabling Monte Carlo progress callback after runtime error: %s", exc)
-                                    mc_progress_callback = None
-        except (OSError, PermissionError, NotImplementedError, EOFError) as exc:
-            parallel_active = False
-            parallel_fallback_reason = f"{type(exc).__name__}: {exc}"
-            logger.warning("Parallel Monte Carlo unavailable, falling back to serial execution: %s", exc)
-        finally:
-            if progress_queue is not None:
-                try:
-                    while True:
-                        evt = progress_queue.get_nowait()
-                        if mc_progress_callback is not None:
-                            mc_progress_callback(dict(evt or {}))
-                except Exception:
-                    pass
-            if manager is not None:
-                try:
-                    manager.shutdown()
-                except Exception:
-                    pass
-            _restore_env_vars(thread_env_prev)
-    if not parallel_active:
-        completed_count = 0
-        for p in prepared:
-            ci = scenario_config_from_dict(dict(p["config_dict"]))
-            if strict_plugins:
-                errs = validate_scenario_plugins(ci)
-                if errs:
-                    msg = "Plugin validation failed in Monte Carlo iteration {i}:\n- ".format(i=int(p["iteration"])) + "\n- ".join(errs)
-                    raise ValueError(msg)
-            ro = _run_single_config(ci, step_callback=step_callback)
-            completed[int(p["iteration"])] = {
-                "iteration": int(p["iteration"]),
-                "summary": ro["summary"],
-                "closest_approach_km": _closest_approach_from_run_payload(ro),
-                "relative_range_series": _relative_range_series_from_run_payload(ro),
-            }
-            completed_count += 1
-            if mc_callback is not None:
-                try:
-                    mc_callback(completed_count, total_iters)
-                except Exception as exc:
-                    logger.warning("Disabling Monte Carlo callback after runtime error: %s", exc)
-                    mc_callback = None
+    campaign_result = run_monte_carlo_runs(
+        cfg=cfg,
+        root=root,
+        outdir=outdir,
+        strict_plugins=strict_plugins,
+        mc_out_cfg=mc_out_cfg,
+        step_callback=step_callback,
+        batch_callback=mc_callback,
+        batch_progress_callback=mc_progress_callback,
+    )
+    prepared = list(campaign_result.get("prepared", []) or [])
+    completed = dict(campaign_result.get("completed", {}) or {})
+    parallel_active = bool(campaign_result.get("parallel_active", False))
+    parallel_workers = int(campaign_result.get("parallel_workers", 1) or 1)
+    parallel_fallback_reason = campaign_result.get("parallel_fallback_reason")
 
     for p in sorted(prepared, key=lambda x: int(x["iteration"])):
         i = int(p["iteration"])
@@ -2586,484 +2009,79 @@ def run_master_simulation(
         if bool(cfg.outputs.monte_carlo.get("save_iteration_summaries", False)):
             write_json(str(outdir / f"master_monte_carlo_run_{i:04d}.json"), entry)
 
-    durations_s = np.array([float(dict(r.get("summary", {}) or {}).get("duration_s", 0.0)) for r in runs], dtype=float)
-    terminated_early_flags = np.array(
-        [1.0 if bool(dict(r.get("summary", {}) or {}).get("terminated_early", False)) else 0.0 for r in runs],
-        dtype=float,
+    from sim.reporting.monte_carlo import build_monte_carlo_report_payload
+
+    report_context = build_monte_carlo_report_payload(
+        cfg=cfg,
+        config_path=config_path,
+        root=root,
+        repo_root=repo_root,
+        runs=runs,
+        run_details=run_details,
+        closest_approach_km_runs=closest_approach_km_runs,
+        duration_runs_s=duration_runs_s,
+        total_dv_runs_m_s=total_dv_runs_m_s,
+        guardrail_event_runs=guardrail_event_runs,
+        failure_mode_counts=failure_mode_counts,
+        dv_budget_m_s_by_object=dv_budget_m_s_by_object,
+        gates=gates,
+        mc_out_cfg=mc_out_cfg,
+        varies_metadata_seed=varies_metadata_seed,
+        parallel_active=parallel_active,
+        parallel_enabled=parallel_enabled,
+        total_iters=total_iters,
+        parallel_workers=parallel_workers,
+        parallel_fallback_reason=parallel_fallback_reason,
     )
-    termination_reason_counts: dict[str, int] = {}
-    dv_by_object: dict[str, list[float]] = {}
-    burn_samples_by_object: dict[str, list[float]] = {}
-    for entry in runs:
-        s = dict(entry.get("summary", {}) or {})
-        term_reason = s.get("termination_reason")
-        if term_reason is not None:
-            key = str(term_reason)
-            termination_reason_counts[key] = int(termination_reason_counts.get(key, 0) + 1)
-        thrust_stats = dict(s.get("thrust_stats", {}) or {})
-        for oid, ts in thrust_stats.items():
-            tsd = dict(ts or {})
-            dv_by_object.setdefault(str(oid), []).append(float(tsd.get("total_dv_m_s", 0.0)))
-            burn_samples_by_object.setdefault(str(oid), []).append(float(tsd.get("burn_samples", 0.0)))
-    dv_remaining_m_s_by_object: dict[str, list[float]] = {}
-    for oid in sorted(dv_budget_m_s_by_object.keys()):
-        vals: list[float] = []
-        for d in run_details:
-            rem = _safe_float(dict(d.get("delta_v_remaining_m_s_by_object", {}) or {}).get(oid))
-            if np.isfinite(rem):
-                vals.append(float(rem))
-        if vals:
-            dv_remaining_m_s_by_object[oid] = vals
+    agg = report_context["agg"]
+    commander_brief = report_context["commander_brief"]
+    analyst_pack = report_context["analyst_pack"]
+    durations_s = report_context["durations_s"]
+    ca_finite = report_context["ca_finite"]
+    all_obj_ids = report_context["all_obj_ids"]
+    dv_by_object = report_context["dv_by_object"]
+    dv_remaining_m_s_by_object = report_context["dv_remaining_m_s_by_object"]
+    run_details = report_context["run_details"]
+    keepout_threshold = report_context["keepout_threshold"]
+    failure_mode_counts = report_context["failure_mode_counts"]
 
-    by_object_stats: dict[str, dict[str, float]] = {}
-    all_obj_ids = sorted(set(dv_by_object.keys()) | set(burn_samples_by_object.keys()))
-    for oid in all_obj_ids:
-        dv_arr = np.array(dv_by_object.get(oid, []), dtype=float)
-        b_arr = np.array(burn_samples_by_object.get(oid, []), dtype=float)
-        by_object_stats[oid] = {
-            "total_dv_m_s_mean": float(np.mean(dv_arr)) if dv_arr.size else 0.0,
-            "total_dv_m_s_min": float(np.min(dv_arr)) if dv_arr.size else 0.0,
-            "total_dv_m_s_max": float(np.max(dv_arr)) if dv_arr.size else 0.0,
-            "total_dv_m_s_p95": float(np.percentile(dv_arr, 95)) if dv_arr.size else 0.0,
-            "burn_samples_mean": float(np.mean(b_arr)) if b_arr.size else 0.0,
-            "burn_samples_p95": float(np.percentile(b_arr, 95)) if b_arr.size else 0.0,
-        }
-    ca_arr_full = np.array(closest_approach_km_runs, dtype=float)
-    ca_finite = ca_arr_full[np.isfinite(ca_arr_full)]
-    duration_arr = np.array(duration_runs_s, dtype=float)
-    total_dv_arr = np.array(total_dv_runs_m_s, dtype=float)
-    guardrail_arr = np.array(guardrail_event_runs, dtype=float)
-    pass_flags = np.array([1.0 if bool(d.get("pass", False)) else 0.0 for d in run_details], dtype=float)
-    pass_rate = float(np.mean(pass_flags)) if pass_flags.size else 0.0
-    guardrail_violation_flags = np.array([1.0 if int(d.get("guardrail_events", 0)) > 0 else 0.0 for d in run_details], dtype=float)
+    from sim.reporting.monte_carlo import apply_monte_carlo_baseline_comparison
+    from sim.reporting.monte_carlo_plots import write_monte_carlo_plot_artifacts
 
-    aggregate_stats = {
-        "duration_s_mean": float(np.mean(durations_s)) if durations_s.size else 0.0,
-        "duration_s_min": float(np.min(durations_s)) if durations_s.size else 0.0,
-        "duration_s_max": float(np.max(durations_s)) if durations_s.size else 0.0,
-        "duration_s_p50": float(np.percentile(durations_s, 50)) if durations_s.size else float("nan"),
-        "duration_s_p90": float(np.percentile(durations_s, 90)) if durations_s.size else float("nan"),
-        "duration_s_p95": float(np.percentile(durations_s, 95)) if durations_s.size else float("nan"),
-        "duration_s_p99": float(np.percentile(durations_s, 99)) if durations_s.size else float("nan"),
-        "terminated_early_rate": float(np.mean(terminated_early_flags)) if terminated_early_flags.size else 0.0,
-        "closest_approach_km_mean": float(np.mean(ca_finite)) if ca_finite.size else float("nan"),
-        "closest_approach_km_min": float(np.min(ca_finite)) if ca_finite.size else float("nan"),
-        "closest_approach_km_max": float(np.max(ca_finite)) if ca_finite.size else float("nan"),
-        "closest_approach_km_p05": float(np.percentile(ca_finite, 5)) if ca_finite.size else float("nan"),
-        "closest_approach_km_p50": float(np.percentile(ca_finite, 50)) if ca_finite.size else float("nan"),
-        "closest_approach_km_p95": float(np.percentile(ca_finite, 95)) if ca_finite.size else float("nan"),
-        "total_dv_m_s_mean": float(np.mean(total_dv_arr)) if total_dv_arr.size else float("nan"),
-        "total_dv_m_s_p50": float(np.percentile(total_dv_arr, 50)) if total_dv_arr.size else float("nan"),
-        "total_dv_m_s_p90": float(np.percentile(total_dv_arr, 90)) if total_dv_arr.size else float("nan"),
-        "total_dv_m_s_p95": float(np.percentile(total_dv_arr, 95)) if total_dv_arr.size else float("nan"),
-        "total_dv_m_s_p99": float(np.percentile(total_dv_arr, 99)) if total_dv_arr.size else float("nan"),
-        "guardrail_events_mean": float(np.mean(guardrail_arr)) if guardrail_arr.size else float("nan"),
-        "guardrail_events_p95": float(np.percentile(guardrail_arr, 95)) if guardrail_arr.size else float("nan"),
-        "pass_rate": pass_rate,
-        "fail_rate": 1.0 - pass_rate,
-        "guardrail_violation_rate": float(np.mean(guardrail_violation_flags)) if guardrail_violation_flags.size else float("nan"),
-        "failure_mode_counts": failure_mode_counts,
-        "termination_reason_counts": termination_reason_counts,
-        "by_object": by_object_stats,
-        "delta_v_budget_m_s_by_object": dict(dv_budget_m_s_by_object),
-        "delta_v_remaining_m_s_by_object": {
-            oid: _quantile_stats(vals, (50.0, 90.0, 99.0)) for oid, vals in sorted(dv_remaining_m_s_by_object.items())
-        },
-        "knowledge_detection_by_observer": _aggregate_knowledge_detection_from_runs(run_details),
-        "knowledge_consistency_by_observer": _aggregate_knowledge_consistency_from_runs(run_details),
-    }
+    agg = apply_monte_carlo_baseline_comparison(
+        agg=agg,
+        commander_brief=commander_brief,
+        config_path=config_path,
+        baseline_summary_json=str(mc_out_cfg.get("baseline_summary_json", "")).strip(),
+    )
+    agg = write_monte_carlo_plot_artifacts(
+        cfg=cfg,
+        outdir=outdir,
+        agg=agg,
+        runs=runs,
+        run_details=run_details,
+        relative_range_series_runs=relative_range_series_runs,
+        durations_s=durations_s,
+        ca_finite=ca_finite,
+        all_obj_ids=all_obj_ids,
+        dv_by_object=dv_by_object,
+        dv_remaining_m_s_by_object=dv_remaining_m_s_by_object,
+        dv_budget_m_s_by_object=dv_budget_m_s_by_object,
+        failure_mode_counts=failure_mode_counts,
+        keepout_threshold=keepout_threshold,
+        gates=gates,
+        mc_out_cfg=mc_out_cfg,
+    )
 
-    keepout_threshold = _safe_float(gates.get("min_closest_approach_km"))
-    if not np.isfinite(keepout_threshold):
-        keepout_threshold = _safe_float(mc_out_cfg.get("keepout_radius_km"))
-    p_keepout_violation = float("nan")
-    if np.isfinite(keepout_threshold) and ca_finite.size:
-        p_keepout_violation = float(np.mean(ca_finite < keepout_threshold))
+    from sim.reporting.monte_carlo import write_monte_carlo_report_artifacts
 
-    catastrophic_failure_reasons = [str(x) for x in (mc_out_cfg.get("catastrophic_failure_reasons", ["terminated_early:earth_impact"]) or [])]
-    catastrophic_count = 0
-    for rd in run_details:
-        reasons = set(str(x) for x in list(rd.get("fail_reasons", []) or []))
-        if any(r in reasons for r in catastrophic_failure_reasons):
-            catastrophic_count += 1
-    p_catastrophic_outcome = float(catastrophic_count / max(len(run_details), 1))
-
-    max_duration_gate = _safe_float(gates.get("max_duration_s"))
-    p_exceed_time_budget = float("nan")
-    if np.isfinite(max_duration_gate) and duration_arr.size:
-        p_exceed_time_budget = float(np.mean(duration_arr > max_duration_gate))
-
-    max_total_dv_gate = _safe_float(gates.get("max_total_dv_m_s"))
-    p_exceed_dv_budget = float("nan")
-    if np.isfinite(max_total_dv_gate) and total_dv_arr.size:
-        p_exceed_dv_budget = float(np.mean(total_dv_arr > max_total_dv_gate))
-
-    if np.isfinite(max_total_dv_gate) and total_dv_arr.size:
-        fuel_margin = max_total_dv_gate - total_dv_arr
-        fuel_margin_stats = _quantile_stats(fuel_margin, (5.0, 50.0, 95.0))
-    else:
-        fuel_margin_stats = _quantile_stats([], (5.0, 50.0, 95.0))
-    if np.isfinite(max_duration_gate) and duration_arr.size:
-        time_margin = max_duration_gate - duration_arr
-        time_margin_stats = _quantile_stats(time_margin, (5.0, 50.0, 95.0))
-    else:
-        time_margin_stats = _quantile_stats([], (5.0, 50.0, 95.0))
-    aggregate_stats["p_keepout_violation"] = p_keepout_violation
-    aggregate_stats["p_catastrophic_outcome"] = p_catastrophic_outcome
-    aggregate_stats["p_exceed_dv_budget"] = p_exceed_dv_budget
-    aggregate_stats["p_exceed_time_budget"] = p_exceed_time_budget
-
-    top_failure_modes: list[dict[str, Any]] = []
-    if failure_mode_counts:
-        sorted_modes = sorted(failure_mode_counts.items(), key=lambda kv: int(kv[1]), reverse=True)
-        for reason, cnt in sorted_modes[:3]:
-            top_failure_modes.append(
-                {
-                    "reason": str(reason),
-                    "count": int(cnt),
-                    "rate": float(int(cnt) / max(len(run_details), 1)),
-                }
-            )
-
-    cfg_json = json.dumps(root, sort_keys=True, separators=(",", ":"))
-    reproducibility = {
-        "generated_utc": datetime.now(timezone.utc).isoformat(),
-        "git_commit_sha": _get_git_commit_sha(repo_root),
-        "config_sha256": hashlib.sha256(cfg_json.encode("utf-8")).hexdigest(),
-        "model_profile": _infer_model_profile(root),
-        "random_seed_policy": (
-            "Per-run metadata.seed set to monte_carlo.base_seed + iteration unless metadata.seed is explicitly varied."
-            if not varies_metadata_seed
-            else "metadata.seed controlled by monte_carlo variations."
-        ),
-    }
-    sensitivity_rankings = _build_parameter_sensitivity_rankings(run_details)
-    top_parameter_drivers = [
-        {
-            "parameter_path": str(row.get("parameter_path")),
-            "importance_score": _safe_float(row.get("importance_score"), default=0.0),
-            "abs_corr_pass": _safe_float(row.get("abs_corr_pass")),
-            "abs_corr_closest_approach_km": _safe_float(row.get("abs_corr_closest_approach_km")),
-            "abs_corr_total_dv_m_s": _safe_float(row.get("abs_corr_total_dv_m_s")),
-        }
-        for row in sensitivity_rankings[:5]
-    ]
-    unique_seeds = len(set(int(_safe_float(d.get("seed"), default=-1)) for d in run_details))
-    finite_ca_rate = float(np.mean(np.isfinite(ca_arr_full))) if ca_arr_full.size else float("nan")
-    analysis_confidence = {
-        "runs_executed": int(len(run_details)),
-        "run_count_sufficient_for_tail_estimates": bool(len(run_details) >= 100),
-        "unique_seed_count": int(unique_seeds),
-        "finite_closest_approach_rate": finite_ca_rate,
-        "varied_parameter_count": int(len(set(str(v.parameter_path) for v in cfg.monte_carlo.variations))),
-        "model_profile": reproducibility.get("model_profile"),
-        "git_commit_sha": reproducibility.get("git_commit_sha"),
-        "config_sha256": reproducibility.get("config_sha256"),
-    }
-    commander_brief = {
-        "scenario_name": cfg.scenario_name,
-        "runs": int(cfg.monte_carlo.iterations),
-        "p_success": pass_rate,
-        "p_fail": 1.0 - pass_rate,
-        "p_keepout_violation": p_keepout_violation,
-        "p_catastrophic_outcome": p_catastrophic_outcome,
-        "p_exceed_dv_budget": p_exceed_dv_budget,
-        "p_exceed_time_budget": p_exceed_time_budget,
-        "keepout_threshold_km": keepout_threshold if np.isfinite(keepout_threshold) else None,
-        "worst_case_closest_approach_km": float(np.min(ca_finite)) if ca_finite.size else float("nan"),
-        "timeline_confidence_bands_s": _quantile_stats(duration_runs_s, (50.0, 90.0, 99.0)),
-        "fuel_confidence_bands_total_dv_m_s": _quantile_stats(total_dv_runs_m_s, (50.0, 90.0, 99.0)),
-        "fuel_confidence_bands_dv_m_s_by_object": {
-            oid: _quantile_stats(dv_by_object.get(oid, []), (50.0, 90.0, 99.0)) for oid in sorted(dv_by_object.keys())
-        },
-        "delta_v_remaining_confidence_bands_m_s_by_object": {
-            oid: _quantile_stats(vals, (50.0, 90.0, 99.0)) for oid, vals in sorted(dv_remaining_m_s_by_object.items())
-        },
-        "resource_margin": {
-            "fuel_margin_m_s_vs_budget": fuel_margin_stats,
-            "time_margin_s_vs_budget": time_margin_stats,
-        },
-        "constraint_violation_summary": {
-            "p_guardrail_violation": float(np.mean(guardrail_violation_flags)) if guardrail_violation_flags.size else float("nan"),
-            "guardrail_events_per_run": _quantile_stats(guardrail_event_runs, (50.0, 90.0, 99.0)),
-            "compute_deadline_overrun_available": False,
-            "control_saturation_available": False,
-        },
-        "top_failure_modes": top_failure_modes,
-        "top_parameter_drivers": top_parameter_drivers,
-        "analysis_confidence": analysis_confidence,
-    }
-
-    analyst_pack = {
-        "scenario_name": cfg.scenario_name,
-        "reproducibility": reproducibility,
-        "gates": gates,
-        "run_details": run_details,
-        "failure_mode_counts": failure_mode_counts,
-        "sensitivity_rankings": sensitivity_rankings,
-        "catastrophic_failure_reasons": catastrophic_failure_reasons,
-    }
-
-    agg = {
-        "config_path": str(Path(config_path).resolve()),
-        "scenario_name": cfg.scenario_name,
-        "scenario_description": cfg.scenario_description,
-        "monte_carlo": {
-            "enabled": True,
-            "iterations": int(cfg.monte_carlo.iterations),
-            "base_seed": int(cfg.monte_carlo.base_seed),
-            "parallel_enabled": bool(parallel_active),
-            "parallel_requested": bool(parallel_enabled and total_iters > 1),
-            "parallel_workers": int(parallel_workers if parallel_active else 1),
-        },
-        "aggregate_stats": aggregate_stats,
-        "commander_brief": commander_brief,
-        "reproducibility": reproducibility,
-        "analyst_pack": analyst_pack,
-        "artifacts": {},
-        "runs": runs,
-    }
-    if parallel_fallback_reason is not None:
-        agg["monte_carlo"]["parallel_fallback_reason"] = str(parallel_fallback_reason)
-
-    baseline_summary_json = str(mc_out_cfg.get("baseline_summary_json", "")).strip()
-    if baseline_summary_json:
-        bpath = Path(baseline_summary_json)
-        if not bpath.is_absolute():
-            bpath = Path(config_path).resolve().parent / bpath
-        baseline_payload = _load_json_file(bpath)
-        if baseline_payload is not None:
-            comparison = _build_baseline_comparison(agg, baseline_payload)
-            agg["baseline_comparison"] = comparison
-            commander_brief["baseline_comparison"] = comparison
-        else:
-            agg["baseline_comparison_error"] = f"Unable to load baseline summary: {str(bpath)}"
-
-    save_hist = bool(cfg.outputs.monte_carlo.get("save_histograms", False))
-    show_hist = bool(cfg.outputs.monte_carlo.get("display_histograms", False))
-    if (save_hist or show_hist) and runs:
-        import matplotlib.pyplot as plt
-
-        plot_series: list[tuple[str, np.ndarray]] = [("Duration (s)", durations_s)]
-        if ca_finite.size:
-            plot_series.append(("Closest Approach (km)", ca_finite))
-        for oid in all_obj_ids:
-            dv_arr = np.array(dv_by_object.get(oid, []), dtype=float)
-            if dv_arr.size:
-                plot_series.append((f"{oid} Total dV (m/s)", dv_arr))
-        for oid in ("chaser", "target"):
-            rem_arr = np.array(dv_remaining_m_s_by_object.get(oid, []), dtype=float)
-            if rem_arr.size:
-                plot_series.append((f"{oid} dV Remaining (m/s)", rem_arr))
-        nplots = len(plot_series)
-        if nplots == 6:
-            nrows, ncols = 3, 2
-        else:
-            ncols = min(3, max(1, nplots))
-            nrows = int(np.ceil(nplots / ncols))
-        fig, axes = plt.subplots(nrows, ncols, figsize=cap_figsize(5.2 * ncols, 3.8 * nrows), squeeze=False)
-        axes_flat = list(np.ravel(axes))
-        for ax, (title, arr) in zip(axes_flat, plot_series):
-            bins = int(max(5, min(30, np.sqrt(max(arr.size, 1)))))
-            ax.hist(arr, bins=bins, alpha=0.85)
-            ax.set_title(title)
-            ax.set_ylabel("count")
-            ax.grid(True, alpha=0.3)
-        for ax in axes_flat[nplots:]:
-            ax.set_visible(False)
-        fig.tight_layout()
-        if save_hist:
-            fig.savefig(str(outdir / "master_monte_carlo_histograms.png"), dpi=int(cfg.outputs.plots.get("dpi", 150)))
-        if show_hist:
-            # Block so the histogram window is actually visible before close.
-            plt.show()
-        plt.close(fig)
-
-        range_series_available = [s for s in relative_range_series_runs if isinstance(s, dict)]
-        if range_series_available:
-            fig_rr, ax_rr = plt.subplots(figsize=cap_figsize(10, 6))
-            for idx, series in enumerate(relative_range_series_runs):
-                if not isinstance(series, dict):
-                    continue
-                t_rr = np.array(series.get("time_s", []), dtype=float)
-                r_rr = np.array(series.get("range_km", []), dtype=float)
-                if t_rr.size == 0 or r_rr.size == 0:
-                    continue
-                ax_rr.plot(t_rr, r_rr, linewidth=1.0, alpha=0.65, label=f"run {idx}")
-            ax_rr.set_title("Chaser-Target Relative Range by Iteration")
-            ax_rr.set_xlabel("Time (s)")
-            ax_rr.set_ylabel("Range (km)")
-            ax_rr.grid(True, alpha=0.3)
-            fig_rr.tight_layout()
-            rr_path = outdir / "master_monte_carlo_relative_range_timeseries.png"
-            if save_hist:
-                fig_rr.savefig(str(rr_path), dpi=int(cfg.outputs.plots.get("dpi", 150)))
-                agg["artifacts"]["relative_range_timeseries_png"] = str(rr_path)
-            if show_hist:
-                plt.show()
-            plt.close(fig_rr)
-
-    save_ops_dashboard = bool(mc_out_cfg.get("save_ops_dashboard", True))
-    show_ops_dashboard = bool(mc_out_cfg.get("display_ops_dashboard", False))
-    if (save_ops_dashboard or show_ops_dashboard) and run_details:
-        import matplotlib.pyplot as plt
-
-        ric_initial_samples = _mc_initial_relative_ric_curv_samples(cfg, run_details)
-        pass_color = np.array(["tab:green" if bool(d.get("pass", False)) else "tab:red" for d in run_details], dtype=object)
-        idx_arr = np.arange(len(run_details), dtype=float)
-        ca_run_arr = np.array([_safe_float(d.get("closest_approach_km")) for d in run_details], dtype=float)
-        dur_run_arr = np.array([_safe_float(d.get("duration_s"), default=0.0) for d in run_details], dtype=float)
-        dv_run_arr = np.array([_safe_float(d.get("total_dv_m_s_total"), default=0.0) for d in run_details], dtype=float)
-
-        fig, axes = plt.subplots(2, 3, figsize=cap_figsize(14, 8))
-        bins = int(max(5, min(30, np.sqrt(max(len(run_details), 1)))))
-
-        finite_ca = ca_run_arr[np.isfinite(ca_run_arr)]
-        axes[0, 0].hist(finite_ca, bins=bins, alpha=0.85)
-        if np.isfinite(keepout_threshold):
-            axes[0, 0].axvline(keepout_threshold, linestyle="--", color="k")
-        axes[0, 0].set_title("Closest Approach (km)")
-        axes[0, 0].set_ylabel("count")
-        axes[0, 0].grid(True, alpha=0.3)
-
-        axes[0, 1].hist(dur_run_arr[np.isfinite(dur_run_arr)], bins=bins, alpha=0.85)
-        max_duration_s = _safe_float(gates.get("max_duration_s"))
-        if np.isfinite(max_duration_s):
-            axes[0, 1].axvline(max_duration_s, linestyle="--", color="k")
-        axes[0, 1].set_title("Duration (s)")
-        axes[0, 1].set_ylabel("count")
-        axes[0, 1].grid(True, alpha=0.3)
-
-        axes[0, 2].hist(dv_run_arr[np.isfinite(dv_run_arr)], bins=bins, alpha=0.85, color="tab:orange")
-        max_total_dv_m_s = _safe_float(gates.get("max_total_dv_m_s"))
-        if np.isfinite(max_total_dv_m_s):
-            axes[0, 2].axvline(max_total_dv_m_s, linestyle="--", color="k")
-        axes[0, 2].set_title("Total dV (m/s)")
-        axes[0, 2].set_ylabel("count")
-        axes[0, 2].grid(True, alpha=0.3)
-
-        axes[1, 0].scatter(idx_arr, ca_run_arr, c=pass_color, s=22, alpha=0.9)
-        if np.isfinite(keepout_threshold):
-            axes[1, 0].axhline(keepout_threshold, linestyle="--", color="k")
-        axes[1, 0].set_title("Closest Approach by Run")
-        axes[1, 0].set_xlabel("run index")
-        axes[1, 0].set_ylabel("km")
-        axes[1, 0].grid(True, alpha=0.3)
-
-        axes[1, 1].scatter(idx_arr, dv_run_arr, c=pass_color, s=22, alpha=0.9)
-        if np.isfinite(max_total_dv_m_s):
-            axes[1, 1].axhline(max_total_dv_m_s, linestyle="--", color="k")
-        axes[1, 1].set_title("Total dV by Run")
-        axes[1, 1].set_xlabel("run index")
-        axes[1, 1].set_ylabel("m/s")
-        axes[1, 1].grid(True, alpha=0.3)
-
-        top_fail_pairs = sorted(failure_mode_counts.items(), key=lambda kv: int(kv[1]), reverse=True)[:6]
-        if top_fail_pairs:
-            labels = [k for k, _ in top_fail_pairs]
-            vals = [int(v) for _, v in top_fail_pairs]
-            axes[1, 2].bar(np.arange(len(vals)), vals, color="tab:red", alpha=0.85)
-            axes[1, 2].set_xticks(np.arange(len(vals)))
-            axes[1, 2].set_xticklabels(labels, rotation=30, ha="right")
-        axes[1, 2].set_title("Failure Mode Counts")
-        axes[1, 2].set_ylabel("count")
-        axes[1, 2].grid(True, alpha=0.3)
-
-        fig.suptitle("Monte Carlo Ops Dashboard", fontsize=12)
-        fig.tight_layout()
-        dashboard_path = outdir / "master_monte_carlo_ops_dashboard.png"
-        if save_ops_dashboard:
-            fig.savefig(str(dashboard_path), dpi=int(cfg.outputs.plots.get("dpi", 150)))
-            agg["artifacts"]["ops_dashboard_png"] = str(dashboard_path)
-        if show_ops_dashboard:
-            plt.show()
-        plt.close(fig)
-
-        if ric_initial_samples:
-            fig_ic, axes_ic = plt.subplots(3, 2, figsize=cap_figsize(12, 9), squeeze=False)
-            scatter_specs = [
-                ("radial_sep_km", "Initial Radial Separation (km)"),
-                ("radial_vel_km_s", "Initial Radial Velocity (km/s)"),
-                ("in_track_sep_km", "Initial In-Track Separation (km)"),
-                ("in_track_vel_km_s", "Initial In-Track Velocity (km/s)"),
-                ("cross_track_sep_km", "Initial Cross-Track Separation (km)"),
-                ("cross_track_vel_km_s", "Initial Cross-Track Velocity (km/s)"),
-            ]
-            axes_ic_flat = [
-                axes_ic[0, 0],
-                axes_ic[0, 1],
-                axes_ic[1, 0],
-                axes_ic[1, 1],
-                axes_ic[2, 0],
-                axes_ic[2, 1],
-            ]
-            for ax, (key, xlabel) in zip(axes_ic_flat, scatter_specs):
-                x = np.array(ric_initial_samples.get(key, []), dtype=float)
-                finite = np.isfinite(x) & np.isfinite(ca_run_arr)
-                ax.scatter(x[finite], ca_run_arr[finite], c=pass_color[finite], s=24, alpha=0.85)
-                if np.isfinite(keepout_threshold):
-                    ax.axhline(keepout_threshold, linestyle="--", color="k")
-                ax.set_xlabel(xlabel)
-                ax.set_ylabel("Closest Approach (km)")
-                ax.grid(True, alpha=0.3)
-            fig_ic.suptitle("Initial Relative RIC State vs Closest Approach", fontsize=12)
-            fig_ic.tight_layout()
-            ic_path = outdir / "master_monte_carlo_initial_relative_state_vs_closest_approach.png"
-            if save_ops_dashboard:
-                fig_ic.savefig(str(ic_path), dpi=int(cfg.outputs.plots.get("dpi", 150)))
-                agg["artifacts"]["initial_relative_state_vs_closest_approach_png"] = str(ic_path)
-            if show_ops_dashboard:
-                plt.show()
-            plt.close(fig_ic)
-
-        rem_obj_ids = [oid for oid in ("chaser", "target") if oid in dv_budget_m_s_by_object]
-        if rem_obj_ids:
-            fig_rem, axes_rem = plt.subplots(2, len(rem_obj_ids), figsize=cap_figsize(5.0 * len(rem_obj_ids), 7.0), squeeze=False)
-            for j, oid in enumerate(rem_obj_ids):
-                rem_arr = np.array(
-                    [
-                        _safe_float(dict(d.get("delta_v_remaining_m_s_by_object", {}) or {}).get(oid))
-                        for d in run_details
-                    ],
-                    dtype=float,
-                )
-                finite_rem = rem_arr[np.isfinite(rem_arr)]
-                bins_rem = int(max(5, min(30, np.sqrt(max(finite_rem.size, 1)))))
-                axes_rem[0, j].hist(finite_rem, bins=bins_rem, alpha=0.85, color="tab:blue")
-                axes_rem[0, j].set_title(f"{oid} dV Remaining (m/s)")
-                axes_rem[0, j].set_ylabel("count")
-                axes_rem[0, j].grid(True, alpha=0.3)
-
-                axes_rem[1, j].scatter(idx_arr, rem_arr, c=pass_color, s=22, alpha=0.9)
-                axes_rem[1, j].set_title(f"{oid} dV Remaining by Run")
-                axes_rem[1, j].set_xlabel("run index")
-                axes_rem[1, j].set_ylabel("m/s")
-                axes_rem[1, j].grid(True, alpha=0.3)
-            fig_rem.suptitle("Monte Carlo Delta-V Remaining", fontsize=12)
-            fig_rem.tight_layout()
-            rem_path = outdir / "master_monte_carlo_delta_v_remaining.png"
-            if save_ops_dashboard:
-                fig_rem.savefig(str(rem_path), dpi=int(cfg.outputs.plots.get("dpi", 150)))
-                agg["artifacts"]["delta_v_remaining_png"] = str(rem_path)
-            if show_ops_dashboard:
-                plt.show()
-            plt.close(fig_rem)
-
-    if bool(cfg.outputs.monte_carlo.get("save_aggregate_summary", True)):
-        summary_path = outdir / "master_monte_carlo_summary.json"
-        commander_json_path = outdir / "master_monte_carlo_commander_brief.json"
-        commander_md_path = outdir / "master_monte_carlo_commander_brief.md"
-        analyst_path = outdir / "master_monte_carlo_analyst_pack.json"
-        write_json(str(summary_path), agg)
-        write_json(str(commander_json_path), commander_brief)
-        _write_commander_brief_markdown(commander_md_path, commander_brief)
-        write_json(str(analyst_path), analyst_pack)
-        agg["artifacts"]["summary_json"] = str(summary_path)
-        agg["artifacts"]["commander_brief_json"] = str(commander_json_path)
-        agg["artifacts"]["commander_brief_md"] = str(commander_md_path)
-        agg["artifacts"]["analyst_pack_json"] = str(analyst_path)
-        if bool(mc_out_cfg.get("save_raw_runs", False)):
-            runs_path = outdir / "master_monte_carlo_run_details.json"
-            write_json(str(runs_path), {"scenario_name": cfg.scenario_name, "run_details": run_details})
-            agg["artifacts"]["run_details_json"] = str(runs_path)
+    agg = write_monte_carlo_report_artifacts(
+        cfg=cfg,
+        outdir=outdir,
+        agg=agg,
+        commander_brief=commander_brief,
+        analyst_pack=analyst_pack,
+        run_details=run_details,
+        mc_out_cfg=mc_out_cfg,
+    )
     return agg

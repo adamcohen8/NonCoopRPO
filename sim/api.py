@@ -2,42 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import tempfile
 from typing import Any
 
 import numpy as np
-import yaml
 
 from sim.config import SimulationScenarioConfig, load_simulation_yaml, scenario_config_from_dict
-from sim.single_run import _SingleRunEngine, _run_single_config
+from sim.execution import create_single_run_engine, run_simulation_scenario
 
 
 def _closest_approach_metric(payload: dict[str, Any]) -> float:
     from sim.master_simulator import _closest_approach_from_run_payload
 
     return _closest_approach_from_run_payload(payload)
-
-
-def _run_single_payload(
-    cfg: SimulationScenarioConfig,
-    *,
-    step_callback: Any | None = None,
-) -> dict[str, Any]:
-    return _run_single_config(cfg, step_callback=step_callback)
-
-
-def _run_legacy_master(config_path: Path) -> dict[str, Any]:
-    from sim.master_simulator import run_master_simulation
-
-    return run_master_simulation(config_path)
-
-
-def _create_single_run_engine(
-    cfg: SimulationScenarioConfig,
-    *,
-    step_callback: Any | None = None,
-) -> Any:
-    return _SingleRunEngine(cfg, step_callback=step_callback)
 
 
 def _as_array_map(value: Any) -> dict[str, np.ndarray]:
@@ -336,7 +312,7 @@ class SimulationSession:
                 if callable(emit):
                     emit(getattr(self._engine, "current_index", 0))
             return
-        self._engine = _create_single_run_engine(self._active_config.to_scenario_config(), step_callback=step_callback)
+        self._engine = create_single_run_engine(self._active_config.to_scenario_config(), step_callback=step_callback)
 
     @staticmethod
     def _is_batch_analysis(config: SimulationScenarioConfig) -> bool:
@@ -344,27 +320,4 @@ class SimulationSession:
 
     @staticmethod
     def _run_batch_analysis(config: SimulationConfig) -> dict[str, Any]:
-        temp_dir = None
-        if config.source_path is not None:
-            temp_dir = str(config.source_path.parent)
-        else:
-            temp_dir = str(Path.cwd())
-        with tempfile.NamedTemporaryFile(
-            suffix=".yaml",
-            mode="w",
-            delete=False,
-            encoding="utf-8",
-            dir=temp_dir,
-        ) as tmp:
-            yaml.safe_dump(config.to_dict(), tmp, sort_keys=False)
-            tmp_path = Path(tmp.name)
-        try:
-            payload = _run_legacy_master(tmp_path)
-            if config.source_path is not None and isinstance(payload, dict):
-                payload["config_path"] = str(config.source_path)
-            return payload
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        return run_simulation_scenario(config.to_scenario_config(), source_path=config.source_path)
